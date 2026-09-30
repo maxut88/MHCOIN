@@ -343,6 +343,21 @@ HTML = r"""<!DOCTYPE html>
   .act-txid { margin-top: 6px; display:flex; align-items:center; gap:8px; }
   .act-txid .mono { font-size: 10px; color: var(--muted); flex:1; min-width:0; }
   .act-list { max-height: 340px; overflow: auto; margin-top: 4px; }
+  .act-full { padding: 10px 12px; }
+  .act-kv { margin-top: 8px; }
+  .act-kv > span {
+    display:block; color: var(--muted); font-size: 10.5px; text-transform: uppercase;
+    letter-spacing: .04em; margin-bottom: 3px;
+  }
+  .act-kv textarea.mono {
+    width: 100%; margin: 0; padding: 6px 8px; font-size: 11px; line-height: 1.35;
+    min-height: 0; resize: vertical; box-sizing: border-box;
+  }
+  .act-kv .act-val {
+    font-size: 12px; word-break: break-all; overflow-wrap: anywhere;
+    user-select: text; -webkit-user-select: text;
+  }
+  .act-actions { display:flex; flex-wrap:wrap; gap:8px; margin-top: 6px; }
   .mine-hero {
     position: relative; overflow: hidden; border-radius: 14px; padding: 16px 14px;
     border: 1px solid rgba(45,212,160,.2);
@@ -764,6 +779,70 @@ function activityCard(t, i, idPrefix){
   </div>`;
 }
 
+function esc(s){
+  return String(s==null?"":s)
+    .replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;")
+    .replace(/"/g,"&quot;");
+}
+
+function historyCard(t, i){
+  const type = t.type || ((t.kind||"").toLowerCase().includes("mining") ? "mined" :
+    ((t.kind||"").startsWith("Sent") ? "sent" : ((t.kind||"").startsWith("Received") ? "received" : "other")));
+  const title = t.title || (type==="mined" ? "Block found" : (t.kind || "Activity"));
+  const sign = t.sign || (type==="sent" ? "-" : "+");
+  const amtRaw = t.amount_mhc || String(t.amount||"").replace(/^[+-]/,"");
+  const amtClass = sign === "-" ? "out" : "in";
+  const amtText = (sign === "-" ? "−" : "+") + amtRaw + " MHC";
+  const height = (t.height!=null && t.height!=="") ? ("Block #" + t.height) : "Mempool (unconfirmed)";
+  const conf = (t.confirmations!=null) ? (t.confirmations + " conf") : "";
+  const meta = [height, conf, t.time_utc || ""].filter(Boolean).join(" · ");
+  const txid = t.txid || "";
+  const fromList = (t.from && t.from.length) ? t.from : [];
+  const toList = (t.to && t.to.length) ? t.to : [];
+  const fromText = fromList.length ? fromList.join("\n") : "—";
+  const toText = toList.length ? toList.join("\n") : "—";
+  const fromRows = Math.min(4, Math.max(1, fromList.length || 1));
+  const toRows = Math.min(4, Math.max(1, toList.length || 1));
+  const fee = t.fee_mhc != null ? (t.fee_mhc + " MHC") : "—";
+  const tid = "htx" + i;
+  const fromLabel = type === "mined" ? "From" : (type === "sent" ? "From (your wallet)" : "From");
+  const toLabel = type === "sent" ? "To (recipient)" : (type === "received" ? "To (your wallet)" : "To");
+  return `<div class="act act-full">
+    <div class="act-top">
+      <div>
+        <p class="act-title">${esc(title)}</p>
+        <p class="act-meta">${esc(meta)}</p>
+      </div>
+      <div class="act-amt ${amtClass}">${amtText}</div>
+    </div>
+    <div class="act-kv">
+      <span>Transaction ID</span>
+      <textarea id="${tid}" rows="2" readonly class="mono">${esc(txid)}</textarea>
+      <div class="act-actions">
+        <button type="button" class="linkish copyTx" data-txid="${esc(txid)}">Copy TXID</button>
+      </div>
+    </div>
+    <div class="act-kv">
+      <span>Time</span>
+      <div class="act-val">${esc(t.time_utc || (txid ? "pending / unknown" : "—"))}</div>
+    </div>
+    <div class="act-kv">
+      <span>${esc(fromLabel)}</span>
+      <textarea rows="${fromRows}" readonly class="mono">${esc(fromText)}</textarea>
+      ${fromList.length ? `<div class="act-actions"><button type="button" class="linkish copyAddr" data-addr="${esc(fromList[0])}">Copy from</button></div>` : ""}
+    </div>
+    <div class="act-kv">
+      <span>${esc(toLabel)}</span>
+      <textarea rows="${toRows}" readonly class="mono">${esc(toText)}</textarea>
+      ${toList.length ? `<div class="act-actions"><button type="button" class="linkish copyAddr" data-addr="${esc(toList[0])}">Copy to</button></div>` : ""}
+    </div>
+    <div class="act-kv">
+      <span>Fee</span>
+      <div class="act-val mono">${esc(fee)}</div>
+    </div>
+  </div>`;
+}
+
 function bindCopyTxButtons(root){
   (root || document).querySelectorAll(".copyTx").forEach(btn => {
     btn.onclick = async () => {
@@ -774,6 +853,18 @@ function bindCopyTxButtons(root){
         ta.value = text; document.body.appendChild(ta); ta.select();
         document.execCommand("copy"); document.body.removeChild(ta);
         flash("TXID copied");
+      }
+    };
+  });
+  (root || document).querySelectorAll(".copyAddr").forEach(btn => {
+    btn.onclick = async () => {
+      const text = btn.getAttribute("data-addr") || "";
+      try { await navigator.clipboard.writeText(text); flash("Address copied"); }
+      catch(e){
+        const ta = document.createElement("textarea");
+        ta.value = text; document.body.appendChild(ta); ta.select();
+        document.execCommand("copy"); document.body.removeChild(ta);
+        flash("Address copied");
       }
     };
   });
@@ -988,9 +1079,9 @@ async function render(pre){
   } else if (active === "History") {
     p.innerHTML = `
       <h2>History</h2>
-      <p class="sub">Blocks found, sends and receives for the active wallet.</p>
+      <p class="sub">Full TXID, time, from/to addresses — like a block explorer for this wallet.</p>
       <p class="mono" style="font-size:12px;word-break:break-all">${s.address||""}</p>
-      <div id="histBox" class="act-list" style="max-height:60vh"><p class="sub">Loading…</p></div>
+      <div id="histBox" class="act-list" style="max-height:62vh;overflow:auto"><p class="sub">Loading…</p></div>
       <div class="row"><button class="sm" id="histReload">Reload</button></div>`;
     const fill = async () => {
       const box = $("histBox");
@@ -1002,7 +1093,7 @@ async function render(pre){
           box.innerHTML = "<p class='sub'>No activity for this wallet yet.</p>";
           return;
         }
-        box.innerHTML = list.map((t,i) => activityCard(t,i,"h")).join("");
+        box.innerHTML = list.map((t,i) => historyCard(t,i)).join("");
         bindCopyTxButtons(box);
       } catch(e) {
         box.innerHTML = "<p class='sub'>Failed to load history: "+(e.message||e)+"</p>";

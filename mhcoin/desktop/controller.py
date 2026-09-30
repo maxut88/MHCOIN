@@ -27,7 +27,7 @@ from mhcoin.desktop.seeds import default_connect_peers
 from mhcoin.mining.block_template import build_block_template
 from mhcoin.node.local_node import LocalNode
 from mhcoin.node.runtime import NodeRuntime
-from mhcoin.wallet.addresses import address_to_pubkey_hash, validate_address
+from mhcoin.wallet.addresses import address_to_pubkey_hash, pubkey_hash_to_address, validate_address
 from mhcoin.wallet.send import format_mhc, parse_amount_mhc
 from mhcoin.wallet.wallet import Wallet, WalletError, WalletPaths
 
@@ -41,6 +41,11 @@ class TxRow:
     detail: str
     height: int | None = None
     txid: str | None = None
+    timestamp: int | None = None  # unix seconds (block time)
+    from_addrs: list[str] = field(default_factory=list)
+    to_addrs: list[str] = field(default_factory=list)
+    fee_sats: int | None = None
+    confirmations: int | None = None
 
 
 @dataclass
@@ -101,6 +106,16 @@ class CoreController:
         txid = r.txid or ""
         short = (txid[:12] + "…" + txid[-10:]) if len(txid) > 28 else txid
         height = r.height
+        ts = r.timestamp
+        time_utc = ""
+        if ts:
+            try:
+                time_utc = time.strftime("%Y-%m-%d %H:%M:%S UTC", time.gmtime(int(ts)))
+            except Exception:
+                time_utc = str(ts)
+        fee = None
+        if r.fee_sats is not None:
+            fee = f"{abs(int(r.fee_sats)) / 1e8:.8f}"
         return {
             "kind": kind,
             "type": type_key,
@@ -111,6 +126,12 @@ class CoreController:
             "height": height,
             "txid": txid,
             "txid_short": short,
+            "timestamp": ts,
+            "time_utc": time_utc,
+            "from": list(r.from_addrs or []),
+            "to": list(r.to_addrs or []),
+            "fee_mhc": fee,
+            "confirmations": r.confirmations,
             "text": (
                 f"{title}  {sign}{amount:.8f} MHC"
                 + (f"  ·  block #{height}" if height is not None else "")
@@ -470,7 +491,7 @@ class CoreController:
                 return []
             tip = node.chain.tip_hash.hex() if node.chain.tip_hash else ""
             mem_n = len(node.mempool)
-            key = (addr, tip, mem_n, bool(full_chain), int(limit))
+            key = ("hist-v2", addr, tip, mem_n, bool(full_chain), int(limit))
             if self._hist_key == key and self._hist_rows:
                 return list(self._hist_rows)[:limit]
 
@@ -491,6 +512,12 @@ class CoreController:
                 except Exception:
                     return False
 
+            def _addr_of_out(out) -> str | None:
+                try:
+                    return pubkey_hash_to_address(out.pubkey_hash(), hrp=self.hrp)
+                except Exception:
+                    return None
+
             def _tx_spends_ours(tx) -> bool:
                 if tx.is_coinbase():
                     return False
@@ -503,16 +530,64 @@ class CoreController:
                         return True
                 return False
 
+            def _from_addrs(tx) -> list[str]:
+                if tx.is_coinbase():
+                    return ["coinbase"]
+                seen: list[str] = []
+                for tin in tx.inputs:
+                    prev = tx_index.get(tin.prev_txid.hex())
+                    if prev is None:
+                        continue
+                    vout = int(tin.prev_vout)
+                    if 0 <= vout < len(prev.outputs):
+                        a = _addr_of_out(prev.outputs[vout])
+                        if a and a not in seen:
+                            seen.append(a)
+                return seen
+
+            def _fee_sats(tx) -> int | None:
+                if tx.is_coinbase():
+                    return 0
+                vin = 0
+                known = True
+                for tin in tx.inputs:
+                    prev = tx_index.get(tin.prev_txid.hex())
+                    if prev is None:
+                        known = False
+                        break
+                    vout = int(tin.prev_vout)
+                    if not (0 <= vout < len(prev.outputs)):
+                        known = False
+                        break
+                    vin += int(prev.outputs[vout].value)
+                if not known:
+                    return None
+                vout = sum(int(o.value) for o in tx.outputs)
+                return max(0, vin - vout)
+
+            def _confs(height: int | None) -> int | None:
+                if height is None:
+                    return 0
+                return max(0, int(h) - int(height) + 1)
+
             mining_rows: list[TxRow] = []
             transfer_rows: list[TxRow] = []
 
             for height, block in reversed(blocks):
+                try:
+                    block_ts = int(block.header.timestamp)
+                except Exception:
+                    block_ts = None
                 for tx in block.transactions:
                     ours = [o for o in tx.outputs if _out_is_ours(o)]
                     foreign = [o for o in tx.outputs if not _out_is_ours(o)]
                     to_us = sum(o.value for o in ours)
                     paid_out = sum(o.value for o in foreign)
                     spends = _tx_spends_ours(tx)
+                    from_a = _from_addrs(tx)
+                    to_ours = [a for a in (_addr_of_out(o) for o in ours) if a]
+                    to_foreign = [a for a in (_addr_of_out(o) for o in foreign) if a]
+                    fee = _fee_sats(tx)
 
                     if tx.is_coinbase():
                         if to_us > 0:
@@ -523,6 +598,11 @@ class CoreController:
                                     detail=f"block {height}",
                                     height=height,
                                     txid=tx.txid_hex(),
+                                    timestamp=block_ts,
+                                    from_addrs=["coinbase"],
+                                    to_addrs=to_ours,
+                                    fee_sats=0,
+                                    confirmations=_confs(height),
                                 )
                             )
                         continue
@@ -536,6 +616,11 @@ class CoreController:
                                 detail=tx.txid_hex(),
                                 height=height,
                                 txid=tx.txid_hex(),
+                                timestamp=block_ts,
+                                from_addrs=from_a or [addr],
+                                to_addrs=to_foreign,
+                                fee_sats=fee,
+                                confirmations=_confs(height),
                             )
                         )
                     elif to_us > 0:
@@ -546,6 +631,11 @@ class CoreController:
                                 detail=tx.txid_hex(),
                                 height=height,
                                 txid=tx.txid_hex(),
+                                timestamp=block_ts,
+                                from_addrs=from_a,
+                                to_addrs=to_ours,
+                                fee_sats=fee,
+                                confirmations=_confs(height),
                             )
                         )
 
@@ -561,6 +651,10 @@ class CoreController:
                 txid = tx.txid_hex()
                 if any(r.txid == txid for r in transfer_rows):
                     continue
+                from_a = _from_addrs(tx)
+                to_ours = [a for a in (_addr_of_out(o) for o in ours) if a]
+                to_foreign = [a for a in (_addr_of_out(o) for o in foreign) if a]
+                fee = _fee_sats(tx)
                 if spends:
                     pending.append(
                         TxRow(
@@ -569,6 +663,11 @@ class CoreController:
                             detail=txid,
                             height=None,
                             txid=txid,
+                            timestamp=None,
+                            from_addrs=from_a or [addr],
+                            to_addrs=to_foreign,
+                            fee_sats=fee,
+                            confirmations=0,
                         )
                     )
                 elif to_us > 0:
@@ -579,6 +678,11 @@ class CoreController:
                             detail=txid,
                             height=None,
                             txid=txid,
+                            timestamp=None,
+                            from_addrs=from_a,
+                            to_addrs=to_ours,
+                            fee_sats=fee,
+                            confirmations=0,
                         )
                     )
 
@@ -692,6 +796,11 @@ class CoreController:
                                     detail=f"block {connected}",
                                     height=int(connected),
                                     txid=cb.txid_hex(),
+                                    timestamp=int(block.header.timestamp),
+                                    from_addrs=["coinbase"],
+                                    to_addrs=[reward_addr],
+                                    fee_sats=0,
+                                    confirmations=1,
                                 )
                             )
                         except Exception:
