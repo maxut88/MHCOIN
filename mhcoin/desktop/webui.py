@@ -76,6 +76,55 @@ def _app_icon_path() -> str | None:
 _GUI: dict[str, Any] = {"window": None, "allow_quit": False, "state": None}
 
 
+class _NativeBridge:
+    """JS ↔ Python bridge for native Save As (blob downloads do not work in pywebview)."""
+
+    def save_text_file(self, filename: str, content: str) -> dict[str, Any]:
+        import webview  # type: ignore
+
+        window = _GUI.get("window")
+        if window is None:
+            wins = getattr(webview, "windows", None) or []
+            window = wins[0] if wins else None
+        if window is None:
+            return {"ok": False, "error": "no window"}
+
+        name = (filename or "MHCOIN-save.txt").replace("/", "_").replace("\\", "_")
+        # Strip characters illegal on Windows / some save dialogs.
+        for ch in '<>:"|?*':
+            name = name.replace(ch, "_")
+        start_dir = str(Path.home() / "Downloads")
+        if not Path(start_dir).is_dir():
+            start_dir = str(Path.home())
+
+        save_flag = getattr(getattr(webview, "FileDialog", None), "SAVE", None)
+        if save_flag is None:
+            save_flag = getattr(webview, "SAVE_DIALOG", 20)
+
+        try:
+            result = window.create_file_dialog(
+                save_flag,
+                directory=start_dir,
+                save_filename=name,
+                file_types=("JSON (*.json)", "Text (*.txt)", "All files (*.*)"),
+            )
+        except Exception as e:  # noqa: BLE001
+            return {"ok": False, "error": str(e)}
+
+        if not result:
+            return {"ok": False, "cancelled": True}
+        path = result[0] if isinstance(result, (list, tuple)) else result
+        try:
+            Path(path).write_text(content if content is not None else "", encoding="utf-8")
+            try:
+                Path(path).chmod(0o600)
+            except OSError:
+                pass
+        except Exception as e:  # noqa: BLE001
+            return {"ok": False, "error": str(e)}
+        return {"ok": True, "path": str(path)}
+
+
 def _open_native_window(url: str, state: Any | None = None) -> tuple[bool, str]:
     """Open a real desktop window (no browser chrome).
 
@@ -93,6 +142,11 @@ def _open_native_window(url: str, state: Any | None = None) -> tuple[bool, str]:
         icon = _app_icon_path()
         _GUI["allow_quit"] = False
         _GUI["state"] = state
+        try:
+            webview.settings["ALLOW_DOWNLOADS"] = True
+        except Exception:
+            pass
+        bridge = _NativeBridge()
         window = webview.create_window(
             "MHCOIN Core",
             url,
@@ -101,6 +155,7 @@ def _open_native_window(url: str, state: Any | None = None) -> tuple[bool, str]:
             min_size=(480, 560),
             confirm_close=False,
             background_color="#0c1210",
+            js_api=bridge,
         )
         _GUI["window"] = window
 
@@ -524,10 +579,13 @@ function showModal({ title, message, mode, okLabel, cancelLabel, placeholder, co
       }
     };
     $("modalCopyBtn").onclick = () => { copyAll(); };
-    $("modalSaveBtn").onclick = () => {
+    $("modalSaveBtn").onclick = async () => {
       const name = saveName || ("MHCOIN-wallet-details-" + Date.now() + ".txt");
-      downloadTextFile(name, copyArea.value || "", "text/plain;charset=utf-8");
-      flash("Saved: " + name);
+      const r = await downloadTextFile(name, copyArea.value || "", "text/plain;charset=utf-8");
+      if (r && r.cancelled) flash("Save cancelled", false);
+      else if (r && r.path) flash("Saved: " + r.path);
+      else if (r && r.ok) flash("Saved: " + name);
+      else flash("Save failed", false);
     };
     $("modalOk").onclick = () => finish(needInput ? (input.value || "") : true);
     cancelBtn.onclick = () => finish(needInput ? "" : false);
@@ -600,23 +658,43 @@ function shortTx(txid){
   return txid.slice(0,12) + "…" + txid.slice(-10);
 }
 
-function downloadTextFile(filename, text, mime){
-  const blob = new Blob([text], {type: mime || "application/octet-stream;charset=utf-8"});
-  const url = URL.createObjectURL(blob);
-  const a = document.createElement("a");
-  a.href = url;
-  a.download = filename || "MHCOIN-save.txt";
-  document.body.appendChild(a);
-  a.click();
-  setTimeout(() => { URL.revokeObjectURL(url); a.remove(); }, 500);
+async function downloadTextFile(filename, text, mime){
+  // pywebview ignores <a download> — use native Save As via Python bridge.
+  try {
+    if (window.pywebview && window.pywebview.api && window.pywebview.api.save_text_file){
+      const r = await window.pywebview.api.save_text_file(filename || "MHCOIN-save.txt", text || "");
+      if (r && r.cancelled) return {ok:false, cancelled:true};
+      if (r && r.ok) return {ok:true, path:r.path || null};
+      return {ok:false, error:(r && r.error) || "save failed"};
+    }
+  } catch(e){}
+  // Browser fallback
+  try {
+    const blob = new Blob([text], {type: mime || "application/octet-stream;charset=utf-8"});
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = filename || "MHCOIN-save.txt";
+    document.body.appendChild(a);
+    a.click();
+    setTimeout(() => { URL.revokeObjectURL(url); a.remove(); }, 500);
+    return {ok:true, path:null};
+  } catch(e){
+    return {ok:false, error:String(e)};
+  }
 }
 
 async function doWalletBackup(){
   const j = await api("wallet/backup", {});
-  downloadTextFile(j.filename, j.content);
+  const dl = await downloadTextFile(j.filename, j.content);
+  let line1;
+  if (dl && dl.path) line1 = "1) Saved to:\n" + dl.path;
+  else if (dl && dl.cancelled) line1 = "1) Save cancelled — choose a location next time (Downloads dialog).";
+  else if (dl && dl.ok) line1 = "1) Download started: " + j.filename;
+  else line1 = "1) Could not open Save dialog — use the copy in backups/ below.\n" + ((dl && dl.error) || "");
   await alertBox(
     "Wallet backup ready.\n\n" +
-    "1) File downloaded: " + j.filename + "\n" +
+    line1 + "\n\n" +
     "2) Also saved on disk:\n" + j.saved_path + "\n\n" +
     "3) Keep your wallet PASSWORD separately — it is NOT in the file.\n\n" +
     "Restore later: copy the .json back as wallet.json in your data folder, then unlock with the same password."
