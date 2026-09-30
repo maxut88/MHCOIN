@@ -224,7 +224,7 @@ HTML = r"""<!DOCTYPE html>
       linear-gradient(180deg, var(--bg0), var(--bg1) 40%, #0e1512);
     min-height: 100vh;
   }
-  .wrap { max-width: 420px; margin: 0 auto; padding: 18px 14px 36px; }
+  .wrap { max-width: 680px; margin: 0 auto; padding: 18px 14px 36px; }
   .brand { display:flex; align-items:center; gap:10px; margin-bottom: 6px; animation: rise .45s ease both; }
   .logo {
     --logo-size: 34px;
@@ -298,8 +298,16 @@ HTML = r"""<!DOCTYPE html>
   button.sm { padding: 4px 8px; font-size: 11px; border-radius: 6px; font-weight: 600; }
   button.linkish { background: transparent; border: none; color: var(--accent); padding: 0; font-size: 11px; font-weight: 650; }
   button:disabled { opacity: .45; cursor:not-allowed; }
-  .tabs { display:flex; flex-wrap:wrap; gap:4px; margin-bottom:10px; }
-  .tab { padding: 5px 8px; font-size: 12px; border-radius: 999px; }
+  .tabs {
+    display:flex; flex-wrap:nowrap; align-items:center; gap:3px;
+    margin-bottom:10px; overflow-x:auto; -webkit-overflow-scrolling:touch;
+    scrollbar-width: none;
+  }
+  .tabs::-webkit-scrollbar { display:none; }
+  .tab {
+    padding: 5px 7px; font-size: 11px; border-radius: 999px;
+    white-space: nowrap; flex: 0 0 auto;
+  }
   .tab.active { background: rgba(45,212,160,.16); color: var(--accent); border-color: rgba(45,212,160,.35); }
   input, textarea, select {
     width:100%; padding:8px 10px; font-size:12.5px; border:1px solid var(--line); border-radius:8px;
