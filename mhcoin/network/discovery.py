@@ -1,4 +1,8 @@
-"""Stage 7 — ADDR/GETADDR gossip, outbound selection, reconnect (no DNS seeds)."""
+"""Stage 7 — ADDR/GETADDR gossip, outbound selection, reconnect.
+
+Bootstrap seeds (hardcoded / DNS) are handled in mhcoin.network.seeds; this
+module maintains the mesh after first contact (Bitcoin-style ADDR gossip).
+"""
 
 from __future__ import annotations
 
@@ -36,13 +40,7 @@ logger = logging.getLogger("mhcoin.p2p")
 
 
 class DiscoveryManager:
-    """
-    Peer address gossip + outbound maintenance.
-
-    - No DNS seeds / central directories.
-    - Addresses from --connect (manual) and peer ADDR messages only.
-    - All peer-provided hosts are untrusted input (bounded decode + hygiene).
-    """
+    """Peer address gossip + outbound maintenance (post-bootstrap mesh)."""
 
     def __init__(
         self,

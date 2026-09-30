@@ -54,14 +54,14 @@ mhcoin wallet balance
 ```bash
 mhcoin genesis verify --network mainnet
 
-mhcoin node start \
-  --network mainnet \
-  --host 0.0.0.0 \
-  --connect 176.38.3.168:8333
+mhcoin node start --network mainnet
+# listens on 0.0.0.0:8333 and dials built-in seeds (Bitcoin-style bootstrap)
 ```
 
 Wallet data defaults to `~/.mhcoin/mainnet/`.
 
+Peer discovery: hardcoded/DNS seeds for first contact, then ADDR gossip
+(`docs/DISCOVERY.md`). No central block server.
 ## Desktop
 
 ```bash

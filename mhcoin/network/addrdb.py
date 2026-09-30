@@ -1,4 +1,4 @@
-"""Persistent address book for Stage 7 peer discovery (no DNS seeds)."""
+"""Persistent address book for peer discovery (Bitcoin peers.dat analogue)."""
 
 from __future__ import annotations
 

@@ -716,7 +716,7 @@ class CoreController:
 
     def start_node(
         self,
-        host: str = "127.0.0.1",
+        host: str = "0.0.0.0",
         port: int | None = None,
         connect: list[str] | None = None,
     ) -> None:
@@ -725,11 +725,10 @@ class CoreController:
         if self._mining:
             raise RuntimeError("Stop mining before starting the P2P node")
         params = get_network_params(self.network)
-        # Desktop is a wallet client: outbound to seeds only (no :8333 listen).
         listen = port or params.default_port
         peers = list(connect) if connect is not None else default_connect_peers(self.network)
-        # Hold I/O lock across close→open so status/history cannot reopen LocalNode
-        # on the same sqlite files while NodeRuntime is constructing.
+        # Full-node style (Bitcoin Core): listen for inbound + dial seeds/gossip.
+        # NAT users still work outbound-only if inbound is filtered by the router.
         with self._io:
             node = self._get_local()
             if node.chain.height < 0:
@@ -741,7 +740,7 @@ class CoreController:
                 host=host,
                 port=listen,
                 connect=peers,
-                enable_listen=False,
+                enable_listen=True,
             )
             self._node = rt
 

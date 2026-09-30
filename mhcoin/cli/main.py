@@ -534,11 +534,16 @@ def node() -> None:
 
 @node.command("start")
 @click.option("--network", default="localnet", show_default=True)
-@click.option("--host", default="127.0.0.1", show_default=True)
+@click.option("--host", default="0.0.0.0", show_default=True, help="Listen bind address")
 @click.option("--port", default=None, type=int, help="Listen port (default: network default)")
 @click.option("--max-peers", default=32, type=int)
 @click.option("--data-dir", default=None, type=click.Path())
-@click.option("--connect", multiple=True, help="host:port to dial (repeatable)")
+@click.option(
+    "--connect",
+    multiple=True,
+    help="host:port to dial (repeatable). If omitted on mainnet, uses built-in seeds.",
+)
+@click.option("--no-seed", is_flag=True, help="Do not auto-dial default seeds when --connect is empty")
 def node_start(
     network: str,
     host: str,
@@ -546,15 +551,19 @@ def node_start(
     max_peers: int,
     data_dir: str | None,
     connect: tuple[str, ...],
+    no_seed: bool,
 ) -> None:
     """Start P2P listener (foreground). Use a separate --data-dir per node.
 
     Does not invent genesis: installs the frozen genesis for --network on first start.
     Default network is localnet (never auto-selects mainnet).
+
+    Bootstrap is Bitcoin-style: optional seeds for first contact, then ADDR gossip.
     """
     import logging
 
     from mhcoin.consensus.params import PROTOCOL_VERSION, get_network_params
+    from mhcoin.network.seeds import default_connect_peers
 
     logging.basicConfig(level=logging.INFO, format="[%(levelname)s] %(message)s")
     from mhcoin.node.runtime import NodeRuntime
@@ -565,13 +574,19 @@ def node_start(
         dpath = Path(data_dir).expanduser().resolve()
     else:
         dpath = resolve_data_dir(params.name) / f"node-{listen_port}"
+
+    dial = list(connect)
+    if not dial and not no_seed:
+        dial = default_connect_peers(params.name)
+
     rt = NodeRuntime(
         data_dir=dpath,
         network=params.name,
         host=host,
         port=listen_port,
         max_peers=max_peers,
-        connect=list(connect),
+        connect=dial,
+        enable_listen=True,
     )
     click.echo(f"Starting MHCOIN node on {host}:{listen_port} ({params.name})")
     click.echo(f"Data dir: {dpath}")

@@ -6,6 +6,7 @@
 | [GENESIS.md](GENESIS.md) | Frozen genesis |
 | [WALLET.md](WALLET.md) | Wallet & addresses |
 | [NODE.md](NODE.md) | Full node |
+| [DISCOVERY.md](DISCOVERY.md) | Peer bootstrap (Bitcoin-style) |
 | [NETWORK_PROTOCOL.md](NETWORK_PROTOCOL.md) | P2P |
 | [TRANSACTIONS.md](TRANSACTIONS.md) | Transactions |
 | [DESKTOP.md](DESKTOP.md) | Desktop app |

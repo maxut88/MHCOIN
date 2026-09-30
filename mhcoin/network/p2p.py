@@ -58,7 +58,7 @@ class P2PConfig:
     outbound_target: int = DEFAULT_OUTBOUND_TARGET
     reconnect_interval: float = DEFAULT_RECONNECT_INTERVAL
     ban_threshold: int = BAN_SCORE_THRESHOLD
-    # Seeded connect targets (manual); gossip fills the rest — no DNS seeds
+    # Seeded connect targets (manual / DNS / hardcoded); gossip fills the rest
     connect_seeds: list[str] = field(default_factory=list)
     # Desktop wallets: outbound-only (no listen) avoids port clashes / inbound bans.
     enable_listen: bool = True
