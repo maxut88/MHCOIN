@@ -98,12 +98,15 @@ class NodeRuntime:
         self.p2p.start()
         self._running = True
         for target in self.connect_targets:
+            if not self._running:
+                break
             host, _, port_s = target.rpartition(":")
             try:
                 self.p2p.connect_to_peer(host, int(port_s))
             except Exception as e:
                 logger.warning("connect %s failed: %s", target, e)
-        self._write_status()
+        if self._running:
+            self._write_status()
         if not blocking:
             return
         # signal.signal only works in the main thread (Desktop starts node in a worker).
@@ -184,32 +187,39 @@ class NodeRuntime:
         self.pid_path.write_text(str(os.getpid()), encoding="utf-8")
 
     def _write_status(self) -> None:
-        tip = self.chain.tip_hash.hex() if self.chain.tip_hash else None
-        info = self.chain.info()
-        params = get_network_params(self.network)
-        status = {
-            "network": self.network,
-            "listen": f"{self.host}:{self.port}",
-            "protocol": PROTOCOL_VERSION,
-            "software_version": SOFTWARE_VERSION,
-            "magic": params.magic.hex(),
-            "genesis_hash": params.genesis_hash_hex,
-            "peers": self.p2p.get_peers(),
-            "peer_count": self.p2p.peer_count(),
-            "height": self.chain.height,
-            "tip": tip,
-            "chain_work": self.chain.get_chain_work() if self.chain.height >= 0 else 0,
-            "known_blocks": info.get("known_blocks"),
-            "side_chains": info.get("side_chains"),
-            "utxo_fingerprint": info.get("utxo_fingerprint"),
-            "mempool_size": len(self.mempool),
-            "sync": self.sync.status(),
-            "p2p": self.p2p.status(),
-            "known_addrs": self.p2p.addrdb.count(),
-            "bans": len(self.p2p.bans.list_bans()),
-            "pid": os.getpid(),
-        }
-        self.status_path.write_text(json.dumps(status, indent=2), encoding="utf-8")
+        if not self._running or getattr(self, "_stopped", False):
+            return
+        if getattr(self.chain, "_closed", False) or getattr(self.chain, "_db", None) is None:
+            return
+        try:
+            tip = self.chain.tip_hash.hex() if self.chain.tip_hash else None
+            info = self.chain.info()
+            params = get_network_params(self.network)
+            status = {
+                "network": self.network,
+                "listen": f"{self.host}:{self.port}",
+                "protocol": PROTOCOL_VERSION,
+                "software_version": SOFTWARE_VERSION,
+                "magic": params.magic.hex(),
+                "genesis_hash": params.genesis_hash_hex,
+                "peers": self.p2p.get_peers(),
+                "peer_count": self.p2p.peer_count(),
+                "height": self.chain.height,
+                "tip": tip,
+                "chain_work": self.chain.get_chain_work() if self.chain.height >= 0 else 0,
+                "known_blocks": info.get("known_blocks"),
+                "side_chains": info.get("side_chains"),
+                "utxo_fingerprint": info.get("utxo_fingerprint"),
+                "mempool_size": len(self.mempool),
+                "sync": self.sync.status(),
+                "p2p": self.p2p.status(),
+                "known_addrs": self.p2p.addrdb.count(),
+                "bans": len(self.p2p.bans.list_bans()),
+                "pid": os.getpid(),
+            }
+            self.status_path.write_text(json.dumps(status, indent=2), encoding="utf-8")
+        except Exception:
+            logger.debug("status write skipped (node shutting down)", exc_info=True)
 
     @staticmethod
     def read_status(data_dir: Path) -> dict | None:

@@ -327,10 +327,16 @@ class Peer:
                 self.relay.sync.on_headers(self, msg.payload)
         elif cmd == "GETADDR":
             if self.discovery is not None:
-                self.discovery.on_getaddr(self, msg.payload)
+                try:
+                    self.discovery.on_getaddr(self, msg.payload)
+                except Exception:
+                    logger.debug("GETADDR handler failed from %s", self.addr, exc_info=True)
         elif cmd == "ADDR":
             if self.discovery is not None:
-                self.discovery.on_addr(self, msg.payload)
+                try:
+                    self.discovery.on_addr(self, msg.payload)
+                except Exception:
+                    logger.debug("ADDR handler failed from %s", self.addr, exc_info=True)
         else:
             logger.debug("ignored command %s from %s", cmd, self.addr)
 

@@ -114,6 +114,8 @@ class DiscoveryManager:
         self._maybe_push_addr(peer)
 
     def on_getaddr(self, peer: Peer, payload: bytes) -> None:
+        if not getattr(self.manager, "_alive", False):
+            return
         try:
             decode_getaddr(payload)
         except ProtocolError as e:
@@ -121,15 +123,15 @@ class DiscoveryManager:
             self.bans.misbehavior(peer.host, MISBEHAVIOR_PROTOCOL, reason="bad GETADDR")
             peer.close()
             return
-        addrs = self._select_addrs_for_peer(peer, limit=MAX_GETADDR_RESPONSE)
         try:
+            addrs = self._select_addrs_for_peer(peer, limit=MAX_GETADDR_RESPONSE)
             peer.send_raw("ADDR", encode_addr(addrs))
             logger.info("ADDR sent to %s count=%s", peer.addr, len(addrs))
         except Exception:
             logger.debug("ADDR reply failed", exc_info=True)
 
     def on_addr(self, peer: Peer, payload: bytes) -> None:
-        if not self.manager._alive:
+        if not getattr(self.manager, "_alive", False):
             return
         try:
             addrs = decode_addr(payload)
@@ -163,6 +165,8 @@ class DiscoveryManager:
 
     def tick(self) -> None:
         """Periodic reconnect + occasional address share."""
+        if not getattr(self.manager, "_alive", False):
+            return
         now = time.time()
         if now - self._last_reconnect >= self.reconnect_interval:
             self._last_reconnect = now
@@ -203,7 +207,12 @@ class DiscoveryManager:
                 logger.info("Outbound connect failed %s:%s: %s", rec.host, rec.port, e)
 
     def _select_addrs_for_peer(self, peer: Peer, *, limit: int) -> list[NetAddress]:
-        records = self.addrdb.list_recent(limit=limit * 2)
+        if not getattr(self.manager, "_alive", False):
+            return []
+        try:
+            records = self.addrdb.list_recent(limit=limit * 2)
+        except Exception:
+            return []
         out: list[NetAddress] = []
         # Include our listen address so peers can dial us back (if not 0.0.0.0)
         advertise_host = self.our_host

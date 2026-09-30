@@ -350,12 +350,19 @@ class Blockchain:
 
     def known_block_count(self) -> int:
         with self._lock:
-            row = self._db.execute("SELECT COUNT(*) FROM block_index").fetchone()
-            return int(row[0]) if row else 0
+            if getattr(self, "_closed", False) or self._db is None:
+                return 0
+            try:
+                row = self._db.execute("SELECT COUNT(*) FROM block_index").fetchone()
+                return int(row[0]) if row else 0
+            except Exception:
+                return 0
 
     def side_chain_tips(self) -> list[BlockIndexEntry]:
         """Tips of stored side branches (valid blocks not on active chain)."""
         with self._lock:
+            if getattr(self, "_closed", False) or self._db is None:
+                return []
             rows = self._db.execute(
                 "SELECT block_hash, prev_hash, height, chain_work, status, bits, timestamp "
                 "FROM block_index WHERE status=?",
@@ -1125,6 +1132,20 @@ class Blockchain:
         return out
 
     def info(self) -> dict:
+        if getattr(self, "_closed", False) or self._db is None:
+            return {
+                "height": self._height,
+                "tip": self._tip_hash.hex() if self._tip_hash else None,
+                "utxo_count": 0,
+                "bits": REGTEST_NBITS,
+                "circulating_supply": 0,
+                "issued_supply": 0,
+                "chain_work": 0,
+                "known_blocks": 0,
+                "side_chains": 0,
+                "orphans": 0,
+                "utxo_fingerprint": None,
+            }
         circulating = self.circulating_supply() if self._height >= 0 else 0
         issued = self.issued_supply() if self._height >= 0 else 0
         return {

@@ -159,6 +159,7 @@ class P2PManager:
         self._ping_thread.start()
 
     def stop(self) -> None:
+        # Mark dead first so peer/discovery threads stop touching AddrDB.
         self._alive = False
         if self._server:
             self._server.stop()
@@ -167,9 +168,12 @@ class P2PManager:
             peers = list(self._peers.values())
             self._peers.clear()
         for p in peers:
-            p.close()
-        # Allow peer reader threads to finish before closing AddrDB
-        time.sleep(0.05)
+            try:
+                p.close()
+            except Exception:
+                pass
+        # Let peer reader threads exit before closing AddrDB.
+        time.sleep(0.35)
         try:
             self.addrdb.close()
         except Exception:

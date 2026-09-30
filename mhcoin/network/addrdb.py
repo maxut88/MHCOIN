@@ -81,11 +81,14 @@ class AddrDB:
         with self._lock:
             if self._closed:
                 return None
-            row = self._db.execute(
-                "SELECT host, port, services, last_seen, last_try, attempts, source "
-                "FROM addrs WHERE host=? AND port=?",
-                (host, port),
-            ).fetchone()
+            try:
+                row = self._db.execute(
+                    "SELECT host, port, services, last_seen, last_try, attempts, source "
+                    "FROM addrs WHERE host=? AND port=?",
+                    (host, port),
+                ).fetchone()
+            except sqlite3.ProgrammingError:
+                return None
             if not row:
                 return None
             return AddrRecord(*row)
@@ -145,33 +148,53 @@ class AddrDB:
 
     def mark_attempt(self, host: str, port: int) -> None:
         with self._lock:
-            self._db.execute(
-                "UPDATE addrs SET last_try=?, attempts=attempts+1 WHERE host=? AND port=?",
-                (int(time.time()), host, port),
-            )
-            self._db.commit()
+            if self._closed:
+                return
+            try:
+                self._db.execute(
+                    "UPDATE addrs SET last_try=?, attempts=attempts+1 WHERE host=? AND port=?",
+                    (int(time.time()), host, port),
+                )
+                self._db.commit()
+            except sqlite3.ProgrammingError:
+                return
 
     def mark_success(self, host: str, port: int) -> None:
         with self._lock:
-            self._db.execute(
-                "UPDATE addrs SET last_seen=?, attempts=0 WHERE host=? AND port=?",
-                (int(time.time()), host, port),
-            )
-            self._db.commit()
+            if self._closed:
+                return
+            try:
+                self._db.execute(
+                    "UPDATE addrs SET last_seen=?, attempts=0 WHERE host=? AND port=?",
+                    (int(time.time()), host, port),
+                )
+                self._db.commit()
+            except sqlite3.ProgrammingError:
+                return
 
     def remove(self, host: str, port: int) -> None:
         with self._lock:
-            self._db.execute("DELETE FROM addrs WHERE host=? AND port=?", (host, port))
-            self._db.commit()
+            if self._closed:
+                return
+            try:
+                self._db.execute("DELETE FROM addrs WHERE host=? AND port=?", (host, port))
+                self._db.commit()
+            except sqlite3.ProgrammingError:
+                return
 
     def list_recent(self, limit: int = 32) -> list[AddrRecord]:
         with self._lock:
-            rows = self._db.execute(
-                "SELECT host, port, services, last_seen, last_try, attempts, source "
-                "FROM addrs ORDER BY last_seen DESC LIMIT ?",
-                (limit,),
-            ).fetchall()
-            return [AddrRecord(*r) for r in rows]
+            if self._closed:
+                return []
+            try:
+                rows = self._db.execute(
+                    "SELECT host, port, services, last_seen, last_try, attempts, source "
+                    "FROM addrs ORDER BY last_seen DESC LIMIT ?",
+                    (limit,),
+                ).fetchall()
+                return [AddrRecord(*r) for r in rows]
+            except sqlite3.ProgrammingError:
+                return []
 
     def candidates_for_outbound(
         self,
@@ -184,10 +207,15 @@ class AddrDB:
         now = time.time()
         out: list[AddrRecord] = []
         with self._lock:
-            rows = self._db.execute(
-                "SELECT host, port, services, last_seen, last_try, attempts, source "
-                "FROM addrs ORDER BY attempts ASC, last_seen DESC"
-            ).fetchall()
+            if self._closed:
+                return []
+            try:
+                rows = self._db.execute(
+                    "SELECT host, port, services, last_seen, last_try, attempts, source "
+                    "FROM addrs ORDER BY attempts ASC, last_seen DESC"
+                ).fetchall()
+            except sqlite3.ProgrammingError:
+                return []
         for r in rows:
             rec = AddrRecord(*r)
             if rec.key in exclude:
