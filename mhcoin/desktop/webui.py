@@ -124,18 +124,21 @@ def _open_native_window(url: str, state: Any | None = None) -> tuple[bool, str]:
                 )
             except Exception:
                 pass
+            # Cancel OS close so the process stays in webview.start().
             return False
 
         try:
             window.events.closing += _on_closing
         except Exception:
-            # Older pywebview: best-effort; close may still quit.
+            # Older pywebview: run loop will reopen if close still destroys.
             pass
 
         if icon:
             webview.start(icon=icon)
         else:
             webview.start()
+        if _GUI.get("allow_quit"):
+            return True, "quit"
         return True, "native window closed"
     except Exception as e:  # noqa: BLE001 — surface any GUI backend failure
         return False, f"pywebview failed: {type(e).__name__}: {e}"
@@ -1336,21 +1339,30 @@ def run_web_desktop(network: str | None = None, port: int | None = None) -> None
     server_thread.start()
 
     try:
-        ok, detail = _open_native_window(url, state=state)
-        if ok:
-            print(f"Shell: native window ({detail})")
-        else:
-            print(f"Shell: browser fallback — {detail}")
-            if not frozen:
-                print("Fix native window:  pip install 'pywebview>=5.0'")
-                print("Then relaunch. Force browser: MHCOIN_DESKTOP_BROWSER=1")
-                print("Dev mode — Press Ctrl+C to stop.")
-            threading.Timer(0.35, lambda: webbrowser.open(url)).start()
+        while True:
+            ok, detail = _open_native_window(url, state=state)
+            if not ok:
+                print(f"Shell: browser fallback — {detail}")
+                if not frozen:
+                    print("Fix native window:  pip install 'pywebview>=5.0'")
+                    print("Then relaunch. Force browser: MHCOIN_DESKTOP_BROWSER=1")
+                    print("Dev mode — Press Ctrl+C to stop.")
+                threading.Timer(0.35, lambda: webbrowser.open(url)).start()
+                try:
+                    server_thread.join()
+                except KeyboardInterrupt:
+                    print("\nStopping…")
+                break
+            if detail == "quit" or _GUI.get("allow_quit"):
+                print("Shell: native window (quit)")
+                break
+            # X closed the window despite cancel — lock and reopen (do not quit).
             try:
-                # keep process alive while browser is used
-                server_thread.join()
-            except KeyboardInterrupt:
-                print("\nStopping…")
+                state.ctrl.lock_session()
+            except Exception:
+                pass
+            print("Shell: window closed — wallet locked, reopening…")
+            _GUI["allow_quit"] = False
     finally:
         try:
             httpd.shutdown()
