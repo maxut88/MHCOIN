@@ -308,11 +308,16 @@ class Blockchain:
 
     def get_index(self, block_hash: bytes) -> BlockIndexEntry | None:
         with self._lock:
-            row = self._db.execute(
-                "SELECT block_hash, prev_hash, height, chain_work, status, bits, timestamp "
-                "FROM block_index WHERE block_hash=?",
-                (block_hash,),
-            ).fetchone()
+            if getattr(self, "_closed", False) or self._db is None:
+                return None
+            try:
+                row = self._db.execute(
+                    "SELECT block_hash, prev_hash, height, chain_work, status, bits, timestamp "
+                    "FROM block_index WHERE block_hash=?",
+                    (block_hash,),
+                ).fetchone()
+            except Exception:
+                return None
             if not row:
                 return None
             return BlockIndexEntry(
@@ -327,19 +332,29 @@ class Blockchain:
 
     def get_block_by_height(self, height: int) -> Block | None:
         with self._lock:
-            row = self._db.execute(
-                "SELECT raw FROM block_index WHERE height=? AND status=?",
-                (height, STATUS_ACTIVE),
-            ).fetchone()
+            if getattr(self, "_closed", False) or self._db is None:
+                return None
+            try:
+                row = self._db.execute(
+                    "SELECT raw FROM block_index WHERE height=? AND status=?",
+                    (height, STATUS_ACTIVE),
+                ).fetchone()
+            except Exception:
+                return None
             if not row:
                 return None
             return Block.deserialize(row[0])
 
     def get_block_by_hash(self, block_hash: bytes) -> Block | None:
         with self._lock:
-            row = self._db.execute(
-                "SELECT raw FROM block_index WHERE block_hash=?", (block_hash,)
-            ).fetchone()
+            if getattr(self, "_closed", False) or self._db is None:
+                return None
+            try:
+                row = self._db.execute(
+                    "SELECT raw FROM block_index WHERE block_hash=?", (block_hash,)
+                ).fetchone()
+            except Exception:
+                return None
             if not row:
                 return None
             return Block.deserialize(row[0])

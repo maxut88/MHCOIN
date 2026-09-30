@@ -331,6 +331,8 @@ class TxRelay:
             logger.exception("GETDATA send failed to %s", peer.addr)
 
     def on_getdata(self, peer: Peer, payload: bytes) -> None:
+        if self.chain is not None and getattr(self.chain, "_closed", False):
+            return
         if not self._getdata_rate.allow(peer.addr):
             logger.info("GETDATA rate-limited from %s", peer.addr)
             self._penalize(peer, MISBEHAVIOR_FLOOD, "GETDATA flood")
@@ -355,9 +357,13 @@ class TxRelay:
                 except ProtocolError as e:
                     logger.warning("cannot encode TX %s: %s", hx, e)
             elif inv.type == INV_TYPE_BLOCK:
-                if self.chain is None:
+                if self.chain is None or getattr(self.chain, "_closed", False):
                     continue
-                block = self.chain.get_block_by_hash(inv.hash)
+                try:
+                    block = self.chain.get_block_by_hash(inv.hash)
+                except Exception:
+                    logger.debug("GETDATA block read failed hash=%s", hx, exc_info=True)
+                    continue
                 if block is None:
                     logger.debug("GETDATA unknown block hash=%s from %s", hx, peer.addr)
                     continue

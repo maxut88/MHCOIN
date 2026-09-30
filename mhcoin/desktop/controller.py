@@ -322,6 +322,20 @@ class CoreController:
     def lock(self) -> None:
         self._password = None
 
+    def lock_session(self) -> None:
+        """Leave the wallet UI: stop mining/node and clear unlock (app stays open)."""
+        try:
+            if self._mining:
+                self.stop_mining()
+        except Exception:
+            logger.exception("stop mining on lock failed")
+        try:
+            self.stop_node()
+        except Exception:
+            logger.exception("stop node on lock failed")
+        self.lock()
+        self._reset_session_wallet_stats()
+
     def balance_sats(self) -> int:
         try:
             addr = self.default_address()

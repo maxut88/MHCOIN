@@ -862,7 +862,8 @@ async function render(pre){
       <div class="row">
         <button id="ref">Refresh</button>
         <button id="newW">Create Another Wallet</button>
-        <button id="quitBtn">Quit MHCOIN Core</button>
+        <button id="lockBtn">Lock wallet</button>
+        <button id="quitBtn">Quit app</button>
       </div>`;
     const copyText = async (text) => {
       try { await navigator.clipboard.writeText(text); flash("Copied"); }
@@ -928,11 +929,28 @@ async function render(pre){
         render();
       } catch(e){ flash(e.message, false); }
     };
+    $("lockBtn").onclick = async () => {
+      try {
+        await api("wallet/lock", {});
+        leaveApp("Wallet locked — unlock or create a wallet");
+      } catch(e){ flash(e.message, false); }
+    };
     $("quitBtn").onclick = async () => {
+      const ok = await confirmBox("Quit MHCOIN Core completely?\n\nTo only switch wallets, use Lock wallet.");
+      if (!ok) return;
       try { await api("shutdown", {}); } catch(e) {}
-      document.body.innerHTML = "<div class='wrap'><h1>MHCOIN Core</h1><p>Stopped. You can close this tab.</p></div>";
+      document.body.innerHTML = "<div class='wrap'><h1>MHCOIN Core</h1><p>Stopped. You can close this window.</p></div>";
     };
   }
+}
+function leaveApp(msg){
+  unlocked = false;
+  active = "Overview";
+  $("app").classList.add("hidden");
+  $("welcome").classList.remove("hidden");
+  $("tabs").innerHTML = "";
+  if (msg) flash(msg);
+  api("status").then(applyWelcomeNet).catch(()=>{});
 }
 function go(name){
   active = name;
@@ -1101,6 +1119,14 @@ def make_handler(state: DesktopState):
                     except Exception:
                         pass
                     return {"ok": True, "address": c.default_address()}
+                if path == "/api/wallet/lock":
+                    c.lock_session()
+                    return {
+                        "ok": True,
+                        "network": c.network,
+                        "data_dir": str(c.data_dir),
+                        "wallet_exists": c.wallet_exists(),
+                    }
                 if path == "/api/wallet/list":
                     return {"ok": True, "wallets": c.list_wallets(), "active": c.default_address()}
                 if path == "/api/wallet/select":

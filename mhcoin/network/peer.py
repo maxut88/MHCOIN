@@ -312,13 +312,22 @@ class Peer:
                 self.relay.on_inv(self, msg.payload)
         elif cmd == "GETDATA":
             if self.relay is not None:
-                self.relay.on_getdata(self, msg.payload)
+                try:
+                    self.relay.on_getdata(self, msg.payload)
+                except Exception:
+                    logger.debug("GETDATA handler failed from %s", self.addr, exc_info=True)
         elif cmd == "TX":
             if self.relay is not None:
-                self.relay.on_tx(self, msg.payload)
+                try:
+                    self.relay.on_tx(self, msg.payload)
+                except Exception:
+                    logger.debug("TX handler failed from %s", self.addr, exc_info=True)
         elif cmd == "BLOCK":
             if self.relay is not None:
-                self.relay.on_block(self, msg.payload)
+                try:
+                    self.relay.on_block(self, msg.payload)
+                except Exception:
+                    logger.debug("BLOCK handler failed from %s", self.addr, exc_info=True)
         elif cmd == "GETHEADERS":
             if self.relay is not None and self.relay.sync is not None:
                 self.relay.sync.on_getheaders(self, msg.payload)
