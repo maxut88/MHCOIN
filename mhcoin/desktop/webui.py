@@ -72,10 +72,15 @@ def _app_icon_path() -> str | None:
     return None
 
 
-def _open_native_window(url: str) -> tuple[bool, str]:
+# Shared with pywebview close-intercept / shutdown so X locks instead of quitting.
+_GUI: dict[str, Any] = {"window": None, "allow_quit": False, "state": None}
+
+
+def _open_native_window(url: str, state: Any | None = None) -> tuple[bool, str]:
     """Open a real desktop window (no browser chrome).
 
     Returns (ok, detail). detail explains skip/failure for logs.
+    Window close (X) locks the wallet and keeps the app open; only Quit app exits.
     """
     if _want_browser_fallback():
         return False, "MHCOIN_DESKTOP_BROWSER is set"
@@ -86,7 +91,9 @@ def _open_native_window(url: str) -> tuple[bool, str]:
 
     try:
         icon = _app_icon_path()
-        webview.create_window(
+        _GUI["allow_quit"] = False
+        _GUI["state"] = state
+        window = webview.create_window(
             "MHCOIN Core",
             url,
             width=720,
@@ -95,7 +102,36 @@ def _open_native_window(url: str) -> tuple[bool, str]:
             confirm_close=False,
             background_color="#0c1210",
         )
-        # icon= replaces the default Python / interpreter Dock/taskbar glyph
+        _GUI["window"] = window
+
+        def _on_closing() -> bool:
+            # True → allow destroy; False → cancel close (keep window).
+            if _GUI.get("allow_quit"):
+                return True
+            st = _GUI.get("state")
+            if st is not None:
+                try:
+                    st.ctrl.lock_session()
+                except Exception:
+                    pass
+            try:
+                window.evaluate_js(
+                    "(function(){try{"
+                    "if(typeof leaveApp==='function'){"
+                    "leaveApp('Wallet locked. Use Settings → Quit app to exit.');"
+                    "}else{location.href='/';}"
+                    "}catch(e){}})();"
+                )
+            except Exception:
+                pass
+            return False
+
+        try:
+            window.events.closing += _on_closing
+        except Exception:
+            # Older pywebview: best-effort; close may still quit.
+            pass
+
         if icon:
             webview.start(icon=icon)
         else:
@@ -103,6 +139,8 @@ def _open_native_window(url: str) -> tuple[bool, str]:
         return True, "native window closed"
     except Exception as e:  # noqa: BLE001 — surface any GUI backend failure
         return False, f"pywebview failed: {type(e).__name__}: {e}"
+    finally:
+        _GUI["window"] = None
 
 HTML = r"""<!DOCTYPE html>
 <html lang="en">
@@ -305,7 +343,7 @@ HTML = r"""<!DOCTYPE html>
   }
   .modal-backdrop.hidden { display:none !important; }
   .modal {
-    width: min(360px, 100%);
+    width: min(420px, 100%);
     background: linear-gradient(180deg, #15211c, #101815);
     border: 1px solid rgba(45,212,160,.28);
     border-radius: 16px;
@@ -320,11 +358,19 @@ HTML = r"""<!DOCTYPE html>
   }
   .modal-msg {
     color: var(--muted); font-size: 12.5px; white-space: pre-wrap; margin: 0 0 12px; line-height: 1.45;
+    user-select: text; -webkit-user-select: text; cursor: text;
   }
+  .modal-copy {
+    width: 100%; min-height: 96px; resize: vertical; margin: 0 0 10px;
+    font-family: "JetBrains Mono", ui-monospace, monospace; font-size: 11.5px;
+    user-select: text; -webkit-user-select: text; cursor: text;
+  }
+  .modal-copy.hidden { display: none !important; }
   .modal input {
     margin: 0 0 12px;
   }
   .modal-actions { display:flex; gap: 8px; justify-content: flex-end; flex-wrap: wrap; }
+  .modal-actions.left { justify-content: flex-start; margin-bottom: 8px; }
 </style>
 </head>
 <body>
@@ -383,7 +429,12 @@ HTML = r"""<!DOCTYPE html>
       <h3 id="modalTitle">MHCOIN</h3>
     </div>
     <p class="modal-msg" id="modalMsg"></p>
+    <textarea id="modalCopy" class="modal-copy mono hidden" readonly spellcheck="false"></textarea>
     <input id="modalInput" class="mono hidden" type="password" autocomplete="off" spellcheck="false"/>
+    <div class="modal-actions left hidden" id="modalTools">
+      <button type="button" id="modalCopyBtn">Copy</button>
+      <button type="button" id="modalSaveBtn">Save to computer</button>
+    </div>
     <div class="modal-actions">
       <button type="button" id="modalCancel">Cancel</button>
       <button type="button" class="primary" id="modalOk">OK</button>
@@ -416,19 +467,31 @@ async function api(path, body){
 }
 
 /** In-app dialogs with MHCOIN logo — never use window.prompt/alert (Python icon). */
-function showModal({ title, message, mode, okLabel, cancelLabel, placeholder }){
+function showModal({ title, message, mode, okLabel, cancelLabel, placeholder, copyText, saveName }){
   return new Promise((resolve) => {
     const bd = $("modalBackdrop");
     const input = $("modalInput");
     const cancelBtn = $("modalCancel");
+    const copyArea = $("modalCopy");
+    const tools = $("modalTools");
     $("modalTitle").textContent = title || "MHCOIN";
     $("modalMsg").textContent = message || "";
     $("modalOk").textContent = okLabel || "OK";
     cancelBtn.textContent = cancelLabel || "Cancel";
     const needInput = mode === "password" || mode === "text";
-    const needCancel = mode !== "alert";
+    const needCancel = mode !== "alert" && mode !== "copy";
+    const needCopy = mode === "copy" && !!copyText;
     input.classList.toggle("hidden", !needInput);
     cancelBtn.classList.toggle("hidden", !needCancel);
+    copyArea.classList.toggle("hidden", !needCopy);
+    tools.classList.toggle("hidden", !needCopy);
+    if (needCopy) {
+      copyArea.value = copyText;
+      copyArea.onclick = () => { copyArea.focus(); copyArea.select(); };
+    } else {
+      copyArea.value = "";
+      copyArea.onclick = null;
+    }
     if (needInput) {
       input.type = mode === "password" ? "password" : "text";
       input.value = "";
@@ -439,9 +502,29 @@ function showModal({ title, message, mode, okLabel, cancelLabel, placeholder }){
       bd.classList.add("hidden");
       $("modalOk").onclick = null;
       cancelBtn.onclick = null;
+      $("modalCopyBtn").onclick = null;
+      $("modalSaveBtn").onclick = null;
       input.onkeydown = null;
       bd.onkeydown = null;
+      copyArea.onclick = null;
       resolve(val);
+    };
+    const copyAll = async () => {
+      const text = copyArea.value || "";
+      try {
+        await navigator.clipboard.writeText(text);
+        flash("Copied");
+      } catch(e) {
+        copyArea.focus(); copyArea.select();
+        try { document.execCommand("copy"); flash("Copied"); }
+        catch(e2){ flash("Select text and press Cmd/Ctrl+C", false); }
+      }
+    };
+    $("modalCopyBtn").onclick = () => { copyAll(); };
+    $("modalSaveBtn").onclick = () => {
+      const name = saveName || ("MHCOIN-wallet-details-" + Date.now() + ".txt");
+      downloadTextFile(name, copyArea.value || "", "text/plain;charset=utf-8");
+      flash("Saved: " + name);
     };
     $("modalOk").onclick = () => finish(needInput ? (input.value || "") : true);
     cancelBtn.onclick = () => finish(needInput ? "" : false);
@@ -450,9 +533,13 @@ function showModal({ title, message, mode, okLabel, cancelLabel, placeholder }){
       if (e.key === "Escape") { e.preventDefault(); finish(""); }
     };
     bd.onkeydown = (e) => {
-      if (e.key === "Escape") { e.preventDefault(); finish(needInput ? "" : false); }
+      if (e.key === "Escape") { e.preventDefault(); finish(needInput ? "" : (needCopy ? true : false)); }
     };
-    setTimeout(() => { if (needInput) input.focus(); else $("modalOk").focus(); }, 30);
+    setTimeout(() => {
+      if (needCopy) { copyArea.focus(); copyArea.select(); }
+      else if (needInput) input.focus();
+      else $("modalOk").focus();
+    }, 30);
   });
 }
 async function ask(msg){
@@ -481,6 +568,28 @@ async function confirmBox(msg){
     cancelLabel: "Cancel",
   }));
 }
+async function walletDetailsBox(address, password, network){
+  const stamp = new Date().toISOString();
+  const text =
+    "MHCOIN wallet details\n" +
+    "=====================\n" +
+    "Created: " + stamp + "\n" +
+    "Network: " + (network || "mainnet") + "\n" +
+    "Address: " + address + "\n" +
+    "Password: " + password + "\n" +
+    "\n" +
+    "KEEP THIS FILE PRIVATE.\n" +
+    "Also download the encrypted wallet.json backup (next step).\n" +
+    "Password is required to unlock — it is not stored inside wallet.json.\n";
+  await showModal({
+    title: "Save your wallet",
+    message: "Select / copy / save these details before continuing.\nPassword is shown once — store it safely.",
+    mode: "copy",
+    copyText: text,
+    saveName: "MHCOIN-" + (network || "mainnet") + "-wallet-details.txt",
+    okLabel: "Continue",
+  });
+}
 
 function shortTx(txid){
   if (!txid) return "";
@@ -488,12 +597,12 @@ function shortTx(txid){
   return txid.slice(0,12) + "…" + txid.slice(-10);
 }
 
-function downloadTextFile(filename, text){
-  const blob = new Blob([text], {type: "application/json;charset=utf-8"});
+function downloadTextFile(filename, text, mime){
+  const blob = new Blob([text], {type: mime || "application/octet-stream;charset=utf-8"});
   const url = URL.createObjectURL(blob);
   const a = document.createElement("a");
   a.href = url;
-  a.download = filename || "MHCOIN-wallet-backup.json";
+  a.download = filename || "MHCOIN-save.txt";
   document.body.appendChild(a);
   a.click();
   setTimeout(() => { URL.revokeObjectURL(url); a.remove(); }, 500);
@@ -585,7 +694,9 @@ $("btnCreate").onclick = async () => {
     if (a !== b) return flash("Passwords do not match", false);
     const j = await api("wallet/create", {password:a});
     flash("New wallet is now active (previous keys stay in wallet.json)");
-    await alertBox("Your MHCOIN address (ACTIVE wallet):\n\n"+j.address+"\n\nNext: back up wallet file + remember this password.");
+    let net = "mainnet";
+    try { const s = await api("status"); net = s.network || net; } catch(e){}
+    await walletDetailsBox(j.address, a, net);
     try {
       await doWalletBackup();
     } catch(be){
@@ -924,7 +1035,9 @@ async function render(pre){
         if (a !== b) return flash("Passwords do not match", false);
         const j = await api("wallet/create", {password:a});
         flash("New wallet active");
-        await alertBox("ACTIVE address:\n\n"+j.address+"\n\nBack up wallet file + keep this password.");
+        let net = "mainnet";
+        try { const s = await api("status"); net = s.network || net; } catch(e){}
+        await walletDetailsBox(j.address, a, net);
         try { await doWalletBackup(); } catch(be){ flash("Backup failed: "+be.message, false); }
         render();
       } catch(e){ flash(e.message, false); }
@@ -1173,7 +1286,14 @@ def make_handler(state: DesktopState):
                     def _bye() -> None:
                         import time
 
-                        time.sleep(0.2)
+                        time.sleep(0.15)
+                        _GUI["allow_quit"] = True
+                        w = _GUI.get("window")
+                        if w is not None:
+                            try:
+                                w.destroy()
+                            except Exception:
+                                pass
                         c.shutdown()
                         os._exit(0)
 
@@ -1216,7 +1336,7 @@ def run_web_desktop(network: str | None = None, port: int | None = None) -> None
     server_thread.start()
 
     try:
-        ok, detail = _open_native_window(url)
+        ok, detail = _open_native_window(url, state=state)
         if ok:
             print(f"Shell: native window ({detail})")
         else:
