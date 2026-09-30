@@ -316,7 +316,11 @@ HTML = r"""<!DOCTYPE html>
   }
   label { display:block; color:var(--muted); font-size:11px; margin-top:2px; }
   .bal { font-size: 28px; font-weight: 700; margin: 2px 0 8px; letter-spacing: -0.03em; }
-  .mono { word-break: break-all; font-family: "JetBrains Mono", ui-monospace, monospace; }
+  .mono { word-break: break-all; overflow-wrap: anywhere; font-family: "JetBrains Mono", ui-monospace, monospace; }
+  textarea.mono, input.mono {
+    white-space: pre-wrap; overflow-wrap: anywhere; word-break: break-all;
+    overflow-x: hidden; max-width: 100%;
+  }
   .msg { padding:8px 10px; border-radius:8px; margin:8px 0; display:none; font-size: 12px; }
   .msg.ok { display:block; background: rgba(45,212,160,.12); color: #9af0ce; border:1px solid rgba(45,212,160,.2); }
   .msg.err { display:block; background: rgba(240,113,103,.12); color: #ffb4ad; border:1px solid rgba(240,113,103,.25); }
@@ -410,11 +414,13 @@ HTML = r"""<!DOCTYPE html>
   .modal-backdrop.hidden { display:none !important; }
   .modal {
     width: min(420px, 100%);
+    max-width: 100%;
     background: linear-gradient(180deg, #15211c, #101815);
     border: 1px solid rgba(45,212,160,.28);
     border-radius: 16px;
     padding: 18px 16px 14px;
     box-shadow: 0 24px 60px rgba(0,0,0,.45), 0 0 0 1px rgba(255,255,255,.04);
+    overflow: hidden;
   }
   .modal-head { display:flex; align-items:center; gap:10px; margin-bottom: 10px; }
   .modal-head .logo { --logo-size: 36px; }
@@ -425,10 +431,13 @@ HTML = r"""<!DOCTYPE html>
   .modal-msg {
     color: var(--muted); font-size: 12.5px; white-space: pre-wrap; margin: 0 0 12px; line-height: 1.45;
     user-select: text; -webkit-user-select: text; cursor: text;
+    overflow-wrap: anywhere; word-break: break-all; max-width: 100%;
   }
   .modal-copy {
     width: 100%; min-height: 96px; resize: vertical; margin: 0 0 10px;
-    font-family: "JetBrains Mono", ui-monospace, monospace; font-size: 11.5px;
+    font-family: "JetBrains Mono", ui-monospace, monospace; font-size: 11px;
+    line-height: 1.4; white-space: pre-wrap; overflow-wrap: anywhere; word-break: break-all;
+    overflow-x: hidden; max-width: 100%; box-sizing: border-box;
     user-select: text; -webkit-user-select: text; cursor: text;
   }
   .modal-copy.hidden { display: none !important; }
@@ -637,6 +646,23 @@ async function confirmBox(msg){
     okLabel: "Continue",
     cancelLabel: "Cancel",
   }));
+}
+async function txSentBox(txid){
+  const text =
+    "MHCOIN transaction\n" +
+    "=================\n" +
+    "Status: sent to mempool\n" +
+    "TXID: " + (txid || "") + "\n" +
+    "\n" +
+    "Next: Mining → +1 block, then refresh / switch wallet on Overview.\n";
+  await showModal({
+    title: "Transaction sent",
+    message: "Full TXID below — copy or save it. It stays inside the window.",
+    mode: "copy",
+    copyText: text,
+    saveName: "MHCOIN-txid-" + String(txid||"tx").slice(0,16) + ".txt",
+    okLabel: "OK",
+  });
 }
 async function walletDetailsBox(address, password, network){
   const stamp = new Date().toISOString();
@@ -958,7 +984,7 @@ async function render(pre){
     };
   } else if (active === "Send") {
     const last = s.last_txid
-      ? `<p class="sub">Last TXID</p><textarea id="lastTx" rows="3" readonly class="mono">${s.last_txid}</textarea>
+      ? `<p class="sub">Last TXID</p><textarea id="lastTx" rows="4" readonly class="mono">${s.last_txid}</textarea>
          <div class="row"><button id="copyTx">Copy TXID</button></div>`
       : `<p class="sub">After Send the full TXID will appear here.</p>`;
     p.innerHTML = `
@@ -979,7 +1005,7 @@ async function render(pre){
         const password = await ask("Wallet password:");
         if (!password) return;
         const j = await api("send", {to:$("to").value.trim(), amount:$("amt").value.trim(), fee:$("fee").value.trim(), password});
-        await alertBox("Transaction sent.\n\nTXID:\n"+j.txid+"\n\nNext: Mining → +1 block, then switch wallet on Overview.");
+        await txSentBox(j.txid);
         flash("Sent OK");
         render();
       } catch(e){ flash(e.message, false); }
