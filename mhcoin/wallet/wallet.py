@@ -162,6 +162,48 @@ class Wallet:
         rec = self._default_record()
         return self.unlock_key(rec.wallet_id, pwd)
 
+    def unlock_with_password(
+        self, password: str, *, wallet_id: str | None = None
+    ) -> str:
+        """Unlock one wallet by password and make it the active default.
+
+        If wallet_id is set, only that record is tried. Otherwise try the current
+        default first, then every other wallet (so Lock → Open still works when
+        the active key changed after creating another wallet).
+        """
+        pwd = password or self._password
+        if not pwd:
+            raise WalletError("password required to unlock wallet")
+        wf = load_wallet_file(self.paths.wallet_file)
+        if not wf or not wf.wallets:
+            raise WalletError("no wallet found; run: mhcoin wallet create")
+
+        ordered: list[WalletRecord] = []
+        if wallet_id:
+            rec = next((w for w in wf.wallets if w.wallet_id == wallet_id), None)
+            if not rec:
+                raise WalletError("unknown wallet id")
+            ordered = [rec]
+        else:
+            preferred = wf.default_wallet_id or wf.wallets[0].wallet_id
+            ordered = sorted(
+                wf.wallets,
+                key=lambda w: (0 if w.wallet_id == preferred else 1, w.created_at),
+            )
+
+        last_err: Exception | None = None
+        for rec in ordered:
+            try:
+                self.unlock_key(rec.wallet_id, pwd)
+            except WalletError as e:
+                last_err = e
+                continue
+            if wf.default_wallet_id != rec.wallet_id:
+                wf.default_wallet_id = rec.wallet_id
+                save_wallet_file(self.paths.wallet_file, wf)
+            return rec.address
+        raise WalletError("wrong password or corrupt wallet") from last_err
+
     def unlock_key(self, wallet_id: str, password: str) -> KeyPair:
         wf = load_wallet_file(self.paths.wallet_file)
         if not wf:

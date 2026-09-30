@@ -468,6 +468,7 @@ HTML = r"""<!DOCTYPE html>
       <option value="localnet">Localnet (RC / solo test)</option>
     </select>
     <p class="sub" id="welcomeHint"></p>
+    <div id="welcomeWallets"></div>
     <div class="row">
       <button class="primary" id="btnCreate">Create New Wallet</button>
       <button id="btnOpen">Open Existing Wallet</button>
@@ -756,14 +757,38 @@ function applyWelcomeNet(s){
   const sel = $("welcomeNetSel");
   if (sel && s.network) sel.value = s.network;
   const hint = $("welcomeHint");
-  if (!hint) return;
-  if (s.network === "mainnet") {
-    hint.textContent = "Data: " + (s.data_dir||"~/.mhcoin/mainnet") +
-      " · Seed: " + ((s.seeds&&s.seeds[0])||"176.38.3.168:8333");
-  } else {
-    hint.textContent = "LOCALNET — not the public MHCOIN chain. Data: " + (s.data_dir||"");
+  if (hint) {
+    if (s.network === "mainnet") {
+      hint.textContent = "Data: " + (s.data_dir||"~/.mhcoin/mainnet") +
+        " · Seed: " + ((s.seeds&&s.seeds[0])||"176.38.3.168:8333");
+    } else {
+      hint.textContent = "LOCALNET — not the public MHCOIN chain. Data: " + (s.data_dir||"");
+    }
   }
   $("topStatus").textContent = (s.network||"?") + " · " + (s.data_dir||"");
+  const box = $("welcomeWallets");
+  if (!box) return;
+  const list = s.wallets || [];
+  if (!s.wallet_exists || !list.length) {
+    box.innerHTML = "";
+    return;
+  }
+  const active = s.address || "";
+  const opts = list.map((w, i) => {
+    const lab = (w.label && w.label !== "default") ? w.label : ("Wallet " + (i+1));
+    const short = (w.address||"").slice(0,10) + "…" + (w.address||"").slice(-8);
+    const mark = w.address === active ? " · last active" : "";
+    return `<option value="${w.wallet_id}">${lab}: ${short}${mark}</option>`;
+  }).join("");
+  box.innerHTML =
+    `<label>Wallet to open</label>` +
+    `<select id="welcomeWalletSel">${opts}</select>` +
+    `<p class="sub">Pick the wallet, then Open. Each key can have its own password.</p>`;
+  const wsel = $("welcomeWalletSel");
+  if (wsel && active) {
+    const hit = list.find(w => w.address === active);
+    if (hit) wsel.value = hit.wallet_id;
+  }
 }
 
 $("welcomeNetSel").onchange = async () => {
@@ -798,7 +823,9 @@ $("btnOpen").onclick = async () => {
   try {
     const p = await ask("Wallet password:");
     if (!p) return;
-    await api("wallet/unlock", {password:p});
+    const wid = ($("welcomeWalletSel") && $("welcomeWalletSel").value) || "";
+    const body = wid ? {password:p, wallet_id:wid} : {password:p};
+    await api("wallet/unlock", body);
     flash("Wallet unlocked");
     enterApp();
   } catch(e){ flash(e.message, false); }
@@ -1110,7 +1137,10 @@ async function render(pre){
     document.querySelectorAll(".selW").forEach(btn => {
       btn.onclick = async () => {
         try {
-          await api("wallet/select", {wallet_id: btn.getAttribute("data-wid")});
+          const wid = btn.getAttribute("data-wid") || "";
+          const pwd = await ask("Password for this wallet:");
+          if (!pwd) return;
+          await api("wallet/unlock", {password: pwd, wallet_id: wid});
           flash("Active wallet switched");
           go("Overview");
         } catch(e){ flash(e.message, false); }
@@ -1132,9 +1162,9 @@ async function render(pre){
       } catch(e){ flash(e.message, false); }
     };
     $("lockBtn").onclick = async () => {
+      leaveApp("Wallet locked — unlock or create a wallet");
       try {
         await api("wallet/lock", {});
-        leaveApp("Wallet locked — unlock or create a wallet");
       } catch(e){ flash(e.message, false); }
     };
     $("quitBtn").onclick = async () => {
@@ -1313,14 +1343,15 @@ def make_handler(state: DesktopState):
                 if path == "/api/wallet/unlock":
                     if not c.wallet_exists():
                         raise WalletError("no wallet found")
-                    c.unlock(str(body.get("password") or ""))
+                    wid = str(body.get("wallet_id") or "").strip() or None
+                    addr = c.unlock(str(body.get("password") or ""), wallet_id=wid)
                     c.ensure_chain()
                     try:
                         c.balance_sats()
                         c.refresh_recent_cache(limit=50, full_chain=True)
                     except Exception:
                         pass
-                    return {"ok": True, "address": c.default_address()}
+                    return {"ok": True, "address": addr}
                 if path == "/api/wallet/lock":
                     c.lock_session()
                     return {

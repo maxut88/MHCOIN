@@ -264,8 +264,10 @@ class CoreController:
         # New wallet must not keep mining to the previous address / session totals.
         if self._mining:
             self.stop_mining()
+        existing = len(Wallet(self.paths).list_wallets())
+        label = f"Wallet {existing + 1}"
         w = Wallet(self.paths, password=password)
-        addr = w.create(password=password, make_default=True)
+        addr = w.create(label=label, password=password, make_default=True)
         self._password = password
         self._reset_session_wallet_stats()
         self.ensure_chain()
@@ -314,27 +316,32 @@ class CoreController:
     def default_address(self) -> str:
         return Wallet(self.paths).default_address()
 
-    def unlock(self, password: str) -> None:
+    def unlock(self, password: str, wallet_id: str | None = None) -> str:
         w = Wallet(self.paths, password=password)
-        w.unlock_default(password)
+        addr = w.unlock_with_password(password, wallet_id=wallet_id or None)
         self._password = password
+        return addr
 
     def lock(self) -> None:
         self._password = None
 
     def lock_session(self) -> None:
-        """Leave the wallet UI: stop mining/node and clear unlock (app stays open)."""
-        try:
-            if self._mining:
-                self.stop_mining()
-        except Exception:
-            logger.exception("stop mining on lock failed")
-        try:
-            self.stop_node()
-        except Exception:
-            logger.exception("stop node on lock failed")
+        """Leave the wallet UI: clear unlock immediately; stop mining/node in background."""
         self.lock()
         self._reset_session_wallet_stats()
+
+        def _cleanup() -> None:
+            try:
+                if self._mining:
+                    self.stop_mining()
+            except Exception:
+                logger.exception("stop mining on lock failed")
+            try:
+                self.stop_node()
+            except Exception:
+                logger.exception("stop node on lock failed")
+
+        threading.Thread(target=_cleanup, name="mhcoin-lock-cleanup", daemon=True).start()
 
     def balance_sats(self) -> int:
         try:
