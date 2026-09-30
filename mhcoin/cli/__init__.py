@@ -1,0 +1,1 @@
+"""MHCOIN command-line interface."""

@@ -1,0 +1,14 @@
+# MHCOIN network parameters (Milestone 1: wallet/crypto only)
+network: localnet
+
+data_dir: ~/.mhcoin/localnet
+
+wallet:
+  # scrypt params for encrypted wallet files
+  kdf_n: 16384
+  kdf_r: 8
+  kdf_p: 1
+
+address:
+  hrp: mhc
+  witness_version: 0

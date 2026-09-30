@@ -1,0 +1,56 @@
+# Python
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+*.egg
+dist/
+build/
+
+# Local chain / wallet data (never publish)
+mainnet/
+testnet/
+localnet/
+regtest/
+**/.mhcoin/
+**/wallet.json
+**/wallets.json
+**/backups/
+**/miner_address.txt
+**/*.sqlite
+**/*.sqlite-*
+
+# Secrets
+.env
+.env.*
+*.pem
+*.key
+*.p12
+id_rsa*
+credentials*
+
+# Internal operator tooling (kept locally, not for GitHub)
+rc1_ops/
+docs/internal/
+ops/
+
+# Packaging / OS junk
+packaging/linux/appimagetool
+*.spec.bak
+*.AppImage
+*.dmg
+*.deb
+*.exe
+.DS_Store
+Thumbs.db
+Desktop.ini
+
+# Editors
+.idea/
+.vscode/
+*.swp
+*~

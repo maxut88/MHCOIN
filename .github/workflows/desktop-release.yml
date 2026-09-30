@@ -1,0 +1,78 @@
+name: Desktop release artifacts
+
+on:
+  workflow_dispatch:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-22.04
+            artifact: linux
+          - os: macos-13
+            artifact: macos
+          - os: windows-2022
+            artifact: windows
+
+    runs-on: ${{ matrix.os }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Linux Tk deps
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y python3-tk libtcl8.6 libtk8.6
+
+      - name: Install Python deps
+        run: |
+          python -m pip install -U pip wheel setuptools pyinstaller
+          python -m pip install -r requirements.txt
+          python -m pip install "pywebview>=5.0"
+          python -m pip install -e ".[desktop]"
+
+      - name: Build (Unix)
+        if: runner.os != 'Windows'
+        run: |
+          chmod +x packaging/build.sh packaging/linux/*.sh
+          if [ "${{ runner.os }}" = "Linux" ]; then
+            bash packaging/linux/fetch_appimagetool.sh || true
+          fi
+          bash packaging/build.sh
+
+      - name: Build (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: ./packaging/build.ps1
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: MHCOIN-Core-${{ matrix.artifact }}
+          path: dist/release/*
+          if-no-files-found: error
+
+  release:
+    needs: build
+    if: startsWith(github.ref, 'refs/tags/')
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: artifacts/**/*
+          generate_release_notes: true

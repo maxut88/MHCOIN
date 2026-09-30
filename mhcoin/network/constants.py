@@ -1,0 +1,99 @@
+"""MHCOIN network constants (independent of Bitcoin magic / ports)."""
+
+from __future__ import annotations
+
+# Re-export network identity from consensus.params (single source of truth)
+from mhcoin.consensus.params import (
+    DEFAULT_P2P_PORT,
+    MAX_SUPPORTED_PROTOCOL_VERSION,
+    MIN_SUPPORTED_PROTOCOL_VERSION,
+    NETWORK_MAGIC,
+    PROTOCOL_VERSION,
+    SOFTWARE_VERSION,
+    USER_AGENT,
+)
+
+# Wire envelope
+COMMAND_SIZE = 12
+MAGIC_SIZE = 4
+LENGTH_SIZE = 4
+CHECKSUM_SIZE = 4
+HEADER_SIZE = MAGIC_SIZE + COMMAND_SIZE + LENGTH_SIZE + CHECKSUM_SIZE  # 24
+
+# Safety limits (Stage 1 envelope)
+MAX_PAYLOAD_SIZE = 1_000_000  # 1 MiB hard cap per message
+MAX_COMMAND_LEN = COMMAND_SIZE
+
+# Stage 2 peer / handshake limits
+MAX_SOFTWARE_VERSION_LEN = 128
+MAX_NETWORK_NAME_LEN = 32
+DEFAULT_MAX_PEERS = 32
+DEFAULT_CONNECT_TIMEOUT = 5.0
+DEFAULT_HANDSHAKE_TIMEOUT = 10.0
+DEFAULT_PING_INTERVAL = 30.0
+DEFAULT_PING_TIMEOUT = 15.0
+DEFAULT_IDLE_TIMEOUT = 120.0
+# Stage 9: reject peers outside this inclusive range (deliberate upgrades only)
+MIN_PROTOCOL_VERSION = MIN_SUPPORTED_PROTOCOL_VERSION
+MAX_PROTOCOL_VERSION = MAX_SUPPORTED_PROTOCOL_VERSION
+SERVICES_NODE_NETWORK = 1
+
+# Stage 3 transaction relay limits
+MAX_INV_ITEMS = 500
+MAX_GETDATA_ITEMS = 500
+MAX_TX_SIZE = 100_000  # bytes; well under MAX_PAYLOAD_SIZE
+INV_TYPE_TX = 1
+INV_TYPE_BLOCK = 2
+
+# Stage 4 block relay limits (aligned with consensus MAX_BLOCK_SIZE)
+from mhcoin.constants import (  # noqa: E402
+    MAX_BLOCK_SIZE,
+    MAX_FUTURE_BLOCK_TIME,
+    MAX_TXS_PER_BLOCK,
+    SUPPORTED_BLOCK_VERSIONS,
+)
+
+# Stage 5 chain synchronization
+MAX_HEADERS = 2000
+MAX_LOCATOR_HASHES = 32
+MAX_SYNC_BLOCK_BATCH = 16
+DEFAULT_SYNC_TIMEOUT = 30.0
+DEFAULT_HEADERS_TIMEOUT = 15.0
+ZERO_HASH = b"\x00" * 32
+
+# Stage 6 reorg / orphan safety (node policy — not consensus)
+MAX_REORG_DEPTH = 100
+MAX_ORPHAN_BLOCKS = 64
+MAX_ORPHAN_BYTES = 2_000_000
+MAX_KNOWN_BLOCK_INDEX = 100_000
+
+# Stage 7 — peer discovery / resilience (node policy — not consensus)
+MAX_ADDR_ENTRIES = 1000          # per ADDR message
+MAX_ADDR_DB = 2500               # persisted known peers
+MAX_ADDR_HOST_LEN = 64
+MAX_GETADDR_RESPONSE = 32        # addresses returned per GETADDR
+DEFAULT_OUTBOUND_TARGET = 8
+DEFAULT_RECONNECT_INTERVAL = 10.0
+DEFAULT_ADDR_BROADCAST_INTERVAL = 120.0
+DEFAULT_BAN_DURATION = 24 * 60 * 60
+BAN_SCORE_THRESHOLD = 100
+MISBEHAVIOR_PROTOCOL = 10
+MISBEHAVIOR_INVALID_BLOCK = 20
+MISBEHAVIOR_FLOOD = 5
+MISBEHAVIOR_HANDSHAKE = 15
+MAX_ADDR_RATE_PER_PEER = 3       # ADDR messages accepted per window
+ADDR_RATE_WINDOW = 60.0
+MAX_REQUESTED_BLOCKS = 1024
+MAX_REQUESTED_TX = 2048
+
+# Stage 8 — adversarial / DoS rate limits (node policy)
+MISBEHAVIOR_INVALID_TX = 15
+MAX_INV_RATE_PER_PEER = 40
+INV_RATE_WINDOW = 10.0
+MAX_GETDATA_RATE_PER_PEER = 40
+GETDATA_RATE_WINDOW = 10.0
+MAX_GETHEADERS_RATE_PER_PEER = 20
+GETHEADERS_RATE_WINDOW = 30.0
+MAX_INBOUND_PER_HOST = 3
+MAX_INBOUND_CONNECT_RATE = 8
+CONNECT_RATE_WINDOW = 60.0
