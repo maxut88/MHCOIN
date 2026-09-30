@@ -72,7 +72,7 @@ def _app_icon_path() -> str | None:
     return None
 
 
-# Shared with pywebview close-intercept / shutdown so X locks instead of quitting.
+# Shared with pywebview close / shutdown.
 _GUI: dict[str, Any] = {"window": None, "allow_quit": False, "state": None}
 
 
@@ -129,7 +129,7 @@ def _open_native_window(url: str, state: Any | None = None) -> tuple[bool, str]:
     """Open a real desktop window (no browser chrome).
 
     Returns (ok, detail). detail explains skip/failure for logs.
-    Window close (X) locks the wallet and keeps the app open; only Quit app exits.
+    Window close (X) quits the app; use Settings → Lock wallet to stay open.
     """
     if _want_browser_fallback():
         return False, "MHCOIN_DESKTOP_BROWSER is set"
@@ -160,41 +160,27 @@ def _open_native_window(url: str, state: Any | None = None) -> tuple[bool, str]:
         _GUI["window"] = window
 
         def _on_closing() -> bool:
-            # True → allow destroy; False → cancel close (keep window).
-            if _GUI.get("allow_quit"):
-                return True
+            # Allow the OS close button to quit the process.
+            _GUI["allow_quit"] = True
             st = _GUI.get("state")
             if st is not None:
                 try:
-                    st.ctrl.lock_session()
+                    # Clear unlock in-memory; full shutdown runs after webview.start returns.
+                    st.ctrl.lock()
                 except Exception:
                     pass
-            try:
-                window.evaluate_js(
-                    "(function(){try{"
-                    "if(typeof leaveApp==='function'){"
-                    "leaveApp('Wallet locked. Use Settings → Quit app to exit.');"
-                    "}else{location.href='/';}"
-                    "}catch(e){}})();"
-                )
-            except Exception:
-                pass
-            # Cancel OS close so the process stays in webview.start().
-            return False
+            return True
 
         try:
             window.events.closing += _on_closing
         except Exception:
-            # Older pywebview: run loop will reopen if close still destroys.
             pass
 
         if icon:
             webview.start(icon=icon)
         else:
             webview.start()
-        if _GUI.get("allow_quit"):
-            return True, "quit"
-        return True, "native window closed"
+        return True, "quit" if _GUI.get("allow_quit") else "native window closed"
     except Exception as e:  # noqa: BLE001 — surface any GUI backend failure
         return False, f"pywebview failed: {type(e).__name__}: {e}"
     finally:
@@ -1330,7 +1316,7 @@ async function render(pre){
       } catch(e){ flash(e.message, false); }
     };
     $("quitBtn").onclick = async () => {
-      const ok = await confirmBox("Quit MHCOIN Core completely?\n\nTo only switch wallets, use Lock wallet.");
+      const ok = await confirmBox("Quit MHCOIN Core completely?\n\nWindow X also quits. Use Lock wallet to return to Welcome without closing.");
       if (!ok) return;
       try { await api("shutdown", {}); } catch(e) {}
       document.body.innerHTML = "<div class='wrap'><h1>MHCOIN Core</h1><p>Stopped. You can close this window.</p></div>";
@@ -1618,30 +1604,20 @@ def run_web_desktop(network: str | None = None, port: int | None = None) -> None
     server_thread.start()
 
     try:
-        while True:
-            ok, detail = _open_native_window(url, state=state)
-            if not ok:
-                print(f"Shell: browser fallback — {detail}")
-                if not frozen:
-                    print("Fix native window:  pip install 'pywebview>=5.0'")
-                    print("Then relaunch. Force browser: MHCOIN_DESKTOP_BROWSER=1")
-                    print("Dev mode — Press Ctrl+C to stop.")
-                threading.Timer(0.35, lambda: webbrowser.open(url)).start()
-                try:
-                    server_thread.join()
-                except KeyboardInterrupt:
-                    print("\nStopping…")
-                break
-            if detail == "quit" or _GUI.get("allow_quit"):
-                print("Shell: native window (quit)")
-                break
-            # X closed the window despite cancel — lock and reopen (do not quit).
+        ok, detail = _open_native_window(url, state=state)
+        if not ok:
+            print(f"Shell: browser fallback — {detail}")
+            if not frozen:
+                print("Fix native window:  pip install 'pywebview>=5.0'")
+                print("Then relaunch. Force browser: MHCOIN_DESKTOP_BROWSER=1")
+                print("Dev mode — Press Ctrl+C to stop.")
+            threading.Timer(0.35, lambda: webbrowser.open(url)).start()
             try:
-                state.ctrl.lock_session()
-            except Exception:
-                pass
-            print("Shell: window closed — wallet locked, reopening…")
-            _GUI["allow_quit"] = False
+                server_thread.join()
+            except KeyboardInterrupt:
+                print("\nStopping…")
+        else:
+            print(f"Shell: native window ({detail})")
     finally:
         try:
             httpd.shutdown()
