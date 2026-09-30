@@ -873,7 +873,11 @@ function enterApp(){
   // Mainnet: auto-connect to public seed so Height/Peers appear.
   api("node/start", {}).then(() => flash("Node started · connecting to seed…")).catch(()=>{});
   render();
-  setInterval(() => { if(unlocked) refreshStatus(); }, 5000);
+  if (window._mhStatusTimer) clearInterval(window._mhStatusTimer);
+  window._mhStatusTimer = setInterval(() => {
+    if (!unlocked) return;
+    refreshStatus();
+  }, 1500);
 }
 
 async function refreshStatus(){
@@ -884,7 +888,7 @@ async function refreshStatus(){
     if (s.chain_error) {
       flash(s.chain_error, false);
     }
-    // Mining tab: update live stats / animation without full rebuild.
+    // Mining tab: live stats
     if (active === "Mining" && $("mineHero")) {
       $("mineHero").classList.toggle("live", !!s.mining);
       if ($("mineState")) $("mineState").textContent = s.mining ? "Mining" : "Idle";
@@ -892,9 +896,38 @@ async function refreshStatus(){
       if ($("statHash")) $("statHash").textContent = s.hashrate || "—";
       if ($("statBlocks")) $("statBlocks").textContent = String(s.blocks_found ?? 0);
       if ($("statRewards")) $("statRewards").textContent = s.rewards || "0";
+      // Keep a live activity strip on Mining too.
+      const live = $("mineLiveActs");
+      if (live) {
+        const rows = (s.txs||[]).filter(t => (t.type==="mined") || (t.kind||"").toLowerCase().includes("mining")).slice(0,6);
+        live.innerHTML = rows.map((t,i)=>activityCard(t,i,"m")).join("") ||
+          '<p class="sub">New blocks will stream here while mining…</p>';
+        bindCopyTxButtons(live);
+      }
       return;
     }
-    if (active === "Overview" || active === "Mining" || active === "Network" || active === "Receive") {
+    // Overview: patch balance + activity live (avoid full rebuild flicker).
+    if (active === "Overview" && $("recentList")) {
+      const pill = document.querySelector("#panel .pill");
+      if (pill) {
+        pill.innerHTML = `<span class="dot ${s.mining?'on':''}"></span>${s.network} · block ${s.height} · peers ${s.peers}`;
+      }
+      const bal = document.querySelector("#panel .bal");
+      if (bal) bal.textContent = s.balance;
+      const sess = document.querySelector("#panel .sub.sessionStats");
+      if (sess) {
+        sess.textContent = (s.mining||s.blocks_found)
+          ? (`Session · ${s.blocks_found||0} blocks · ${s.rewards||"0"}`)
+          : "";
+        sess.style.display = (s.mining||s.blocks_found) ? "block" : "none";
+      }
+      const box = $("recentList");
+      box.innerHTML = (s.txs||[]).slice(0,12).map((t,i)=>activityCard(t,i,"r")).join("") ||
+        '<p class="sub">No activity yet — mined blocks and transfers will appear here.</p>';
+      bindCopyTxButtons(box);
+      return;
+    }
+    if (active === "Network" || active === "Receive") {
       render(s);
     }
   } catch(e){}
@@ -925,14 +958,14 @@ async function render(pre){
       <label>Balance</label>
       <div class="bal">${s.balance}</div>
       ${s.balance_cached?'<p class="sub">Cached while node is running.</p>':''}
-      ${s.mining||s.blocks_found?`<p class="sub">Session · ${s.blocks_found||0} blocks · ${s.rewards||"0"}</p>`:''}
+      ${s.mining||s.blocks_found?`<p class="sub sessionStats">Session · ${s.blocks_found||0} blocks · ${s.rewards||"0"}</p>`:`<p class="sub sessionStats" style="display:none"></p>`}
       <div class="row">
         <button class="sm" onclick="go('Receive')">Receive</button>
         <button class="sm" onclick="go('Send')">Send</button>
         <button class="primary sm" onclick="go('Mining')">Mining</button>
       </div>
       <h3>Activity</h3>
-      <p class="sub">${(s.txs||[]).length} recent · open History for full list</p>
+      <p class="sub">${(s.txs||[]).length} recent · newest block first · open History for full list</p>
       <div class="act-list" id="recentList">
         ${(s.txs||[]).slice(0,12).map((t,i)=>activityCard(t,i,"r")).join("") || '<p class="sub">No activity yet — mined blocks and transfers will appear here.</p>'}
       </div>
@@ -941,7 +974,12 @@ async function render(pre){
     document.querySelectorAll("[data-wid]").forEach(btn => {
       btn.onclick = async () => {
         try {
-          await api("wallet/select", {wallet_id: btn.getAttribute("data-wid")});
+          const wid = btn.getAttribute("data-wid") || "";
+          if (wid && !(s.wallets||[]).some(w => w.wallet_id===wid && w.address===s.address)) {
+            const pwd = await ask("Password for this wallet:");
+            if (!pwd) return;
+            await api("wallet/unlock", {password: pwd, wallet_id: wid});
+          }
           flash("Switched active wallet");
           go("Overview");
         } catch(e){ flash(e.message, false); }
@@ -989,6 +1027,7 @@ async function render(pre){
       : `<p class="sub">After Send the full TXID will appear here.</p>`;
     p.innerHTML = `
       <h2>Send MHCOIN</h2>
+      <p class="sub">To move MHC to your other wallet: open that wallet → Receive → copy address → switch back here and paste it.</p>
       <label>Address</label><input id="to" placeholder="mhc1..."/>
       <label>Amount (MHC)</label><input id="amt" placeholder="1.0"/>
       <label>Fee (MHC)</label><input id="fee" value="0.00001000"/>
@@ -1045,7 +1084,13 @@ async function render(pre){
       <div class="row">
         <button class="primary" id="mineStart">Start mining</button>
         <button class="sm" id="mineStop">Stop</button>
+      </div>
+      <h3>Live blocks</h3>
+      <p class="sub">Streams as blocks are found (also on Overview → Activity).</p>
+      <div class="act-list" id="mineLiveActs">
+        ${(s.txs||[]).filter(t => (t.type==="mined") || (t.kind||"").toLowerCase().includes("mining")).slice(0,6).map((t,i)=>activityCard(t,i,"m")).join("") || '<p class="sub">New blocks will stream here while mining…</p>'}
       </div>`;
+    bindCopyTxButtons($("mineLiveActs"));
     $("mineStart").onclick = async () => {
       try {
         if (s.network !== "mainnet") {

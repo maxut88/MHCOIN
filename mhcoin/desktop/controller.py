@@ -85,12 +85,12 @@ class CoreController:
             title = "Block found"
             type_key = "mined"
             sign = "+"
-        elif kind == "Sent":
-            title = "Sent"
+        elif kind == "Sent" or kind.startswith("Sent"):
+            title = "Sent" if kind == "Sent" else kind
             type_key = "sent"
             sign = "-"
-        elif kind in ("Received", "Receive"):
-            title = "Received"
+        elif kind in ("Received", "Receive") or kind.startswith("Received"):
+            title = "Received" if kind in ("Received", "Receive") else kind
             type_key = "received"
             sign = "+"
         else:
@@ -140,10 +140,8 @@ class CoreController:
         return list(self._recent_cache)[:limit]
 
     def recent_for_ui(self, limit: int = 25) -> list[dict]:
-        if self._node is None and not self._mining:
-            return self.refresh_recent_cache(limit=limit, full_chain=False)
-        if self._node is None and self._mining:
-            # LocalNode is available while mining — refresh lightly.
+        # While solo-mining, LocalNode owns the datadir — keep cache fresh from chain.
+        if self._node is None:
             return self.refresh_recent_cache(limit=limit, full_chain=False)
         return list(self._recent_cache)[:limit]
 
@@ -584,8 +582,16 @@ class CoreController:
                         )
                     )
 
-            # Show sends/receives before mining so UI limits do not hide them.
-            rows = pending + transfer_rows + mining_rows
+            # Newest height first (do NOT pin old transfers above fresh mining).
+            confirmed = transfer_rows + mining_rows
+            confirmed.sort(
+                key=lambda r: (
+                    0 if r.height is not None else 1,
+                    -(r.height if r.height is not None else -1),
+                    0 if "Mining" in (r.kind or "") else 1,
+                )
+            )
+            rows = pending + confirmed
             self._hist_key = key
             self._hist_rows = list(rows)
             return rows[:limit]
