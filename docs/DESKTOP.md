@@ -18,9 +18,29 @@ Double-click → wallet, send/receive, mining, network. Data under `~/.mhcoin/`.
 pip install -e ".[desktop]"
 python -m mhcoin.desktop --network mainnet
 # or: --network localnet
+# or: bash packaging/run_desktop.sh
 ```
 
-If `pywebview` is missing, the UI opens in the system browser.
+### Native window vs web version (browser)
+
+Both use the **same** UI (`mhcoin/desktop/webui.py`) and the same local HTTP API on `127.0.0.1` (default port `18765`). There is no separate public website build.
+
+| Mode | How |
+|------|-----|
+| Mac / native window | default when `pywebview` is installed |
+| Web version (browser) | `MHCOIN_DESKTOP_BROWSER=1` or missing `pywebview` |
+
+**Open web version on Mac:**
+
+```bash
+cd ~/src/MHCOIN   # or wherever you synced the tree
+source .venv/bin/activate
+export MHCOIN_DESKTOP_BROWSER=1
+bash packaging/run_desktop.sh
+# Browser opens http://127.0.0.1:18765/ — Ctrl+C in Terminal stops the server.
+```
+
+If `pywebview` is missing, the UI opens in the system browser automatically.
 Force browser: `MHCOIN_DESKTOP_BROWSER=1`.
 
 ## Build

@@ -883,11 +883,15 @@ function flash(text, ok=true){
   if (ok) setTimeout(()=>{ el.className="msg"; el.textContent=""; }, 4000);
 }
 async function api(path, body){
-  const opts = body === undefined ? {} : {
-    method: "POST",
-    headers: {"Content-Type":"application/json"},
-    body: JSON.stringify(body)
-  };
+  // cache:"no-store" matters in browser fallback (Safari/Chrome); pywebview is less sticky.
+  const opts = body === undefined
+    ? { cache: "no-store" }
+    : {
+        method: "POST",
+        headers: {"Content-Type":"application/json"},
+        body: JSON.stringify(body),
+        cache: "no-store",
+      };
   const r = await fetch("/api/"+path, opts);
   const j = await r.json();
   if (!r.ok || j.ok === false) throw new Error(j.error || ("HTTP "+r.status));
@@ -1000,7 +1004,6 @@ IMPORTANT
 • Stop mining in this app first (or Quit) — same data folder.
 • Rewards go to the address below.
 • Stop miner anytime with Ctrl+C.
-• Mining does NOT need the LAN sync URL. That URL is only to download code on your home Wi‑Fi.
 
 Your reward address:
 ${addr}
@@ -1017,9 +1020,6 @@ python3 -m venv .venv
 source .venv/bin/activate          # Windows: .venv\\Scripts\\activate
 pip install -r requirements.txt
 export PYTHONPATH="$PWD"           # Windows CMD: set PYTHONPATH=%CD%
-
-# Optional LAN-only sync (YOUR Wi‑Fi / office only — NOT public internet):
-# curl -fsSL http://192.168.0.221:8765/private_rc/MHCOIN-desktop-mainnet-sync.tar.gz | tar -xz
 
 ────────────────────────────────
 2) Start miner — macOS / Linux
@@ -1049,9 +1049,8 @@ cd ~\\MHCOIN
 ────────────────────────────────
 Notes
 ────────────────────────────────
-• Public users: use GitHub clone (above). No API server required to mine.
-• 192.168.0.221 = private sync for your LAN builds only.
-• Blockchain peers use P2P (seeds like your node :8333), not the sync HTTP port.
+• Get code via GitHub clone (step 1 above). No API server required to mine.
+• Blockchain peers use P2P (seeds like your node :8333).
 • Solo mining today — not a stratum pool / ASIC pool yet.
 `;
   const copyArea = $("modalCopy");
@@ -1059,7 +1058,7 @@ Notes
   try {
     await showModal({
       title: "Terminal mining",
-      message: "Copy commands → paste into Terminal. Public = GitHub. LAN URL is only for your local sync.",
+      message: "Copy commands → paste into Terminal.",
       mode: "copy",
       okLabel: "Done",
       copyText: text,
@@ -1381,6 +1380,7 @@ function setMineLogEl(el, lines){
 async function fillTxList(boxId, wantType, emptyMsg){
   const box = $(boxId);
   if (!box) return;
+  const want = Array.isArray(wantType) ? wantType : [wantType];
   const hadContent = !!box.dataset.fp;
   try {
     if (!hadContent) {
@@ -1397,13 +1397,16 @@ async function fillTxList(boxId, wantType, emptyMsg){
     } else {
       box.dataset.building = "0";
     }
-    const list = (j.txs || []).filter(t => txTypeOf(t) === wantType);
+    const list = (j.txs || []).filter(t => want.includes(txTypeOf(t)));
     const fp = list.map(t => (t.txid||"") + ":" + (t.kind||"") + ":" + (t.amount_mhc||"")).join("|")
       + (j.building ? ":b" : ":d");
     if (box.dataset.fp === fp) return;
     box.dataset.fp = fp;
     if (!list.length) {
-      box.innerHTML = "<p class='sub'>"+(j.building ? "Still scanning…" : emptyMsg)+"</p>";
+      const c = j.counts || {};
+      const tip = (!j.building && j.error) ? (" · error: "+j.error) : "";
+      const stats = (!j.building) ? (" (chain: sent "+(c.sent||0)+", received "+(c.received||0)+", mined "+(c.mined||0)+")") : "";
+      box.innerHTML = "<p class='sub'>"+(j.building ? "Still scanning…" : emptyMsg)+stats+tip+"</p>";
       return;
     }
     const note = j.building
@@ -1478,8 +1481,25 @@ function hideBoot(){
   const ov = $("bootOverlay");
   if (ov) ov.classList.add("hidden");
 }
+async function waitHistoryReady(maxMs){
+  const limit = maxMs || 90000;
+  const t0 = Date.now();
+  let last = null;
+  while (Date.now() - t0 < limit) {
+    try {
+      const h = await api("history");
+      last = h;
+      // Wait until a full (non-partial) snapshot is ready. Returning on
+      // !building alone raced unlock: empty cache → node start → Sent/Received stuck.
+      if (!h.building && !h.partial) return h;
+    } catch(e) {}
+    if ($("bootMsg")) $("bootMsg").textContent = "Building transaction history…";
+    await new Promise(r => setTimeout(r, 250));
+  }
+  return last;
+}
 async function bootAndEnter(){
-  showBoot("Unlocking wallet · starting node…");
+  showBoot("Unlocking wallet · building history…");
   unlocked = true;
   $("welcome").classList.add("hidden");
   $("app").classList.remove("hidden");
@@ -1497,9 +1517,9 @@ async function bootAndEnter(){
     if (!unlocked) return;
     refreshStatus();
   }, 1500);
-  // Kick history build in background (non-blocking).
-  api("history").catch(()=>{});
+  await waitHistoryReady();
   try {
+    if ($("bootMsg")) $("bootMsg").textContent = "Starting node…";
     await api("node/start", {});
     if ($("bootMsg")) $("bootMsg").textContent = "Connected · checking chain sync…";
   } catch(e) {
@@ -1537,9 +1557,13 @@ function historyCard(t, i){
   const amtClass = sign === "-" ? "out" : "in";
   const amtText = (sign === "-" ? "−" : "+") + amtRaw + " MHC";
   const height = (t.height!=null && t.height!=="") ? ("#" + t.height) : "mempool";
-  const conf = (t.confirmations!=null) ? (t.confirmations + "c") : "";
-  const meta = [height, conf, t.time_utc || ""].filter(Boolean).join(" · ");
   const txid = t.txid || "";
+  // Never abbreviate confirmations as "Nc" — Latin "c" reads as Cyrillic "с" (seconds).
+  const conf = (t.confirmations!=null)
+    ? (t.confirmations + (Number(t.confirmations) === 1 ? " confirmation" : " confirmations"))
+    : "";
+  const timeShown = t.time_utc || (txid ? "pending / unknown" : "—");
+  const meta = [height, conf, (t.time_utc || (txid ? "pending" : ""))].filter(Boolean).join(" · ");
   const fromList = (t.from && t.from.length) ? t.from : [];
   const toList = (t.to && t.to.length) ? t.to : [];
   const fromPretty = prettyFrom(fromList, type);
@@ -1565,6 +1589,9 @@ function historyCard(t, i){
       <div class="k">TXID</div>
       <div class="v" title="${esc(txid)}">${esc(txid || "—")}</div>
       <div class="a">${txid ? `<button type="button" class="linkish copyTx" data-txid="${esc(txid)}">Copy</button>` : ""}</div>
+      <div class="k">Time</div>
+      <div class="v">${esc(timeShown)}</div>
+      <div class="a"></div>
       <div class="k">${esc(fromLabel)}</div>
       <div class="v" title="${esc(fromShown)}">${esc(fromShown)}</div>
       <div class="a">${copyFrom}</div>
@@ -1889,14 +1916,19 @@ async function render(pre){
       <textarea id="addr" rows="3" readonly class="mono">${s.address||""}</textarea>
       <div class="row"><button class="primary" id="copyBtn">Copy Address</button></div>
       <h3>Received</h3>
-      <p class="sub">Incoming transfers with full TX details</p>
+      <p class="sub">Incoming transfers + block rewards (mining) for this wallet</p>
       <div id="recvList" class="act-list" style="max-height:42vh;overflow:auto"><p class="sub">Loading…</p></div>
       <div class="row"><button class="sm" id="recvReload">Reload</button></div>`;
     $("copyBtn").onclick = async () => {
       try { await navigator.clipboard.writeText(s.address||""); flash("Address copied"); }
       catch(e){ $("addr").select(); document.execCommand("copy"); flash("Address copied"); }
     };
-    const loadRecv = () => fillTxList("recvList", "received", "No received transactions yet.");
+    // Include mined: coinbase rewards are income (were only on Mining/History before).
+    const loadRecv = () => fillTxList(
+      "recvList",
+      ["received", "mined"],
+      "No received transfers or block rewards for this wallet yet."
+    );
     $("recvReload").onclick = () => loadRecv();
     loadRecv();
   } else if (active === "Send") {
@@ -1932,7 +1964,7 @@ async function render(pre){
         render();
       } catch(e){ flash(e.message, false); }
     };
-    const loadSent = () => fillTxList("sentList", "sent", "No sent transactions yet.");
+    const loadSent = () => fillTxList("sentList", "sent", "No sent transactions yet. Sends to other addresses appear here (not mining).");
     $("sentReload").onclick = () => loadSent();
     loadSent();
   } else if (active === "Mining") {
@@ -1992,10 +2024,14 @@ async function render(pre){
           const ok = await confirmBox("You are on LOCALNET, not Mainnet.\n\nMine the local test chain anyway?");
           if (!ok) return;
         }
+        const btn = $("mineStart");
+        if (btn) btn.disabled = true;
+        flash("Starting miner on live node…");
         await api("mine/start", {address:$("mineAddr").value.trim()});
         flash("Mining started");
         render();
       } catch(e){ flash(e.message, false); }
+      finally { const btn = $("mineStart"); if (btn) btn.disabled = false; }
     };
     $("mineStop").onclick = async () => {
       try { await api("mine/stop", {}); flash("Mining stopped"); render(); }
@@ -2224,11 +2260,11 @@ class DesktopState:
             return self._welcome_payload()
 
     def status(self) -> dict[str, Any]:
+        # Do not hold self.lock across chain_info / balance — that froze tab navigation.
+        c = self.ctrl
         with self.lock:
-            c = self.ctrl
             unlocked = c._password is not None
-            # Before unlock, keep status light so Welcome buttons stay responsive.
-            if not unlocked and c._node is None:
+            if not unlocked and c._node is None and not getattr(c, "_mining", False):
                 light = self._welcome_payload()
                 light["mining"] = False
                 light["hashrate"] = "-"
@@ -2246,63 +2282,66 @@ class DesktopState:
                 light["sync_pending"] = 0
                 light["sync_percent"] = None
                 return light
-            info = c.chain_info()
-            stats = c.mining_stats
-            addr = None
-            try:
-                addr = c.default_address()
-            except WalletError:
-                pass
-            node_running = bool(info.get("node_running"))
-            txs: list[dict] = []
-            balance = "0.00000000 MHC"
-            if addr:
-                if not node_running:
-                    try:
-                        balance = c.balance_text()
-                    except Exception:
-                        balance = c.cached_balance_text()
-                else:
-                    balance = c.cached_balance_text()
+        info = c.chain_info()
+        stats = c.mining_stats
+        addr = None
+        try:
+            addr = c.default_address()
+        except WalletError:
+            pass
+        node_running = bool(info.get("node_running"))
+        txs: list[dict] = []
+        balance = "0.00000000 MHC"
+        if addr:
+            # Never open LocalNode while mining / node owns datadir — freezes UI.
+            if node_running or getattr(c, "_mining", False):
+                balance = c.cached_balance_text()
+            else:
                 try:
-                    txs = c.recent_for_ui(25)
+                    balance = c.balance_text()
                 except Exception:
-                    txs = list(getattr(c, "_recent_cache", []) or [])[:25]
-            hr = stats["hashrate"]
-            return {
-                "ok": True,
-                "network": info["network"],
-                "height": info["height"],
-                "tip": info["tip"],
-                "peers": info["peers"],
-                "sync": info["sync"],
-                "syncing": bool(info.get("syncing")),
-                "sync_state": info.get("sync_state"),
-                "sync_progress": info.get("sync_progress"),
-                "sync_target": info.get("sync_target"),
-                "sync_pending": info.get("sync_pending"),
-                "sync_percent": info.get("sync_percent"),
-                "genesis_hash": info.get("genesis_hash"),
-                "seeds": info.get("seeds") or [],
-                "node_running": node_running,
-                "listen_port": info.get("listen_port"),
-                "balance": balance,
-                "balance_cached": bool(node_running and c._balance_cache_valid),
-                "address": addr,
-                "wallet_exists": c.wallet_exists(),
-                "unlocked": unlocked,
-                "mining": stats["mining"],
-                "hashrate": f"{hr:,.0f} H/s" if hr else "-",
-                "blocks_found": stats["blocks_found"],
-                "rewards": stats["rewards_text"],
-                "mine_log": stats.get("log") or [],
-                "data_dir": str(c.data_dir),
-                "wallet_path": str(c.wallet_file_path()),
-                "txs": txs,
-                "wallets": c.list_wallets() if c.wallet_exists() else [],
-                "last_txid": c.last_txid(),
-                "chain_error": info.get("chain_error"),
-            }
+                    balance = c.cached_balance_text()
+            try:
+                txs = c.recent_for_ui(25)
+            except Exception:
+                txs = list(getattr(c, "_recent_cache", []) or [])[:25]
+        hr = stats["hashrate"]
+        return {
+            "ok": True,
+            "network": info["network"],
+            "height": info["height"],
+            "tip": info["tip"],
+            "peers": info["peers"],
+            "sync": info["sync"],
+            "syncing": bool(info.get("syncing")),
+            "sync_state": info.get("sync_state"),
+            "sync_progress": info.get("sync_progress"),
+            "sync_target": info.get("sync_target"),
+            "sync_pending": info.get("sync_pending"),
+            "sync_percent": info.get("sync_percent"),
+            "genesis_hash": info.get("genesis_hash"),
+            "seeds": info.get("seeds") or [],
+            "node_running": node_running,
+            "listen_port": info.get("listen_port"),
+            "balance": balance,
+            "balance_cached": bool(
+                (node_running or getattr(c, "_mining", False)) and c._balance_cache_valid
+            ),
+            "address": addr,
+            "wallet_exists": c.wallet_exists(),
+            "unlocked": unlocked,
+            "mining": stats["mining"],
+            "hashrate": f"{hr:,.0f} H/s" if hr else "-",
+            "blocks_found": stats["blocks_found"],
+            "rewards": stats["rewards_text"],
+            "mine_log": stats.get("log") or [],
+            "data_dir": str(c.data_dir),
+            "wallet_path": str(c.wallet_file_path()),
+            "txs": txs,
+            "wallets": c.list_wallets() if c.wallet_exists() else [],
+            "last_txid": c.last_txid(),
+            "chain_error": info.get("chain_error"),
+        }
 
 
 def _json(handler: BaseHTTPRequestHandler, code: int, payload: dict) -> None:
@@ -2327,6 +2366,9 @@ def make_handler(state: DesktopState):
                 self.send_response(200)
                 self.send_header("Content-Type", "text/html; charset=utf-8")
                 self.send_header("Content-Length", str(len(raw)))
+                # Browser fallback reuses this URL — never serve a stale shell.
+                self.send_header("Cache-Control", "no-store, no-cache, must-revalidate")
+                self.send_header("Pragma", "no-cache")
                 self.end_headers()
                 self.wfile.write(raw)
                 return
@@ -2368,12 +2410,29 @@ def make_handler(state: DesktopState):
 
         def _dispatch(self, path: str, body: dict) -> dict:
             c = state.ctrl
+            # Keep UI responsive: do not hold state.lock across node stop / mining start
+            # (those can take seconds; status polling would freeze the whole app).
+            if path == "/api/mine/start":
+                addr = str(body.get("address") or "") or None
+                c.start_mining(addr)
+                return {"ok": True}
+            if path == "/api/mine/stop":
+                c.stop_mining()
+                return {"ok": True}
+            if path == "/api/node/start":
+                c.start_node()
+                return {"ok": True, "seeds": c.chain_info().get("seeds") or []}
+            if path == "/api/node/stop":
+                c.stop_node(rebuild_history=True, join_timeout=3.0)
+                return {"ok": True}
             with state.lock:
                 if path == "/api/wallet/create":
                     addr = c.create_wallet(str(body.get("password") or ""))
-                    # Do not scan the full chain under the API lock — UI would freeze.
+                    # Async full-chain scan (must not use full_chain=False): short
+                    # windows omit prev outs from tx_index so Sent never appears.
+                    # Runs before node/start holds the datadir (node waits on _io).
                     try:
-                        c.request_history_build(full_chain=False)
+                        c.request_history_build(full_chain=True)
                     except Exception:
                         pass
                     return {
@@ -2386,9 +2445,9 @@ def make_handler(state: DesktopState):
                         raise WalletError("no wallet found")
                     wid = str(body.get("wallet_id") or "").strip() or None
                     addr = c.unlock(str(body.get("password") or ""), wallet_id=wid)
-                    # Chain open + history happen after enterApp / node start (async).
+                    # Full history before P2P node owns the datadir (see create).
                     try:
-                        c.request_history_build(full_chain=False)
+                        c.request_history_build(full_chain=True)
                     except Exception:
                         pass
                     return {"ok": True, "address": addr}
@@ -2429,19 +2488,6 @@ def make_handler(state: DesktopState):
                         fee_mhc=str(body.get("fee") or "") or None,
                     )
                     return {"ok": True, "txid": txid}
-                if path == "/api/mine/start":
-                    addr = str(body.get("address") or "") or None
-                    c.start_mining(addr)
-                    return {"ok": True}
-                if path == "/api/mine/stop":
-                    c.stop_mining()
-                    return {"ok": True}
-                if path == "/api/node/start":
-                    c.start_node()
-                    return {"ok": True, "seeds": c.chain_info().get("seeds") or []}
-                if path == "/api/node/stop":
-                    c.stop_node()
-                    return {"ok": True}
                 if path == "/api/shutdown":
                     def _bye() -> None:
                         import time
@@ -2498,7 +2544,9 @@ def run_web_desktop(network: str | None = None, port: int | None = None) -> None
     try:
         ok, detail = _open_native_window(url, state=state)
         if not ok:
-            print(f"Shell: browser fallback — {detail}")
+            print(f"Shell: browser / web version — {detail}")
+            print(f"Open: {url}")
+            print("Same UI + local API as Mac native window (127.0.0.1 only; not a public site).")
             if not frozen:
                 print("Fix native window:  pip install 'pywebview>=5.0'")
                 print("Then relaunch. Force browser: MHCOIN_DESKTOP_BROWSER=1")

@@ -259,10 +259,19 @@ class Peer:
                 self._set_state(PeerState.HANDSHAKED)
                 logger.info("Handshake completed with %s", self.addr)
                 if self.on_handshaked:
-                    try:
-                        self.on_handshaked(self)
-                    except Exception:
-                        logger.exception("on_handshaked")
+                    # NEVER run sync/IBD on the read thread — it blocked VERSION/VERACK
+                    # for other peers and left sockets in CLOSE-WAIT (Mac handshake timeouts).
+                    cb = self.on_handshaked
+
+                    def _run() -> None:
+                        try:
+                            cb(self)
+                        except Exception:
+                            logger.exception("on_handshaked")
+
+                    threading.Thread(
+                        target=_run, name=f"hs-{self.addr}", daemon=True
+                    ).start()
 
     def _read_loop(self) -> None:
         try:
