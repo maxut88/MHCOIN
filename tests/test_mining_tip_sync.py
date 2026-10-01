@@ -75,6 +75,48 @@ def test_mine_block_aborts_mid_search(tmp_path: Path):
     chain.close()
 
 
+def test_abortable_pow_emits_progress_across_chunks(tmp_path: Path):
+    """25k abort chunks must still drive Desktop nonce/H/s log via progress()."""
+    chain = Blockchain(tmp_path / "prog", network="regtest")
+    chain.init_with_genesis(get_network_genesis("regtest"))
+    kp = generate_keypair()
+    pkh = hash160(kp.public_key_compressed)
+    tip = chain.tip_hash
+    assert tip is not None
+    bits = chain.get_next_work_for_parent(tip)
+    block = build_block_template(
+        height=1,
+        previous_hash=tip,
+        timestamp=chain.median_time_past_for_parent(tip) + 1,
+        bits=bits,
+        mempool=Mempool(),
+        utxo=chain.utxo,
+        miner_pubkey_hash=pkh,
+    )
+    block.header.bits = 0x1D00FFFF
+    seen: list[tuple[int, float]] = []
+
+    def progress(nonce: int, _h: bytes, hps: float) -> None:
+        seen.append((nonce, hps))
+
+    polls = {"n": 0}
+
+    def abort() -> bool:
+        polls["n"] += 1
+        return polls["n"] >= 5
+
+    with pytest.raises(MiningAborted):
+        mine_block_cancellable(
+            block,
+            abort_check=abort,
+            abort_every=25_000,
+            progress=progress,
+        )
+    assert len(seen) >= 3, f"expected chunk-boundary progress, got {seen}"
+    assert all(hps > 0 for _, hps in seen)
+    chain.close()
+
+
 def test_remote_block_cancels_stale_pow_and_advances_tip(tmp_path: Path):
     """While PoW runs on template N, accept remote block N → miner aborts, tip advances."""
     data = tmp_path / "node"

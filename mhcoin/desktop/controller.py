@@ -1433,12 +1433,14 @@ class CoreController:
                             now = time.time()
                             if now - self._mine_log_last_prog >= 0.5:
                                 self._mine_log_last_prog = now
-                                plain = (
-                                    f"· height {height}  nonce {nonce:,}  "
-                                    f"{hps/1000:.1f} kH/s" if hps >= 1000 else
-                                    f"· height {height}  nonce {nonce:,}  {hps:,.0f} H/s"
+                                rate = (
+                                    f"{hps/1000:.1f} kH/s"
+                                    if hps >= 1000
+                                    else f"{hps:,.0f} H/s"
                                 )
-                                self._mine_log_line(plain)
+                                self._mine_log_line(
+                                    f"· height {height}  nonce {nonce:,}  {rate}"
+                                )
 
                         block, height, bits = rt.prepare_block_template(
                             reward_addr, hrp=self.hrp
