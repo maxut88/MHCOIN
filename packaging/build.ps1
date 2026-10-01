@@ -118,4 +118,3 @@ Compress-Archive -Path "$Stage\*" -DestinationPath $Zip
 Write-Host "Windows exe: $ExeOut"
 Write-Host "Windows zip: $Zip"
 Get-ChildItem dist\release | Format-Table Name, Length, LastWriteTime
-)
