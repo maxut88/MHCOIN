@@ -7,6 +7,7 @@ PoW / fingerprint sources.
 
 from __future__ import annotations
 
+import time
 from typing import Callable
 
 from mhcoin.blockchain.block import Block
@@ -29,11 +30,17 @@ def mine_block_cancellable(
     max_nonce: int = 0xFFFFFFFF,
     start_nonce: int = 0,
 ) -> Block:
-    """Mine with periodic ``abort_check``; raises ``MiningAborted`` if True."""
+    """Mine with periodic ``abort_check``; raises ``MiningAborted`` if True.
+
+    Progress is reported at chunk boundaries because ``mine_block`` only
+    callbacks every 100k nonces — smaller abort chunks would otherwise
+    silence the Desktop mining log (nonce / H/s lines).
+    """
     if abort_every < 1:
         abort_every = 1
     nonce = start_nonce
     first = True
+    t0 = time.time()
     while nonce <= max_nonce:
         if abort_check is not None and abort_check():
             raise MiningAborted("mining aborted")
@@ -49,5 +56,9 @@ def mine_block_cancellable(
         except RuntimeError:
             # Chunk exhausted without PoW — continue.
             first = False
+            if progress is not None:
+                elapsed = max(time.time() - t0, 1e-9)
+                tried = end - start_nonce + 1
+                progress(end, block.header.block_hash(), tried / elapsed)
             nonce = end + 1
     raise RuntimeError("nonce space exhausted without finding PoW")
