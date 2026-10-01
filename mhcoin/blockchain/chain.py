@@ -89,6 +89,24 @@ class Blockchain:
             except sqlite3.Error:
                 pass
             self._closed = False
+            # Fail fast with a clear message if a prior crash corrupted the DB
+            # (macOS concurrent readers historically left "disk image is malformed").
+            try:
+                row = self._db.execute("PRAGMA quick_check").fetchone()
+                check = str(row[0]) if row else "ok"
+            except sqlite3.DatabaseError as e:
+                self._db.close()
+                raise ChainError(
+                    f"chain.sqlite is corrupted ({e}). Quit the app, keep wallet.json, "
+                    f"delete chain.sqlite* and utxo.sqlite* in {self.data_dir}, then re-sync."
+                ) from e
+            if check.lower() != "ok":
+                self._db.close()
+                raise ChainError(
+                    f"chain.sqlite failed integrity check ({check}). Quit the app, keep "
+                    f"wallet.json, delete chain.sqlite* and utxo.sqlite* in {self.data_dir}, "
+                    f"then re-sync."
+                )
             self._ensure_schema()
             self._tip_hash: bytes | None = None
             self._height: int = -1

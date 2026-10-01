@@ -800,7 +800,7 @@ HTML = r"""<!DOCTYPE html>
         <p class="sync-title" id="bootSyncTitle">Preparing…</p>
         <span class="sync-pct" id="bootSyncPct">…</span>
       </div>
-      <p class="sync-meta" id="bootSyncMeta">Like Bitcoin Core: blocks download from peers until you catch up.</p>
+      <p class="sync-meta" id="bootSyncMeta">Blocks download from peers until your node catches up to the network.</p>
       <div class="sync-bar indeterminate" id="bootSyncBar"><i id="bootSyncFill"></i></div>
     </div>
   </div>
@@ -1398,7 +1398,8 @@ async function fillTxList(boxId, wantType, emptyMsg){
       box.dataset.building = "0";
     }
     const list = (j.txs || []).filter(t => want.includes(txTypeOf(t)));
-    const fp = list.map(t => (t.txid||"") + ":" + (t.kind||"") + ":" + (t.amount_mhc||"")).join("|")
+    // Include fee so Sent cards refresh when fee arrives after a partial scan.
+    const fp = list.map(t => (t.txid||"") + ":" + (t.kind||"") + ":" + (t.amount_mhc||"") + ":" + (t.fee_mhc||"")).join("|")
       + (j.building ? ":b" : ":d");
     if (box.dataset.fp === fp) return;
     box.dataset.fp = fp;
@@ -1482,24 +1483,27 @@ function hideBoot(){
   if (ov) ov.classList.add("hidden");
 }
 async function waitHistoryReady(maxMs){
-  const limit = maxMs || 90000;
+  const limit = maxMs || 20000;
   const t0 = Date.now();
   let last = null;
   while (Date.now() - t0 < limit) {
     try {
       const h = await api("history");
       last = h;
-      // Wait until a full (non-partial) snapshot is ready. Returning on
-      // !building alone raced unlock: empty cache → node start → Sent/Received stuck.
+      // Full snapshot ready — or a completed empty scan (fresh wipe / no txs).
       if (!h.building && !h.partial) return h;
+      // Don't block unlock forever if history is still warming up.
+      if (!h.building && Date.now() - t0 > 4000) return h;
     } catch(e) {}
     if ($("bootMsg")) $("bootMsg").textContent = "Building transaction history…";
+    if ($("bootSyncTitle")) $("bootSyncTitle").textContent = "Preparing wallet…";
     await new Promise(r => setTimeout(r, 250));
   }
   return last;
 }
 async function bootAndEnter(){
   showBoot("Unlocking wallet · building history…");
+  if ($("bootSyncTitle")) $("bootSyncTitle").textContent = "Preparing wallet…";
   unlocked = true;
   $("welcome").classList.add("hidden");
   $("app").classList.remove("hidden");
@@ -1520,12 +1524,14 @@ async function bootAndEnter(){
   await waitHistoryReady();
   try {
     if ($("bootMsg")) $("bootMsg").textContent = "Starting node…";
+    if ($("bootSyncTitle")) $("bootSyncTitle").textContent = "Connecting to peers…";
     await api("node/start", {});
     if ($("bootMsg")) $("bootMsg").textContent = "Connected · checking chain sync…";
   } catch(e) {
     if ($("bootMsg")) $("bootMsg").textContent = "Node start: " + (e.message||e);
+    if ($("bootSyncTitle")) $("bootSyncTitle").textContent = "Node error";
   }
-  // Show splash briefly with live sync numbers (Bitcoin Core style).
+  // Show splash briefly with live sync numbers during initial block download.
   const t0 = Date.now();
   for (let i = 0; i < 12; i++) {
     try {

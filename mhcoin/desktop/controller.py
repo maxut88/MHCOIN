@@ -21,7 +21,6 @@ from typing import Callable
 from mhcoin.blockchain.disk_lock import chain_disk_lock
 from mhcoin.blockchain.genesis import get_network_genesis
 from mhcoin.blockchain.chain import ChainError
-from mhcoin.blockchain.readonly_chain import ReadOnlyChain
 from mhcoin.config_loader import resolve_data_dir
 from mhcoin.consensus.params import get_network_params
 from mhcoin.consensus.proof_of_work import mine_block
@@ -190,8 +189,8 @@ class CoreController:
             src = self._recent_cache or self._hist_dicts
             return list(src)[:limit]
         # Full chain required: partial windows miss Sent (prev outpoints
-        # created outside the window are absent from tx_index). Works via
-        # ReadOnlyChain even while the P2P node owns the datadir.
+        # created outside the window are absent from tx_index). With a live
+        # P2P node the scan reuses NodeRuntime.chain under chain._lock.
         self.request_history_build(full_chain=True)
         return list(self._recent_cache)[:limit]
 
@@ -567,7 +566,7 @@ class CoreController:
                     progress_height = int(sm.get("progress_height") or height)
                     target_hint = int(sm.get("target_hint") or 0)
                     pending_blocks = int(sm.get("pending_blocks") or 0)
-                # Bitcoin Core–style IBD: behind peer tip hint or actively downloading.
+                # Initial block download: behind peer tip hint or actively downloading.
                 syncing = sync_state in (
                     "REQUESTING_HEADERS",
                     "DOWNLOADING_BLOCKS",
@@ -672,8 +671,37 @@ class CoreController:
         except Exception:
             logger.exception("transfer log write failed")
 
+    def _transfer_log_fee_map(self) -> dict[str, int]:
+        """txid → fee_sats from durable send journal (when known)."""
+        out: dict[str, int] = {}
+        for e in self._load_transfer_log():
+            txid = str(e.get("txid") or "")
+            if not txid or e.get("fee_sats") is None:
+                continue
+            try:
+                out[txid] = abs(int(e["fee_sats"]))
+            except (TypeError, ValueError):
+                continue
+        return out
+
+    def _enrich_fees_from_log(self, rows: list[TxRow]) -> list[TxRow]:
+        """Fill missing Sent fees from wallet_transfers.json (chain scan can miss vin)."""
+        fees = self._transfer_log_fee_map()
+        if not fees:
+            return rows
+        for r in rows:
+            if r.fee_sats is not None or not r.txid:
+                continue
+            if not (r.kind or "").startswith("Sent"):
+                continue
+            fee = fees.get(r.txid)
+            if fee is not None:
+                r.fee_sats = fee
+        return rows
+
     def _merge_transfer_log(self, rows: list[TxRow], addr: str) -> list[TxRow]:
         """Ensure logged sends appear even if mempool was dropped before confirm."""
+        rows = self._enrich_fees_from_log(rows)
         have = {r.txid for r in rows if r.txid}
         extra: list[TxRow] = []
         for e in self._load_transfer_log():
@@ -683,6 +711,11 @@ class CoreController:
             txid = str(e.get("txid") or "")
             if not txid or txid in have:
                 continue
+            log_fee = e.get("fee_sats")
+            try:
+                log_fee_i = abs(int(log_fee)) if log_fee is not None else None
+            except (TypeError, ValueError):
+                log_fee_i = None
             if kind.startswith("Sent"):
                 if from_a and from_a != addr:
                     continue
@@ -696,7 +729,7 @@ class CoreController:
                         timestamp=e.get("timestamp"),
                         from_addrs=[from_a or addr],
                         to_addrs=[to_a] if to_a else [],
-                        fee_sats=e.get("fee_sats"),
+                        fee_sats=log_fee_i,
                         confirmations=(
                             e.get("confirmations") if e.get("height") is not None else 0
                         ),
@@ -715,7 +748,7 @@ class CoreController:
                         timestamp=e.get("timestamp"),
                         from_addrs=[from_a] if from_a else [],
                         to_addrs=[to_a or addr],
-                        fee_sats=e.get("fee_sats"),
+                        fee_sats=log_fee_i,
                         confirmations=(
                             e.get("confirmations") if e.get("height") is not None else 0
                         ),
@@ -737,8 +770,7 @@ class CoreController:
 
         def _needs_full() -> bool:
             return (
-                not self._hist_dicts
-                or self._hist_key is None
+                self._hist_key is None
                 or self._hist_key_is_partial()
                 or bool(getattr(self, "_hist_need_full", False))
             )
@@ -773,13 +805,13 @@ class CoreController:
     def request_history_build(self, *, full_chain: bool = True) -> None:
         """Kick a background full-history scan (non-blocking for UI).
 
-        Safe while the P2P node owns the datadir: wallet_history uses ReadOnlyChain
-        on chain.sqlite (WAL mode=ro) so Sent/Received still populate when peers
-        are down / handshake fails but the node process stays up.
+        While the P2P node is up, scans use the node's Blockchain connection under
+        chain._lock (never a second sqlite handle — that SIGSEGV'd Apple libsqlite
+        on macOS via ReadOnlyChain). Solo-mining without a node still defers until
+        the miner releases the LocalNode datadir.
         """
-        # Defer full scans while solo-mining: concurrent ReadOnlyChain + live
-        # accept_block has segfaulted sqlite on macOS (null pager page).
-        if self._mining:
+        # Solo-mine path (no P2P): LocalNode + miner both touch sqlite — defer.
+        if self._mining and self._node is None:
             with self._hist_build_lock:
                 if full_chain:
                     self._hist_need_full = True
@@ -795,6 +827,10 @@ class CoreController:
 
         def _job() -> None:
             try:
+                if self._mining and self._node is None:
+                    with self._hist_build_lock:
+                        self._hist_need_full = True
+                    return
                 do_full = want_full
                 rows = self.wallet_history(2000, full_chain=do_full)
                 dicts = [self._txrow_to_dict(r) for r in rows]
@@ -815,7 +851,7 @@ class CoreController:
                 with self._hist_build_lock:
                     self._hist_building = False
                     need_again = bool(getattr(self, "_hist_need_full", False))
-                if need_again:
+                if need_again and not (self._mining and self._node is None):
                     self.request_history_build(full_chain=True)
 
         threading.Thread(target=_job, name="mhcoin-hist-build", daemon=True).start()
@@ -835,6 +871,17 @@ class CoreController:
                     continue
                 k = (str(d.get("txid") or ""), str(d.get("kind") or ""), str(d.get("type") or ""))
                 if k in seen:
+                    # Prefer a known fee when a later source (recent / transfer log) has it.
+                    if d.get("fee_mhc") not in (None, "", "—"):
+                        for prev in txs:
+                            pk = (
+                                str(prev.get("txid") or ""),
+                                str(prev.get("kind") or ""),
+                                str(prev.get("type") or ""),
+                            )
+                            if pk == k and prev.get("fee_mhc") in (None, "", "—"):
+                                prev["fee_mhc"] = d.get("fee_mhc")
+                                break
                     continue
                 seen.add(k)
                 txs.append(d)
@@ -852,12 +899,13 @@ class CoreController:
         except Exception:
             logger.debug("history log merge failed", exc_info=True)
         key_partial = self._hist_key_is_partial()
-        partial = (not bool(self._hist_dicts)) or key_partial
-        # Upgrade stuck partial / empty scans even while the node is running
-        # (ReadOnlyChain). Unlock used to kick full_chain=False which set
-        # _hist_dicts and blocked a full rebuild — Sent silently missing.
+        # Empty history is valid (fresh wipe / no txs yet). Only treat as partial
+        # when no completed scan key exists or the last scan was a short window.
+        partial = (self._hist_key is None) or key_partial
+        # Kick a rebuild when cache is empty/partial. Safe with live P2P node:
+        # wallet_history uses the node's chain under chain._lock (no 2nd sqlite).
         if not building and (
-            not self._hist_dicts or self._hist_key is None or key_partial
+            self._hist_key is None or key_partial
         ):
             self.request_history_build(full_chain=True)
             with self._hist_build_lock:
@@ -892,20 +940,19 @@ class CoreController:
     def _history_scan_sources(self):
         """Chain + mempool for wallet_history.
 
-        When the P2P node owns the datadir, open chain.sqlite read-only (WAL) so
-        Sent/Received still classify without LocalNode / disk lock contention.
+        When the P2P node owns the datadir, reuse NodeRuntime.chain (same sqlite
+        connection) under chain._lock — never open a second ReadOnlyChain handle
+        (that path SIGSEGV'd on macOS Apple libsqlite).
         Returns (chain, mempool_txs, cleanup_fn).
         """
         if self._node is not None:
-            roc = ReadOnlyChain(self.data_dir)
+            rt = self._node
             mem_txs: list = []
             try:
-                mp_path = self.data_dir / "mempool.json"
-                if mp_path.is_file():
-                    mem_txs = list(Mempool(mp_path).list_txs())
+                mem_txs = list(rt.mempool.list_txs())
             except Exception:
-                logger.debug("readonly mempool load failed", exc_info=True)
-            return roc, mem_txs, roc.close
+                logger.debug("node mempool list for history failed", exc_info=True)
+            return rt.chain, mem_txs, None
 
         node = self._get_local()
         return node.chain, list(node.mempool.list_txs()), None
@@ -931,21 +978,37 @@ class CoreController:
         except Exception:
             logger.debug("list_wallets for history failed", exc_info=True)
 
-        # Hold _io only when LocalNode owns the datadir (not for ReadOnlyChain).
-        hold_io = self._node is None
-        if hold_io:
+        # Serialize against NodeRuntime writers via chain._lock; otherwise hold _io
+        # for LocalNode. Never open a second sqlite connection on chain.sqlite.
+        hold_io = False
+        chain_lock = None
+        if self._node is not None:
+            chain_lock = self._node.chain._lock
+            chain_lock.acquire()
+        else:
+            hold_io = True
             self._io.acquire()
         cleanup = None
         try:
             chain, mempool_txs, cleanup = self._history_scan_sources()
             h = chain.height
             if h < 0:
+                # Fresh datadir (no genesis yet) — mark scan complete so unlock
+                # boot is not stuck on partial forever.
+                key = ("hist-v5-empty", tuple(sorted(owned_pkh.values())), "", 0, True, int(limit))
+                self._hist_key = key
+                self._hist_rows = []
+                try:
+                    self._hist_dicts = []
+                except Exception:
+                    pass
                 return []
             tip = chain.tip_hash.hex() if chain.tip_hash else ""
             mem_n = len(mempool_txs)
-            key = ("hist-v4", tuple(sorted(owned_pkh.values())), tip, mem_n, bool(full_chain), int(limit))
-            if self._hist_key == key and self._hist_rows:
-                return list(self._hist_rows)[:limit]
+            key = ("hist-v5", tuple(sorted(owned_pkh.values())), tip, mem_n, bool(full_chain), int(limit))
+            # Empty rows are a valid cache hit (wallet has no sends/receives yet).
+            if self._hist_key == key:
+                return list(self._hist_rows or [])[:limit]
 
             # Classification window (UI limit). Prev-out index always covers the
             # full active chain — otherwise Sent is missed when the spent UTXO
@@ -1206,14 +1269,26 @@ class CoreController:
             rows = pending + confirmed
             # Durable send journal (mempool can be wiped when mining pauses P2P).
             rows = self._merge_transfer_log(rows, addr)
-            # Mark log entries confirmed when we see them on-chain.
+            # Mark log entries confirmed when we see them on-chain; backfill fee.
             try:
-                onchain = {r.txid for r in transfer_rows if r.txid}
+                onchain_fees = {
+                    r.txid: r.fee_sats
+                    for r in transfer_rows
+                    if r.txid and (r.kind or "").startswith("Sent")
+                }
                 log_rows = self._load_transfer_log()
                 changed = False
                 for e in log_rows:
-                    if e.get("txid") in onchain and not e.get("confirmed"):
+                    txid = e.get("txid")
+                    if txid in onchain_fees and not e.get("confirmed"):
                         e["confirmed"] = True
+                        changed = True
+                    if (
+                        txid in onchain_fees
+                        and e.get("fee_sats") is None
+                        and onchain_fees.get(txid) is not None
+                    ):
+                        e["fee_sats"] = int(onchain_fees[txid])
                         changed = True
                 if changed:
                     self._transfer_log_path().write_text(
@@ -1236,6 +1311,11 @@ class CoreController:
                     pass
             if hold_io:
                 self._io.release()
+            if chain_lock is not None:
+                try:
+                    chain_lock.release()
+                except Exception:
+                    pass
 
     # --- mining -------------------------------------------------------------
 
@@ -1286,7 +1366,7 @@ class CoreController:
         addr = address or self.default_address()
         if not validate_address(addr, hrp=self.hrp):
             raise ValueError("invalid reward address")
-        # Bitcoin-style: mine through the live P2P node (same process owns datadir).
+        # Mine through the live P2P node (same process owns datadir).
         # Do NOT stop the node — template/accept go via NodeRuntime + relay INV.
         self._resume_node_after_mine = False
         if self._node is None:
@@ -1423,6 +1503,15 @@ class CoreController:
                         if on_block:
                             on_block(connected, block.block_hash().hex(), reward)
                     except Exception as e:
+                        err = str(e).lower()
+                        if "malformed" in err or "disk image" in err:
+                            logger.exception("accept mined block failed — corrupt chain DB")
+                            self._mine_log_line(
+                                "ERROR chain.sqlite is corrupted — stop mining, "
+                                "delete chain/utxo sqlite files (keep wallet.json), re-sync"
+                            )
+                            self._miner_stop.set()
+                            break
                         logger.exception("accept mined block failed")
                         self._mine_log_line(f"stale/reject #{height}: {e}")
                         continue
@@ -1515,7 +1604,9 @@ class CoreController:
                     host=host,
                     port=listen,
                     connect=peers,
-                    enable_listen=True,
+                    # Desktop: outbound-only — listening invites LAN reconnect floods
+                    # that trip misbehavior bans (and fights the seed for :8333).
+                    enable_listen=False,
                 )
                 self._node = rt
 
