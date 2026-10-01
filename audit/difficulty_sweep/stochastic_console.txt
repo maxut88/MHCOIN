@@ -1,0 +1,64 @@
+W30/D1/16 stochastic validation: seeds=50 blocks=10000
+... 1×
+   True ok exp_mean=660.2
+... ×10
+   True ok exp_mean=598.9 rel=9.99 exp_std=129.2
+... ×100
+   True ok exp_mean=598.9 rel=99.90 exp_std=129.1
+... step-up
+  1→2 True ok
+  1→5 True ok
+  1→10 True ok
+  1→100 True ok
+... step-down
+  100→50 True ok
+  100→10 True ok
+  100→1 True ok
+  10→5 True ok
+  10→2 True ok
+  10→1 True ok
+... shock
+   True ok
+... volatile
+  alt 10/100 p100 True
+  alt 10/100 p30 True
+  alt 2/20 p100 True
+... determinism
+   {'ok': True, 'seeds': {'1': True, '7': True, '21': True, '42': True, '50': True}}
+
+# W30/D1/16 STOCHASTIC VALIDATION
+- Seeds: 50
+- Blocks per seed: 10000
+## 1×
+- actual interval mean: 662.7
+- expected interval tail mean: 660.2
+- expected interval tail p05/p95: 600.8/813.0
+- difficulty tail mean/p05/p95: 1.101/1.002/1.356
+- PASS/FAIL: PASS (ok)
+## ×10
+- actual interval mean: 601.0
+- expected interval tail mean: 598.9
+- expected interval tail p05/p95: 404.3/823.6
+- difficulty tail mean/p05/p95: 9.990/6.746/13.734
+- control expected mean/std: 600.0/0.0
+- PASS/FAIL: PASS (ok)
+## ×100
+- actual interval mean: 601.0
+- expected interval tail mean: 598.9
+- expected interval tail p05/p95: 404.2/823.4
+- difficulty tail mean/p05/p95: 99.896/67.457/137.324
+- control expected mean/std: 600.0/0.0
+- PASS/FAIL: PASS (ok)
+## STEP-UP
+- PASS/FAIL: PASS
+## STEP-DOWN
+- PASS/FAIL: PASS
+## SHOCK
+- PASS/FAIL: PASS
+## VOLATILE
+- PASS/FAIL: PASS
+## DETERMINISM
+- PASS/FAIL: PASS
+
+OVERALL STOCHASTIC:
+    PASS

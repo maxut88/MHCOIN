@@ -16,9 +16,12 @@ from mhcoin.blockchain.undo import BlockUndo
 from mhcoin.blockchain.validation import ValidationError, validate_block
 from mhcoin.consensus.block_reward import get_block_subsidy
 from mhcoin.consensus.chain_work import work_for_header
-from mhcoin.consensus.difficulty import bits_to_target
-from mhcoin.consensus.params import get_network_params
-from mhcoin.constants import REGTEST_NBITS
+from mhcoin.consensus.difficulty import (
+    get_next_work,
+    median_time_past,
+    pow_limit_for_network,
+)
+from mhcoin.consensus.params import DIFFICULTY_WINDOW, MTP_WINDOW, get_network_params
 from mhcoin.mempool import Mempool, MempoolError
 from mhcoin.network import constants as net_constants
 from mhcoin.transaction.transaction import Transaction
@@ -380,6 +383,77 @@ class Blockchain:
     def get_height_of_hash(self, block_hash: bytes) -> int | None:
         entry = self.get_index(block_hash)
         return entry.height if entry else None
+
+    def ancestor_index_window(
+        self,
+        tip_hash: bytes,
+        *,
+        limit: int,
+        overlay: dict[bytes, BlockIndexEntry] | None = None,
+    ) -> list[BlockIndexEntry]:
+        """
+        Walk ancestry ending at ``tip_hash`` (inclusive).
+
+        Returns oldest → newest, at most ``limit`` entries.
+        ``overlay`` supplies in-memory headers (e.g. sync batch) not yet indexed.
+        """
+        if limit <= 0:
+            return []
+        out: list[BlockIndexEntry] = []
+        cur: bytes | None = tip_hash
+        while cur is not None and len(out) < limit:
+            entry: BlockIndexEntry | None = None
+            if overlay and cur in overlay:
+                entry = overlay[cur]
+            else:
+                entry = self.get_index(cur)
+            if entry is None:
+                break
+            out.append(entry)
+            if entry.height <= 0:
+                break
+            cur = entry.prev_hash
+        out.reverse()
+        return out
+
+    def get_next_work_for_parent(
+        self,
+        parent_hash: bytes,
+        *,
+        overlay: dict[bytes, BlockIndexEntry] | None = None,
+    ) -> int:
+        """Required compact bits for the child of ``parent_hash`` (branch-aware)."""
+        parent: BlockIndexEntry | None
+        if overlay and parent_hash in overlay:
+            parent = overlay[parent_hash]
+        else:
+            parent = self.get_index(parent_hash)
+        if parent is None:
+            raise ChainError(f"unknown parent {parent_hash.hex()}")
+        window = self.ancestor_index_window(
+            parent_hash, limit=DIFFICULTY_WINDOW, overlay=overlay
+        )
+        timestamps = [e.timestamp for e in window]
+        return get_next_work(
+            network=self.network,
+            parent_height=parent.height,
+            parent_bits=parent.bits,
+            window_timestamps=timestamps,
+        )
+
+    def median_time_past_for_parent(
+        self,
+        parent_hash: bytes,
+        *,
+        overlay: dict[bytes, BlockIndexEntry] | None = None,
+    ) -> int:
+        """MTP of up to MTP_WINDOW ancestors ending at parent (branch-aware)."""
+        window = self.ancestor_index_window(
+            parent_hash, limit=MTP_WINDOW, overlay=overlay
+        )
+        if not window:
+            raise ChainError(f"unknown parent for MTP {parent_hash.hex()}")
+        return median_time_past([e.timestamp for e in window])
 
     def known_block_count(self) -> int:
         with self._lock:
@@ -819,12 +893,9 @@ class Blockchain:
             )
 
         height = parent.height + 1
-        # Header PoW / bits sanity before UTXO work
-        try:
-            if bits_to_target(block.header.bits) > bits_to_target(REGTEST_NBITS):
-                raise ValidationError("unexpected difficulty bits (too easy)")
-        except ValueError as e:
-            raise ValidationError(str(e)) from e
+        expected_bits = self.get_next_work_for_parent(prev)
+        mtp = self.median_time_past_for_parent(prev)
+        limit = pow_limit_for_network(self.network)
 
         # Validate against parent chain state (not necessarily active tip)
         if prev == self._tip_hash:
@@ -837,7 +908,9 @@ class Blockchain:
             utxo_view,
             height=height,
             expected_prev=prev,
-            expected_bits=REGTEST_NBITS,
+            expected_bits=expected_bits,
+            median_time_past=mtp,
+            pow_limit=limit,
         )
 
         # Apply on view to ensure UTXO transition works (side: temp; tip: real later)
@@ -998,12 +1071,17 @@ class Blockchain:
                 if block is None or entry is None:
                     raise ChainError(f"cannot connect {bh.hex()}")
                 # Re-validate against live UTXO (parent state now correct)
+                parent_hash = block.header.previous_block_hash
+                expected_bits = self.get_next_work_for_parent(parent_hash)
+                mtp = self.median_time_past_for_parent(parent_hash)
                 validate_block(
                     block,
                     self.utxo,
                     height=entry.height,
-                    expected_prev=block.header.previous_block_hash,
-                    expected_bits=REGTEST_NBITS,
+                    expected_prev=parent_hash,
+                    expected_bits=expected_bits,
+                    median_time_past=mtp,
+                    pow_limit=pow_limit_for_network(self.network),
                 )
                 undo = self.utxo.apply_block_with_undo(block.transactions, entry.height)
                 self._store_undo(bh, undo)
@@ -1165,12 +1243,17 @@ class Blockchain:
         return out
 
     def info(self) -> dict:
+        tip_bits = get_network_params(self.network).genesis_bits
+        if self._tip_hash is not None:
+            tip_entry = self.get_index(self._tip_hash)
+            if tip_entry is not None:
+                tip_bits = tip_entry.bits
         if getattr(self, "_closed", False) or self._db is None:
             return {
                 "height": self._height,
                 "tip": self._tip_hash.hex() if self._tip_hash else None,
                 "utxo_count": 0,
-                "bits": REGTEST_NBITS,
+                "bits": tip_bits,
                 "circulating_supply": 0,
                 "issued_supply": 0,
                 "chain_work": 0,
@@ -1185,7 +1268,7 @@ class Blockchain:
             "height": self._height,
             "tip": self._tip_hash.hex() if self._tip_hash else None,
             "utxo_count": self.utxo.count(),
-            "bits": REGTEST_NBITS,
+            "bits": tip_bits,
             "circulating_supply": circulating,
             "issued_supply": issued,
             "chain_work": self.get_chain_work() if self._height >= 0 else 0,

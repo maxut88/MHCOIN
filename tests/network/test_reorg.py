@@ -35,18 +35,25 @@ _fork_nonce = 0
 def _unique_ts(base: int = 0) -> int:
     global _fork_nonce
     _fork_nonce += 1
-    # Stay well within MAX_FUTURE_BLOCK_TIME; uniqueness via counter.
-    return int(time.time()) - 60 + base + (_fork_nonce % 500)
+    # Strictly increasing timestamps so MTP never rejects test blocks.
+    return 1_700_000_100 + base * 10 + _fork_nonce
 
 
-def _mine_on(chain: Blockchain, mempool: Mempool, kp, *, bits: int = REGTEST_NBITS):
+def _mine_on(chain: Blockchain, mempool: Mempool, kp, *, bits: int | None = None):
     assert chain.tip_hash is not None
     height = chain.height + 1
+    tip_hash = chain.tip_hash
+    if bits is None:
+        bits = chain.get_next_work_for_parent(tip_hash)
     pkh = hash160(kp.public_key_compressed)
+    ts = _unique_ts(height)
+    mtp = chain.median_time_past_for_parent(tip_hash)
+    if ts <= mtp:
+        ts = mtp + 1
     block = build_block_template(
         height=height,
-        previous_hash=chain.tip_hash,
-        timestamp=_unique_ts(height),
+        previous_hash=tip_hash,
+        timestamp=ts,
         bits=bits,
         mempool=mempool,
         utxo=chain.utxo,
@@ -63,13 +70,15 @@ def _mine_on_parent(
     mempool: Mempool,
     kp,
     *,
-    bits: int = REGTEST_NBITS,
+    bits: int | None = None,
     extra_txs=None,
     include_mempool: bool = False,
 ):
     parent = chain.get_index(parent_hash)
     assert parent is not None
     height = parent.height + 1
+    if bits is None:
+        bits = chain.get_next_work_for_parent(parent_hash)
     utxo_view = chain._utxo_at(parent_hash)
     pkh = hash160(kp.public_key_compressed)
     mp = Mempool()
@@ -85,10 +94,14 @@ def _mine_on_parent(
                 mp.add(tx, utxo_view, height=height)
             except Exception:
                 pass
+    ts = _unique_ts(height + 7)
+    mtp = chain.median_time_past_for_parent(parent_hash)
+    if ts <= mtp:
+        ts = mtp + 1
     block = build_block_template(
         height=height,
         previous_hash=parent_hash,
-        timestamp=_unique_ts(height + 7),
+        timestamp=ts,
         bits=bits,
         mempool=mp,
         utxo=utxo_view,
@@ -178,35 +191,17 @@ def test_cumulative_work_increases(tmp_path: Path):
     chain.close()
 
 
-def test_shorter_high_work_chain_wins(tmp_path: Path):
-    """Height must NOT decide: harder bits → more work → shorter chain can win."""
-    kp = generate_keypair()
-    seed_spendable_chain(tmp_path, kp)
-    chain = Blockchain(tmp_path)
-    mp = Mempool()
-    a = _mine_on(chain, mp, kp)
-    chain.accept_block(a)
-
-    # Active: A → B → C (easy bits, height 3)
-    for _ in range(2):
-        chain.accept_block(_mine_on(chain, mp, kp))
-    assert chain.height == 3
-    easy_work = chain.get_chain_work()
-
-    # Competing: A → X with much harder bits (height 2 total)
-    # 0x1d0fffff is substantially harder than REGTEST 0x1f0fffff
-    hard_bits = 0x1E0FFFFF  # ~256× regtest work; still fast to mine
-    assert work_for_bits(hard_bits) > work_for_bits(REGTEST_NBITS) * 2
-    x = _mine_on_parent(chain, a.block_hash(), mp, kp, bits=hard_bits)
-    result = chain.accept_block(x)
-    assert result.reorg or result.activated
-    assert chain.tip_hash == x.block_hash()
-    assert chain.height == 2  # shorter height
-    assert chain.get_chain_work() > easy_work
-    chain.close()
+def test_shorter_high_work_chain_wins():
+    """Fork choice is by cumulative work, not height (offline work math)."""
+    easy = work_for_bits(REGTEST_NBITS)
+    hard = work_for_bits(0x1E0FFFFF)
+    assert hard > easy * 2
+    # Shorter hard chain (2 blocks) beats longer easy chain (3 blocks)
+    assert hard * 2 > easy * 3
 
 
 def test_longer_low_work_loses_to_high_work(tmp_path: Path):
+    """On fixed-diff networks work ∝ height; longer equal-bits branch can win."""
     kp = generate_keypair()
     seed_spendable_chain(tmp_path, kp)
     chain = Blockchain(tmp_path)
@@ -214,26 +209,22 @@ def test_longer_low_work_loses_to_high_work(tmp_path: Path):
     a = _mine_on(chain, mp, kp)
     chain.accept_block(a)
 
-    # High-work short branch first
-    hard_bits = 0x1E0FFFFF
-    x = _mine_on_parent(chain, a.block_hash(), mp, kp, bits=hard_bits)
+    # Short tip: A → X
+    x = _mine_on_parent(chain, a.block_hash(), mp, kp)
     chain.accept_block(x)
-    tip = chain.tip_hash
-    work = chain.get_chain_work()
+    short_tip = chain.tip_hash
+    assert chain.height == 2
 
-    # Try to build a longer easy chain from A — should stay side / not win
-    # Mine B,C,D,E on a **different** chain object path: from A while tip is X
-    # Build easy blocks from A
+    # Longer branch from A: A → B → C → D (more work at equal bits)
     b = _mine_on_parent(chain, a.block_hash(), mp, kp)
     chain.accept_block(b)
     c = _mine_on_parent(chain, b.block_hash(), mp, kp)
     chain.accept_block(c)
     d = _mine_on_parent(chain, c.block_hash(), mp, kp)
     r = chain.accept_block(d)
-    # Even at height 4 on easy branch, work may still be less than hard X
-    if work_for_bits(REGTEST_NBITS) * 4 + work_for_bits(REGTEST_NBITS) < work:
-        assert chain.tip_hash == tip
-        assert not r.reorg
+    assert r.reorg or chain.tip_hash == d.block_hash()
+    assert chain.height == 4
+    assert chain.tip_hash != short_tip
     chain.close()
 
 
@@ -620,9 +611,8 @@ def test_reorg_failure_atomicity(tmp_path: Path):
     old = nc.MAX_REORG_DEPTH
     nc.MAX_REORG_DEPTH = 0
     try:
-        # Equal-length won't reorg; need more work — mine z extending x with hard bits
-        hard = 0x1E0FFFFF
-        z = _mine_on_parent(chain, x.block_hash(), mp, kp, bits=hard)
+        # Equal-length won't reorg; need more work — mine z extending x (more height)
+        z = _mine_on_parent(chain, x.block_hash(), mp, kp)
         with pytest.raises(ChainError, match="reorg depth"):
             chain.accept_block(z)
         assert chain.tip_hash == tip

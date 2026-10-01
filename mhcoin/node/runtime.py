@@ -15,7 +15,6 @@ from mhcoin.blockchain.chain import Blockchain
 from mhcoin.blockchain.genesis import get_network_genesis
 from mhcoin.consensus.params import PROTOCOL_VERSION, SOFTWARE_VERSION, get_network_params
 from mhcoin.consensus.proof_of_work import mine_block
-from mhcoin.constants import REGTEST_NBITS
 from mhcoin.mempool import Mempool
 from mhcoin.mining.block_template import build_block_template
 from mhcoin.network.p2p import P2PConfig, P2PManager
@@ -173,14 +172,16 @@ class NodeRuntime:
             if tip_hash is None:
                 raise RuntimeError("chain not initialized")
             height = self.chain.height + 1
-            tip = self.chain.get_block_by_hash(tip_hash)
-            bits = tip.header.bits if tip is not None else params.genesis_bits
-            if self.network in ("regtest", "localnet"):
-                bits = REGTEST_NBITS
+            bits = self.chain.get_next_work_for_parent(tip_hash)
+            # Template timestamp must exceed MTP; wall-clock is policy only for mining.
+            mtp = self.chain.median_time_past_for_parent(tip_hash)
+            ts = int(time.time())
+            if ts <= mtp:
+                ts = mtp + 1
             block = build_block_template(
                 height=height,
                 previous_hash=tip_hash,
-                timestamp=int(time.time()),
+                timestamp=ts,
                 bits=bits,
                 mempool=self.mempool,
                 utxo=self.chain.utxo,

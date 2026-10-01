@@ -41,6 +41,13 @@ INITIAL_BLOCK_SUBSIDY = INITIAL_BLOCK_REWARD_COINS * SATOSHI_PER_COIN
 HALVING_INTERVAL = 210_000
 TARGET_BLOCK_TIME_SECONDS = 600
 
+# Dynamic difficulty (mainnet/testnet). Integer-only; see consensus.difficulty.get_next_work.
+# Tuned via closed-loop + stochastic sweep: W30/D1/16 (was unstable W60/D1/8).
+DIFFICULTY_WINDOW = 30
+DIFFICULTY_DAMPING_NUMERATOR = 1
+DIFFICULTY_DAMPING_DENOMINATOR = 16
+MTP_WINDOW = 11
+
 # PoW: double SHA-256 (HASH256) of the block header; UTXO accounting model
 POW_ALGORITHM = "HASH256"
 LEDGER_MODEL = "UTXO"
@@ -51,7 +58,7 @@ SUPPORTED_BLOCK_VERSIONS = frozenset({BLOCK_VERSION})
 
 MAX_BLOCK_SIZE = 1_000_000
 MAX_TXS_PER_BLOCK = 10_000
-MAX_FUTURE_BLOCK_TIME = 2 * 60 * 60
+MAX_FUTURE_BLOCK_TIME = 2 * 60 * 60  # 7200s — future-timestamp policy/consensus check
 
 # ---------------------------------------------------------------------------
 # Protocol versioning (wire compatibility — consensus-adjacent)
@@ -149,7 +156,7 @@ _TESTNET = NetworkParams(
 )
 
 # Mainnet — production genesis (frozen). Do NOT regenerate at node start.
-# Genesis bits 0x1e0fffff: harder than regtest; subsequent retarget is future work.
+# Genesis bits 0x1e0fffff: harder than regtest; retarget via get_next_work (does not alter genesis).
 _MAINNET = NetworkParams(
     name="mainnet",
     magic=NETWORK_MAGIC["mainnet"],
@@ -191,6 +198,11 @@ CONSENSUS_CRITICAL_SHARED = (
     "INITIAL_BLOCK_SUBSIDY",
     "HALVING_INTERVAL",
     "TARGET_BLOCK_TIME_SECONDS",
+    "DIFFICULTY_WINDOW",
+    "DIFFICULTY_DAMPING_NUMERATOR",
+    "DIFFICULTY_DAMPING_DENOMINATOR",
+    "MTP_WINDOW",
+    "MAX_FUTURE_BLOCK_TIME",
     "POW_ALGORITHM",
     "LEDGER_MODEL",
     "BLOCK_VERSION",

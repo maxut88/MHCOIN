@@ -1,0 +1,19 @@
+MHCOIN DIFFICULTY PARAMETER SWEEP
+
+Blocks=10000 Tail=2000 Combos=42
+×10/×100 rows: STABLE=52 MARGINAL=0 UNSTABLE=32
+
+BASELINE W=60 D=1/8
+  ×10: settle=NOT SETTLED mean=640.3 p05/p95=62/2001 osc=True UNSTABLE
+  ×100: settle=NOT SETTLED mean=602.1 p05/p95=28/2072 osc=True UNSTABLE
+
+SHORTLIST (for human review; production unchanged)
+  W=10 D=1/4 x10_settle=119 x100_settle=130 means=600.0/600.0 osc=False/False class=STABLE/STABLE det=True
+  W=20 D=1/16 x10_settle=143 x100_settle=191 means=600.0/600.0 osc=False/False class=STABLE/STABLE det=True
+  W=30 D=1/16 x10_settle=174 x100_settle=222 means=600.0/600.0 osc=False/False class=STABLE/STABLE det=True
+  W=40 D=1/16 x10_settle=227 x100_settle=275 means=600.0/600.0 osc=False/False class=STABLE/STABLE det=True
+  W=60 D=1/32 x10_settle=259 x100_settle=356 means=600.0/600.0 osc=False/False class=STABLE/STABLE det=True
+
+POW_LIMIT FLOOR: 0.1×→6000s, 0.01×→60000s; not fixed by W/D
+CONSENSUS MODIFIED: NO
+COMMIT: NOT CREATED

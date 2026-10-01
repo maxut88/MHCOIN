@@ -58,7 +58,9 @@ def test_pow_required(tmp_path: Path):
                 break
         # Ensure invalid
         if verify_proof_of_work(block.header):
-            block.header.bits = 0x1D00FFFF  # harder — almost certainly fail for unmined
+            # Flip a hash byte via nonce search failure path: bump merkle then leave unmined
+            block.header.merkle_root = bytes(b ^ 0xFF for b in block.header.merkle_root)
+            assert not verify_proof_of_work(block.header)
         with pytest.raises(ValidationError, match="Proof-of-Work"):
             validate_block(
                 block, chain.utxo, height=height, expected_prev=chain.tip_hash, expected_bits=REGTEST_NBITS
