@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 import signal
+import sys
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -26,6 +27,110 @@ class MineResult:
     block_hash: str
     reward_sats: int
     address: str
+
+
+def _tty() -> bool:
+    try:
+        return bool(sys.stdout.isatty())
+    except Exception:
+        return False
+
+
+class _Style:
+    """Lightweight ANSI styling for mining console (no-op when not a TTY)."""
+
+    def __init__(self) -> None:
+        on = _tty()
+        self.reset = "\033[0m" if on else ""
+        self.dim = "\033[2m" if on else ""
+        self.bold = "\033[1m" if on else ""
+        self.green = "\033[92m" if on else ""
+        self.cyan = "\033[96m" if on else ""
+        self.yellow = "\033[93m" if on else ""
+        self.mag = "\033[95m" if on else ""
+
+    def c(self, color: str, text: str) -> str:
+        if not color:
+            return text
+        return f"{color}{text}{self.reset}"
+
+
+def _fmt_hps(hps: float) -> str:
+    if hps >= 1_000_000:
+        return f"{hps / 1_000_000:.2f} MH/s"
+    if hps >= 1_000:
+        return f"{hps / 1_000:.1f} kH/s"
+    return f"{hps:,.0f} H/s"
+
+
+def _rule(s: _Style, char: str = "─", width: int = 62) -> str:
+    return s.c(s.dim, char * width)
+
+
+def format_mine_banner(*, network: str, address: str, data_dir: Path, tip: int) -> str:
+    s = _Style()
+    lines = [
+        s.c(s.cyan + s.bold, "╔════════════════════════════════════════════════════════════╗"),
+        s.c(s.cyan + s.bold, "║")
+        + s.c(s.bold, "  MHCOIN Solo Miner")
+        + s.c(s.dim, f"  ·  {network:<36}")
+        + s.c(s.cyan + s.bold, "║"),
+        s.c(s.cyan + s.bold, "╚════════════════════════════════════════════════════════════╝"),
+        f"  {s.c(s.dim, 'tip')}      {s.c(s.bold, '#' + str(tip))}",
+        f"  {s.c(s.dim, 'reward')}   {address}",
+        f"  {s.c(s.dim, 'data')}     {data_dir}",
+        f"  {s.c(s.dim, 'stop')}     Ctrl+C",
+        _rule(s),
+    ]
+    return "\n".join(lines)
+
+
+def format_mine_progress(*, height: int, nonce: int, hps: float) -> str:
+    s = _Style()
+    return (
+        f"  {s.c(s.dim, '·')} height {s.c(s.cyan, str(height))}  "
+        f"nonce {nonce:>10,}  {_fmt_hps(hps)}"
+    )
+
+
+def format_mine_found(
+    *,
+    height: int,
+    block_hash: str,
+    reward_sats: int,
+    elapsed: float,
+    session_blocks: int,
+    session_reward_sats: int,
+) -> str:
+    s = _Style()
+    lines = [
+        "",
+        s.c(s.green + s.bold, "▸ BLOCK FOUND"),
+        f"  {s.c(s.dim, 'height')}   {s.c(s.bold, '#' + str(height))}",
+        f"  {s.c(s.dim, 'hash')}     {s.c(s.yellow, block_hash)}",
+        f"  {s.c(s.dim, 'reward')}   {s.c(s.green, format_mhc(reward_sats) + ' MHC')}",
+        f"  {s.c(s.dim, 'time')}     {elapsed:.2f}s",
+        f"  {s.c(s.dim, 'session')}  {session_blocks} blocks · "
+        f"{format_mhc(session_reward_sats)} MHC",
+        _rule(s),
+    ]
+    return "\n".join(lines)
+
+
+def format_mine_plain_found(
+    *,
+    height: int,
+    block_hash: str,
+    reward_sats: int,
+    elapsed: float,
+) -> str:
+    """Plain (no ANSI) multi-line FOUND — used by Desktop log panel."""
+    return (
+        f"▸ BLOCK FOUND  #{height}\n"
+        f"  hash    {block_hash}\n"
+        f"  reward  {format_mhc(reward_sats)} MHC\n"
+        f"  time    {elapsed:.2f}s"
+    )
 
 
 class SoloMiner:
@@ -91,7 +196,7 @@ class SoloMiner:
             if self._stop:
                 raise KeyboardInterrupt("stop requested")
             if nonce > 0 and nonce % 500_000 == 0:
-                print(f"  … mining height={height} nonce={nonce} ~{hps:,.0f} H/s", flush=True)
+                print(format_mine_progress(height=height, nonce=nonce, hps=hps), flush=True)
 
         mine_block(block, progress=_progress)
         if self._stop:
@@ -112,10 +217,16 @@ class SoloMiner:
         signal.signal(signal.SIGINT, self.request_stop)
         signal.signal(signal.SIGTERM, self.request_stop)
         found: list[MineResult] = []
-        print(f"Mining on {self.network} → reward address {self.address}")
-        print(f"Data dir: {self.node.data_dir}")
-        print(f"Tip height: {self.node.chain.height}")
-        print("Press Ctrl+C to stop.\n", flush=True)
+        session_reward = 0
+        print(
+            format_mine_banner(
+                network=self.network,
+                address=self.address,
+                data_dir=self.node.data_dir,
+                tip=int(self.node.chain.height),
+            ),
+            flush=True,
+        )
         try:
             while not self._stop:
                 if max_blocks is not None and len(found) >= max_blocks:
@@ -124,15 +235,22 @@ class SoloMiner:
                 result = self.mine_one()
                 elapsed = time.time() - t0
                 found.append(result)
+                session_reward += int(result.reward_sats)
                 print(
-                    f"Found block height={result.height} "
-                    f"hash={result.block_hash[:16]}… "
-                    f"reward={format_mhc(result.reward_sats)} MHC "
-                    f"({elapsed:.2f}s)",
+                    format_mine_found(
+                        height=result.height,
+                        block_hash=result.block_hash,
+                        reward_sats=result.reward_sats,
+                        elapsed=elapsed,
+                        session_blocks=len(found),
+                        session_reward_sats=session_reward,
+                    ),
                     flush=True,
                 )
         except KeyboardInterrupt:
-            print("\nStopped.", flush=True)
+            s = _Style()
+            print(f"\n{s.c(s.yellow, '■ Stopped.')}  session {len(found)} blocks · "
+                  f"{format_mhc(session_reward)} MHC", flush=True)
         finally:
             self.node.close()
         return found

@@ -11,6 +11,7 @@ import logging
 import os
 import threading
 import time
+from collections import deque
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable
@@ -24,6 +25,7 @@ from mhcoin.consensus.proof_of_work import mine_block
 from mhcoin.constants import REGTEST_NBITS
 from mhcoin.desktop.prefs import save_preferred_network
 from mhcoin.desktop.seeds import default_connect_peers
+from mhcoin.mining.miner import format_mine_plain_found
 from mhcoin.mining.block_template import build_block_template
 from mhcoin.node.local_node import LocalNode
 from mhcoin.node.runtime import NodeRuntime
@@ -77,10 +79,17 @@ class CoreController:
         self._last_txid: str | None = None
         self._hist_key: tuple | None = None
         self._hist_rows: list[TxRow] = []
+        self._hist_dicts: list[dict] = []
+        self._hist_building = False
+        self._hist_build_error: str | None = None
+        self._hist_build_lock = threading.Lock()
         self._resume_node_after_mine = False
         self._balance_cache_sats: int = 0
         self._balance_cache_valid: bool = False
         self._recent_cache: list[dict] = []
+        self._mine_log: deque[str] = deque(maxlen=500)
+        self._mine_log_lock = threading.Lock()
+        self._mine_log_last_prog = 0.0
 
     @staticmethod
     def _txrow_to_dict(r: TxRow) -> dict:
@@ -161,9 +170,12 @@ class CoreController:
         return list(self._recent_cache)[:limit]
 
     def recent_for_ui(self, limit: int = 25) -> list[dict]:
-        # While solo-mining, LocalNode owns the datadir — keep cache fresh from chain.
+        # Never block the UI thread on a chain scan — serve cache and refresh async.
+        if self._recent_cache or self._hist_dicts:
+            src = self._recent_cache or self._hist_dicts
+            return list(src)[:limit]
         if self._node is None:
-            return self.refresh_recent_cache(limit=limit, full_chain=False)
+            self.request_history_build(full_chain=False)
         return list(self._recent_cache)[:limit]
 
     def switch_network(self, network: str) -> dict:
@@ -423,6 +435,12 @@ class CoreController:
         node_running = self._node is not None
         sync = "Ready (solo / local)"
         chain_error: str | None = None
+        sync_state = "IDLE"
+        progress_height = 0
+        target_hint = 0
+        pending_blocks = 0
+        syncing = False
+        sync_pct: float | None = None
         if node_running:
             # NodeRuntime owns the datadir — do not open a second LocalNode.
             try:
@@ -430,7 +448,31 @@ class CoreController:
                 peers = int(st.get("peer_count") or 0)
                 height = max(0, int(st.get("height") or 0))
                 tip = str(st["tip"]) if st.get("tip") else None
-                sync = "Network synchronized" if peers > 0 else "Node running (no peers)"
+                sm = st.get("sync") or {}
+                if isinstance(sm, dict):
+                    sync_state = str(sm.get("state") or "IDLE")
+                    progress_height = int(sm.get("progress_height") or height)
+                    target_hint = int(sm.get("target_hint") or 0)
+                    pending_blocks = int(sm.get("pending_blocks") or 0)
+                # Bitcoin Core–style IBD: behind peer tip hint or actively downloading.
+                syncing = sync_state in (
+                    "REQUESTING_HEADERS",
+                    "DOWNLOADING_BLOCKS",
+                ) or (target_hint > max(progress_height, height) + 1)
+                if syncing and target_hint > 0:
+                    cur = max(progress_height, height)
+                    sync_pct = max(0.0, min(99.9, 100.0 * cur / max(target_hint, 1)))
+                    left = max(0, target_hint - cur)
+                    sync = (
+                        f"Synchronizing with network… "
+                        f"Block {cur} of {target_hint} ({sync_pct:.1f}%)"
+                        + (f" · {left} left" if left else "")
+                    )
+                elif peers > 0:
+                    sync = "Network synchronized"
+                    sync_pct = 100.0
+                else:
+                    sync = "Connecting to peers…"
             except Exception:
                 sync = "Node running"
         else:
@@ -439,7 +481,9 @@ class CoreController:
                     node = self._get_local()
                     tip = node.chain.tip_hash.hex() if node.chain.tip_hash else None
                     height = max(node.chain.height, 0)
+                progress_height = height
                 sync = "Ready (solo / local)" if height >= 0 else "No chain yet"
+                sync_pct = 100.0 if height >= 0 else None
             except ChainError as e:
                 chain_error = str(e)
                 sync = "Datadir error"
@@ -455,6 +499,12 @@ class CoreController:
             "tip": tip,
             "peers": peers,
             "sync": sync,
+            "syncing": syncing,
+            "sync_state": sync_state,
+            "sync_progress": progress_height,
+            "sync_target": target_hint,
+            "sync_pending": pending_blocks,
+            "sync_percent": sync_pct,
             "network": self.network,
             "genesis_hash": params.genesis_hash_hex,
             "seeds": default_connect_peers(self.network),
@@ -466,6 +516,57 @@ class CoreController:
     def _invalidate_history_cache(self) -> None:
         self._hist_key = None
         self._hist_rows = []
+        # Keep _hist_dicts until rebuild finishes so UI stays responsive.
+
+    def request_history_build(self, *, full_chain: bool = True) -> None:
+        """Kick a background full-history scan (non-blocking for UI)."""
+        with self._hist_build_lock:
+            if self._hist_building:
+                return
+            if self._node is not None:
+                # Node owns datadir — cannot scan now; serve cache only.
+                return
+            self._hist_building = True
+            self._hist_build_error = None
+
+        def _job() -> None:
+            try:
+                rows = self.wallet_history(2000, full_chain=full_chain)
+                dicts = [self._txrow_to_dict(r) for r in rows]
+                self._hist_dicts = dicts
+                self._recent_cache = list(dicts)[:50]
+            except Exception as e:  # noqa: BLE001
+                logger.exception("history build failed")
+                self._hist_build_error = str(e)
+            finally:
+                with self._hist_build_lock:
+                    self._hist_building = False
+
+        threading.Thread(target=_job, name="mhcoin-hist-build", daemon=True).start()
+
+    def history_for_api(self, *, limit: int = 2000) -> dict:
+        """Non-blocking history payload for Desktop UI."""
+        building = False
+        with self._hist_build_lock:
+            building = bool(self._hist_building)
+        # Prefer last full snapshot; else recent cache.
+        txs = list(self._hist_dicts) if self._hist_dicts else list(self._recent_cache)
+        partial = not bool(self._hist_dicts)
+        if self._node is None and not building and (
+            not self._hist_dicts or self._hist_key is None
+        ):
+            self.request_history_build(full_chain=True)
+            with self._hist_build_lock:
+                building = bool(self._hist_building)
+        return {
+            "ok": True,
+            "txs": txs[:limit],
+            "count": len(txs[:limit]),
+            "building": building,
+            "partial": partial and not building,
+            "cached": True,
+            "error": self._hist_build_error,
+        }
 
     def recent_transactions(
         self,
@@ -608,7 +709,8 @@ class CoreController:
                         continue
 
                     # Sent ONLY if we spent our own outpoint (never treat foreign change as our send).
-                    if spends:
+                    # Skip pure self-churn (no external payout) — shows as 0.00000000 MHC otherwise.
+                    if spends and paid_out > 0:
                         transfer_rows.append(
                             TxRow(
                                 kind="Sent",
@@ -655,7 +757,7 @@ class CoreController:
                 to_ours = [a for a in (_addr_of_out(o) for o in ours) if a]
                 to_foreign = [a for a in (_addr_of_out(o) for o in foreign) if a]
                 fee = _fee_sats(tx)
-                if spends:
+                if spends and paid_out > 0:
                     pending.append(
                         TxRow(
                             kind="Sent (pending)",
@@ -698,6 +800,10 @@ class CoreController:
             rows = pending + confirmed
             self._hist_key = key
             self._hist_rows = list(rows)
+            try:
+                self._hist_dicts = [self._txrow_to_dict(r) for r in self._hist_rows]
+            except Exception:
+                pass
             return rows[:limit]
 
     # --- mining -------------------------------------------------------------
@@ -714,7 +820,19 @@ class CoreController:
             "blocks_found": self._blocks_found,
             "rewards_sats": self._rewards_sats,
             "rewards_text": f"{format_mhc(self._rewards_sats)} MHC",
+            "log": self.mine_log_lines(),
         }
+
+    def mine_log_lines(self, limit: int = 200) -> list[str]:
+        with self._mine_log_lock:
+            lines = list(self._mine_log)
+        return lines[-limit:]
+
+    def _mine_log_line(self, msg: str) -> None:
+        ts = time.strftime("%H:%M:%S")
+        line = f"[{ts}] {msg}"
+        with self._mine_log_lock:
+            self._mine_log.append(line)
 
     def start_mining(self, address: str | None = None, on_block: Callable | None = None) -> None:
         if self._mining:
@@ -730,17 +848,41 @@ class CoreController:
         self._miner_stop.clear()
         self._mining = True
         reward_addr = addr
+        try:
+            tip_h = -1
+            with self._io:
+                node = self._get_local()
+                tip_h = int(node.chain.height)
+        except Exception:
+            tip_h = -1
+        self._mine_log_line(f"MHCOIN Solo Miner · {self.network} · tip #{tip_h}")
+        self._mine_log_line(f"reward  {reward_addr}")
+        self._mine_log_line(f"data    {self.data_dir}")
+        self._mine_log_line("────────────────────────────────")
+        self._mine_log_line("searching nonce… (Stop to quit)")
 
         def _loop() -> None:
             try:
                 while not self._miner_stop.is_set():
                     t0 = time.time()
+                    height = -1
                     try:
 
                         def _prog(nonce: int, _h: bytes, hps: float) -> None:
                             if self._miner_stop.is_set():
                                 raise KeyboardInterrupt()
                             self._hashrate = hps
+                            now = time.time()
+                            # Throttle terminal-style progress (~2 lines/sec).
+                            if now - self._mine_log_last_prog >= 0.5:
+                                self._mine_log_last_prog = now
+                                # Strip ANSI for GUI log panel.
+                                plain = (
+                                    f"· height {height}  nonce {nonce:,}  "
+                                    f"{hps/1000:.1f} kH/s" if hps >= 1000 else
+                                    f"· height {height}  nonce {nonce:,}  {hps:,.0f} H/s"
+                                )
+                                self._mine_log_line(plain)
 
                         with self._io:
                             node = self._get_local()
@@ -761,6 +903,7 @@ class CoreController:
                                 utxo=node.chain.utxo,
                                 miner_pubkey_hash=address_to_pubkey_hash(reward_addr, hrp=self.hrp),
                             )
+                        self._mine_log_line(f"template #{height}  bits=0x{bits:08x}")
                         # Mine outside lock so GUI can refresh
                         mine_block(block, progress=_prog)
                     except KeyboardInterrupt:
@@ -771,13 +914,28 @@ class CoreController:
                         node = self._get_local()
                         # Tip may have moved; only connect if still extends
                         if node.chain.tip_hash != block.header.previous_block_hash:
+                            self._mine_log_line(f"stale template #{height} — retry")
                             continue
                         connected = node.chain.connect_block(block)
                         node.mempool.clear_included(block.transactions[1:])
                         reward = block.transactions[0].outputs[0].value
                         self._blocks_found += 1
                         self._rewards_sats += reward
-                        self._hashrate = max(self._hashrate, 1.0 / max(time.time() - t0, 1e-9))
+                        elapsed = max(time.time() - t0, 1e-9)
+                        self._hashrate = max(self._hashrate, 1.0 / elapsed)
+                        bhash = block.block_hash().hex()
+                        for line in format_mine_plain_found(
+                            height=int(connected),
+                            block_hash=bhash,
+                            reward_sats=int(reward),
+                            elapsed=elapsed,
+                        ).splitlines():
+                            self._mine_log_line(line)
+                        self._mine_log_line(
+                            f"session {self._blocks_found} blocks · "
+                            f"{format_mhc(self._rewards_sats)} MHC"
+                        )
+                        self._mine_log_line("────────────────────────────────")
                         self._invalidate_history_cache()
                         try:
                             pkh = address_to_pubkey_hash(reward_addr, hrp=self.hrp)
@@ -810,9 +968,11 @@ class CoreController:
                     time.sleep(0.05)
             except Exception as e:
                 logger.exception("miner stopped: %s", e)
+                self._mine_log_line(f"ERROR miner stopped: {e}")
             finally:
                 self._mining = False
                 self._hashrate = 0.0
+                self._mine_log_line("■ Mining stopped.")
                 # Snapshot UTXO balance + recent before P2P node reclaims the datadir.
                 try:
                     with self._io:
@@ -835,16 +995,23 @@ class CoreController:
                     self._resume_node_after_mine = False
                     try:
                         self.start_node()
+                        self._mine_log_line("Node resumed after mining.")
                     except Exception:
                         logger.exception("resume node after mining failed")
+                        self._mine_log_line("WARN: failed to resume node after mining")
 
         self._miner_thread = threading.Thread(target=_loop, name="mhcoin-miner", daemon=True)
         self._miner_thread.start()
 
-    def stop_mining(self) -> None:
+    def request_stop_mining(self) -> None:
+        """Signal miner to stop without waiting (safe on UI / close path)."""
         self._miner_stop.set()
+        self._mining = False
+
+    def stop_mining(self) -> None:
+        self.request_stop_mining()
         if self._miner_thread and self._miner_thread.is_alive():
-            self._miner_thread.join(timeout=5.0)
+            self._miner_thread.join(timeout=2.0)
         self._mining = False
         # Node resume (if paused) happens in miner thread finally.
 
