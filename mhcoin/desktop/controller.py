@@ -23,10 +23,10 @@ from mhcoin.blockchain.genesis import get_network_genesis
 from mhcoin.blockchain.chain import ChainError
 from mhcoin.config_loader import resolve_data_dir
 from mhcoin.consensus.params import get_network_params
-from mhcoin.consensus.proof_of_work import mine_block
 from mhcoin.desktop.prefs import save_preferred_network
 from mhcoin.desktop.seeds import default_connect_peers
 from mhcoin.mempool import Mempool
+from mhcoin.mining.abortable_pow import MiningAborted, mine_block_cancellable
 from mhcoin.mining.miner import format_mine_plain_found
 from mhcoin.mining.block_template import build_block_template
 from mhcoin.node.local_node import LocalNode
@@ -1385,14 +1385,16 @@ class CoreController:
                 rt = self._node
                 if rt is not None and not getattr(rt, "_stopped", False):
                     try:
-                        if rt.chain.height >= 0:
+                        if rt.chain.height >= 0 and getattr(rt, "_running", False):
                             break
                     except Exception:
                         pass
                 time.sleep(0.05)
-        if self._node is None or getattr(self._node, "_stopped", False):
-            raise RuntimeError("P2P node failed to start — cannot mine")
-        # Drop LocalNode handle so we never open a second writer on the datadir.
+            if self._node is None or getattr(self._node, "_stopped", False):
+                raise RuntimeError("P2P node failed to start — cannot mine")
+            if not getattr(self._node, "_running", False):
+                raise RuntimeError("P2P node not running — cannot mine")
+            # Drop LocalNode handle so we never open a second writer on the datadir.
         with self._io:
             self._close_local()
         self._miner_stop.clear()
@@ -1441,8 +1443,28 @@ class CoreController:
                         block, height, bits = rt.prepare_block_template(
                             reward_addr, hrp=self.hrp
                         )
+                        parent = block.header.previous_block_hash
+                        epoch0 = int(rt.chain.tip_epoch)
                         self._mine_log_line(f"template #{height}  bits=0x{bits:08x}")
-                        mine_block(block, progress=_prog)
+
+                        def _abort() -> bool:
+                            if self._miner_stop.is_set():
+                                return True
+                            # In-memory tip/epoch only — never touch SQLite here.
+                            if int(rt.chain.tip_epoch) != epoch0:
+                                return True
+                            tip = rt.chain.tip_hash
+                            return tip is not None and tip != parent
+
+                        try:
+                            mine_block_cancellable(block, progress=_prog, abort_check=_abort)
+                        except MiningAborted:
+                            if self._miner_stop.is_set():
+                                break
+                            self._mine_log_line(
+                                f"stale template #{height} — tip moved, rebuilding"
+                            )
+                            continue
                     except KeyboardInterrupt:
                         break
                     except Exception as e:
@@ -1456,7 +1478,7 @@ class CoreController:
                     if rt is None or block is None:
                         break
                     try:
-                        # Tip may have moved while hashing (peer block) — retry.
+                        # Tip may have moved in the last PoW iteration — retry.
                         if rt.chain.tip_hash != block.header.previous_block_hash:
                             self._mine_log_line(f"stale template #{height} — retry")
                             continue

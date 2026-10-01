@@ -12,6 +12,7 @@ from pathlib import Path
 from mhcoin.blockchain.genesis import get_network_genesis
 from mhcoin.consensus.params import get_network_params
 from mhcoin.consensus.proof_of_work import mine_block
+from mhcoin.mining.abortable_pow import MiningAborted, mine_block_cancellable
 from mhcoin.mining.block_template import build_block_template
 from mhcoin.node.local_node import LocalNode
 from mhcoin.wallet.addresses import address_to_pubkey_hash, validate_address
@@ -198,9 +199,21 @@ class SoloMiner:
             if nonce > 0 and nonce % 500_000 == 0:
                 print(format_mine_progress(height=height, nonce=nonce, hps=hps), flush=True)
 
-        mine_block(block, progress=_progress)
+        def _abort() -> bool:
+            if self._stop:
+                return True
+            tip = self.node.chain.tip_hash
+            return tip is not None and tip != tip_hash
+
+        try:
+            mine_block_cancellable(block, progress=_progress, abort_check=_abort)
+        except MiningAborted as e:
+            raise RuntimeError("stale tip or stopped") from e
         if self._stop:
             raise RuntimeError("stopped")
+        # Tip may have moved in the last iteration.
+        if self.node.chain.tip_hash != tip_hash:
+            raise RuntimeError("stale tip")
         connected = self.node.chain.connect_block(block)
         self.node.mempool.clear_included(block.transactions[1:])
         reward = block.transactions[0].outputs[0].value

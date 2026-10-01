@@ -114,6 +114,8 @@ class Blockchain:
             self._tip_hash: bytes | None = None
             self._height: int = -1
             self._tip_work: int = 0
+            # Bumped on every canonical tip change — miners poll this (no SQLite).
+            self._tip_epoch: int = 0
             self._load_tip()
             self._backfill_undos_if_needed()
             self._repair_utxo_if_needed()
@@ -326,6 +328,11 @@ class Blockchain:
     @property
     def tip_hash(self) -> bytes | None:
         return self._tip_hash
+
+    @property
+    def tip_epoch(self) -> int:
+        """Monotonic counter; increments when canonical tip hash changes."""
+        return int(getattr(self, "_tip_epoch", 0))
 
     def get_index(self, block_hash: bytes) -> BlockIndexEntry | None:
         with self._lock:
@@ -678,9 +685,12 @@ class Blockchain:
         )
 
     def _set_tip_meta(self, tip: bytes, height: int, work: int) -> None:
+        prev = self._tip_hash
         self._tip_hash = tip
         self._height = height
         self._tip_work = work
+        if tip != prev:
+            self._tip_epoch = int(self._tip_epoch) + 1
         self._meta_set("tip_hash", tip.hex())
         self._meta_set("tip_height", str(height))
         self._meta_set("tip_work", str(work))
