@@ -12,6 +12,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 from mhcoin.network.addrdb import AddrDB
+from mhcoin.network.seeds import HARDCODED_SEEDS
 from mhcoin.network.ban import (
     BanManager,
     MISBEHAVIOR_HANDSHAKE,
@@ -72,7 +73,7 @@ class P2PManager:
         self.magic = NETWORK_MAGIC[config.network]
         self.our_nonce = secrets.randbits(64)
         self._peers: dict[str, Peer] = {}
-        self._lock = threading.Lock()
+        self._lock = threading.RLock()
         self._server: PeerServer | None = None
         self._alive = False
         self._ping_thread: threading.Thread | None = None
@@ -111,6 +112,14 @@ class P2PManager:
             reconnect_interval=config.reconnect_interval,
             connect_fn=self._discovery_connect,
         )
+        # Always protect hardcoded seeds (even with --no-seed): NAT hairpin
+        # inbound can appear as the public seed IP; do not ban our own seed.
+        net = str(getattr(config, "network", "") or "")
+        for seed in list(HARDCODED_SEEDS.get(net, []) or []) + list(config.connect_seeds or []):
+            host, _, port_s = seed.rpartition(":")
+            if not host:
+                continue
+            self.bans.protect(host)
         for seed in config.connect_seeds:
             host, _, port_s = seed.rpartition(":")
             try:
@@ -120,7 +129,6 @@ class P2PManager:
                 continue
             if not host:
                 continue
-            self.bans.protect(host)
             self.discovery.add_manual(host, port)
 
     def _kick_banned_host(self, host: str) -> None:
@@ -256,6 +264,10 @@ class P2PManager:
                 raise ProtocolError(f"inbound rate exceeded for {host}")
         with self._lock:
             if len(self._peers) >= self.config.max_peers:
+                try:
+                    sock.close()
+                except OSError:
+                    pass
                 raise ProtocolError("max peers reached")
         peer = self._make_peer(sock, inbound=True, handshake_timeout=self.config.handshake_timeout)
         self._add(peer)
@@ -282,6 +294,8 @@ class P2PManager:
     def connect_to_peer(self, host: str, port: int) -> Peer:
         if host in ("127.0.0.1", "localhost", "::1") and port == self.config.port:
             raise ProtocolError("refusing self-connection to own listen port")
+        if self.discovery is not None and self.discovery.is_self(host, port):
+            raise ProtocolError(f"refusing self-connection to {host}:{port}")
         if self.bans.is_banned(host):
             raise ProtocolError(f"banned peer {host}")
         with self._lock:
@@ -338,28 +352,55 @@ class P2PManager:
             peer.discovery = self.discovery
 
     def _on_handshaked(self, peer: Peer) -> None:
+        # IMPORTANT: never call peer.close() while holding self._lock.
+        # peer.close() -> on_close -> _on_close acquires the same lock; with
+        # threading.Lock that deadlocks the accept loop (CLOSE-WAIT backlog,
+        # clients see "peer closed during handshake").
+        drop_peer = None
         with self._lock:
             for other in self._peers.values():
                 if other is peer:
                     continue
                 if peer.remote_nonce is not None and other.remote_nonce == peer.remote_nonce:
-                    logger.warning(
-                        "duplicate peer nonce %s — closing %s", peer.remote_nonce, peer.addr
+                    drop, keep = peer, other
+
+                    def _is_lan(host: str) -> bool:
+                        return host.startswith(("192.168.", "10.", "172.")) or host in (
+                            "127.0.0.1",
+                            "localhost",
+                        )
+
+                    if _is_lan(peer.host) and not _is_lan(other.host):
+                        drop, keep = other, peer
+                    logger.info(
+                        "duplicate peer nonce %s — closing extra path %s (kept %s)",
+                        peer.remote_nonce,
+                        drop.addr,
+                        keep.addr,
                     )
-                    self.bans.misbehavior(
-                        peer.host, MISBEHAVIOR_HANDSHAKE, reason="duplicate nonce"
-                    )
-                    peer.close()
-                    return
+                    drop_peer = drop
+                    break
+        if drop_peer is not None:
+            try:
+                drop_peer.close()
+            except Exception:
+                logger.debug("duplicate path close failed", exc_info=True)
+            if drop_peer is peer:
+                return
         try:
             self.discovery.on_handshaked(peer)
         except Exception:
             logger.debug("discovery on_handshaked failed", exc_info=True)
         if self.relay is not None and self.relay.sync is not None:
-            try:
-                self.relay.sync.maybe_start(peer)
-            except Exception:
-                logger.debug("sync start failed", exc_info=True)
+            sync = self.relay.sync
+
+            def _kick() -> None:
+                try:
+                    sync.maybe_start(peer)
+                except Exception:
+                    logger.debug("sync start failed", exc_info=True)
+
+            threading.Thread(target=_kick, name="mhcoin-sync-kick", daemon=True).start()
 
     def _on_close(self, peer: Peer) -> None:
         with self._lock:

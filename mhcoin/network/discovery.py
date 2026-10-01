@@ -73,12 +73,24 @@ class DiscoveryManager:
     def is_self(self, host: str, port: int) -> bool:
         if port != self.our_port:
             return False
-        if host in (self.our_host, "127.0.0.1", "localhost", "::1", "0.0.0.0"):
-            # Treat loopback + our bind host as self when ports match
-            if self.our_host in ("127.0.0.1", "0.0.0.0", "localhost", "::1"):
-                return host in ("127.0.0.1", "localhost", "::1", "0.0.0.0", self.our_host)
-            return host == self.our_host
-        return False
+        # Only THIS machine's identities — never hardcode network seed IPs here
+        # (that made every Desktop refuse connect to 192.168.0.221 / 176.38.3.168).
+        import os
+        extras = {
+            self.our_host,
+            "127.0.0.1",
+            "localhost",
+            "::1",
+            "0.0.0.0",
+        }
+        pub = (os.environ.get("MHCOIN_PUBLIC_IP") or "").strip()
+        if pub:
+            extras.add(pub)
+        for part in (os.environ.get("MHCOIN_SELF_IPS") or "").split(","):
+            part = part.strip()
+            if part:
+                extras.add(part)
+        return host in extras
 
     def add_manual(self, host: str, port: int) -> None:
         if self.is_self(host, port):

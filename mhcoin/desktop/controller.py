@@ -6,6 +6,8 @@ Uses one shared LocalNode + lock so GUI refresh and mining do not race the same 
 
 from __future__ import annotations
 
+import json
+
 import hashlib
 import logging
 import os
@@ -19,12 +21,14 @@ from typing import Callable
 from mhcoin.blockchain.disk_lock import chain_disk_lock
 from mhcoin.blockchain.genesis import get_network_genesis
 from mhcoin.blockchain.chain import ChainError
+from mhcoin.blockchain.readonly_chain import ReadOnlyChain
 from mhcoin.config_loader import resolve_data_dir
 from mhcoin.consensus.params import get_network_params
 from mhcoin.consensus.proof_of_work import mine_block
 from mhcoin.constants import REGTEST_NBITS
 from mhcoin.desktop.prefs import save_preferred_network
 from mhcoin.desktop.seeds import default_connect_peers
+from mhcoin.mempool import Mempool
 from mhcoin.mining.miner import format_mine_plain_found
 from mhcoin.mining.block_template import build_block_template
 from mhcoin.node.local_node import LocalNode
@@ -82,8 +86,11 @@ class CoreController:
         self._hist_dicts: list[dict] = []
         self._hist_building = False
         self._hist_build_error: str | None = None
+        self._hist_need_full = False
         self._hist_build_lock = threading.Lock()
         self._resume_node_after_mine = False
+        self._node_ctrl = threading.RLock()
+        self._tip_height_hint = 0
         self._balance_cache_sats: int = 0
         self._balance_cache_valid: bool = False
         self._recent_cache: list[dict] = []
@@ -117,11 +124,19 @@ class CoreController:
         height = r.height
         ts = r.timestamp
         time_utc = ""
-        if ts:
+        # Block header timestamps are unix seconds. Reject tiny values (e.g. mistaken
+        # confirmations=1) so the UI never shows epoch "1970-01-01 00:00:01".
+        try:
+            ts_i = int(ts) if ts is not None else 0
+        except (TypeError, ValueError):
+            ts_i = 0
+        if ts_i >= 1_000_000_000:
             try:
-                time_utc = time.strftime("%Y-%m-%d %H:%M:%S UTC", time.gmtime(int(ts)))
+                # Local wall clock — same timezone basis as mining log [HH:MM:SS].
+                time_utc = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(ts_i))
             except Exception:
-                time_utc = str(ts)
+                time_utc = str(ts_i)
+        ts = ts_i if ts_i >= 1_000_000_000 else None
         fee = None
         if r.fee_sats is not None:
             fee = f"{abs(int(r.fee_sats)) / 1e8:.8f}"
@@ -174,8 +189,10 @@ class CoreController:
         if self._recent_cache or self._hist_dicts:
             src = self._recent_cache or self._hist_dicts
             return list(src)[:limit]
-        if self._node is None:
-            self.request_history_build(full_chain=False)
+        # Full chain required: partial windows miss Sent (prev outpoints
+        # created outside the window are absent from tx_index). Works via
+        # ReadOnlyChain even while the P2P node owns the datadir.
+        self.request_history_build(full_chain=True)
         return list(self._recent_cache)[:limit]
 
     def switch_network(self, network: str) -> dict:
@@ -390,13 +407,69 @@ class CoreController:
     def balance_text(self) -> str:
         return f"{format_mhc(self.balance_sats())} MHC"
 
+    def _balance_hint_from_history(self) -> int | None:
+        """Rough confirmed balance from last history snapshot (UTXO fallback)."""
+        rows = self._hist_rows or []
+        if rows:
+            tip_h = -1
+            try:
+                tip_h = max((int(r.height) for r in rows if r.height is not None), default=-1)
+            except Exception:
+                tip_h = -1
+            net = 0
+            for r in rows:
+                if r.height is None:
+                    continue  # skip mempool
+                kind = (r.kind or "")
+                amt = abs(int(r.amount_sats))
+                if kind == "Mining reward" or kind.startswith("Mining"):
+                    net += amt
+                elif kind == "Sent" or kind.startswith("Sent"):
+                    net -= amt
+                    if r.fee_sats:
+                        net -= abs(int(r.fee_sats))
+                elif kind.startswith("Received") or kind in ("Received", "Receive"):
+                    net += amt
+            return max(0, net) if tip_h >= 0 else None
+        dicts = self._hist_dicts or []
+        if not dicts:
+            return None
+        net = 0
+        saw = False
+        for d in dicts:
+            if d.get("height") is None or d.get("height") == "":
+                continue
+            saw = True
+            amt = abs(int(round(float(d.get("amount_mhc") or 0) * 1e8)))
+            sign = d.get("sign") or "+"
+            typ = (d.get("type") or "").lower()
+            kind = d.get("kind") or ""
+            if typ == "sent" or str(kind).startswith("Sent") or sign == "-":
+                net -= amt
+                fee = d.get("fee_mhc")
+                if fee not in (None, "", "—"):
+                    try:
+                        net -= abs(int(round(float(fee) * 1e8)))
+                    except Exception:
+                        pass
+            else:
+                net += amt
+        return max(0, net) if saw else None
+
     def cached_balance_text(self) -> str:
         """Best-effort balance when the P2P node owns the datadir."""
-        if self._node is None:
+        if self._node is None and not self._mining:
             try:
                 return self.balance_text()
             except Exception:
                 pass
+        if self._balance_cache_valid:
+            return f"{format_mhc(self._balance_cache_sats)} MHC"
+        hint = self._balance_hint_from_history()
+        if hint is not None:
+            self._balance_cache_sats = int(hint)
+            self._balance_cache_valid = True
+            return f"{format_mhc(self._balance_cache_sats)} MHC"
         return f"{format_mhc(self._balance_cache_sats)} MHC"
 
     def send(self, to_address: str, amount_mhc: str, password: str, fee_mhc: str | None = None) -> str:
@@ -416,7 +489,47 @@ class CoreController:
                     pass
             self._password = password
             self._last_txid = result.txid_hex
+            try:
+                from_addr = w.default_address()
+            except Exception:
+                try:
+                    from_addr = self.default_address()
+                except Exception:
+                    from_addr = ""
+            try:
+                self._append_transfer_log(
+                    {
+                        "kind": "Sent",
+                        "txid": result.txid_hex,
+                        "amount_sats": int(result.amount),
+                        "fee_sats": int(result.fee),
+                        "from": from_addr,
+                        "to": to_address,
+                        "timestamp": int(time.time()),
+                        "confirmed": False,
+                    }
+                )
+                self._push_recent(
+                    TxRow(
+                        kind="Sent (pending)",
+                        amount_sats=int(result.amount),
+                        detail=result.txid_hex,
+                        height=None,
+                        txid=result.txid_hex,
+                        timestamp=int(time.time()),
+                        from_addrs=[from_addr] if from_addr else [],
+                        to_addrs=[to_address],
+                        fee_sats=int(result.fee),
+                        confirmations=0,
+                    )
+                )
+            except Exception:
+                logger.exception("send transfer log failed")
             self._invalidate_history_cache()
+            try:
+                self.request_history_build(full_chain=True)
+            except Exception:
+                pass
             return result.txid_hex
 
     # --- chain / history ----------------------------------------------------
@@ -475,12 +588,20 @@ class CoreController:
                     sync = "Connecting to peers…"
             except Exception:
                 sync = "Node running"
+        elif self._node_thread is not None and self._node_thread.is_alive() and self._node is None:
+            # Node thread shutting down — don't open LocalNode yet.
+            height = max(0, int(getattr(self, "_tip_height_hint", 0) or 0))
+            progress_height = height
+            tip = None
+            sync = "Node stopping…"
+            sync_pct = None
         else:
             try:
                 with self._io:
                     node = self._get_local()
                     tip = node.chain.tip_hash.hex() if node.chain.tip_hash else None
                     height = max(node.chain.height, 0)
+                    self._tip_height_hint = height
                 progress_height = height
                 sync = "Ready (solo / local)" if height >= 0 else "No chain yet"
                 sync_pct = 100.0 if height >= 0 else None
@@ -518,29 +639,184 @@ class CoreController:
         self._hist_rows = []
         # Keep _hist_dicts until rebuild finishes so UI stays responsive.
 
-    def request_history_build(self, *, full_chain: bool = True) -> None:
-        """Kick a background full-history scan (non-blocking for UI)."""
-        with self._hist_build_lock:
-            if self._hist_building:
+
+    def _transfer_log_path(self) -> Path:
+        return self.data_dir / "wallet_transfers.json"
+
+    def _load_transfer_log(self) -> list[dict]:
+        path = self._transfer_log_path()
+        if not path.is_file():
+            return []
+        try:
+            raw = json.loads(path.read_text(encoding="utf-8"))
+            rows = raw.get("txs") if isinstance(raw, dict) else raw
+            return [r for r in (rows or []) if isinstance(r, dict)]
+        except Exception:
+            logger.debug("transfer log load failed", exc_info=True)
+            return []
+
+    def _append_transfer_log(self, entry: dict) -> None:
+        """Durable Sent journal — survives mempool wipe when mining pauses P2P."""
+        path = self._transfer_log_path()
+        rows = self._load_transfer_log()
+        txid = str(entry.get("txid") or "")
+        if txid and any(
+            str(r.get("txid") or "") == txid and r.get("kind") == entry.get("kind") for r in rows
+        ):
+            return
+        rows.append(entry)
+        rows = rows[-2000:]
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(json.dumps({"txs": rows}, indent=2), encoding="utf-8")
+        except Exception:
+            logger.exception("transfer log write failed")
+
+    def _merge_transfer_log(self, rows: list[TxRow], addr: str) -> list[TxRow]:
+        """Ensure logged sends appear even if mempool was dropped before confirm."""
+        have = {r.txid for r in rows if r.txid}
+        extra: list[TxRow] = []
+        for e in self._load_transfer_log():
+            from_a = str(e.get("from") or "")
+            to_a = str(e.get("to") or "")
+            kind = str(e.get("kind") or "Sent")
+            txid = str(e.get("txid") or "")
+            if not txid or txid in have:
+                continue
+            if kind.startswith("Sent"):
+                if from_a and from_a != addr:
+                    continue
+                extra.append(
+                    TxRow(
+                        kind="Sent" if e.get("confirmed") else "Sent (pending)",
+                        amount_sats=abs(int(e.get("amount_sats") or 0)),
+                        detail=txid,
+                        height=e.get("height"),
+                        txid=txid,
+                        timestamp=e.get("timestamp"),
+                        from_addrs=[from_a or addr],
+                        to_addrs=[to_a] if to_a else [],
+                        fee_sats=e.get("fee_sats"),
+                        confirmations=(
+                            e.get("confirmations") if e.get("height") is not None else 0
+                        ),
+                    )
+                )
+            elif kind.startswith("Received"):
+                if to_a and to_a != addr:
+                    continue
+                extra.append(
+                    TxRow(
+                        kind="Received" if e.get("confirmed") else "Received (pending)",
+                        amount_sats=abs(int(e.get("amount_sats") or 0)),
+                        detail=txid,
+                        height=e.get("height"),
+                        txid=txid,
+                        timestamp=e.get("timestamp"),
+                        from_addrs=[from_a] if from_a else [],
+                        to_addrs=[to_a or addr],
+                        fee_sats=e.get("fee_sats"),
+                        confirmations=(
+                            e.get("confirmations") if e.get("height") is not None else 0
+                        ),
+                    )
+                )
+        return extra + rows if extra else rows
+
+    def _hist_key_is_partial(self) -> bool:
+        """True when last wallet_history cache was a short-window (non-full) scan."""
+        key = self._hist_key
+        # key = ("hist-v3", addr, tip, mem_n, bool(full_chain), int(limit))
+        return isinstance(key, tuple) and len(key) >= 5 and key[4] is False
+
+    def _ensure_history_before_node(self, *, timeout: float = 120.0) -> None:
+        """Wait for async history or run a sync full scan before P2P owns the datadir."""
+        if self._node is not None:
+            return
+        deadline = time.monotonic() + max(1.0, float(timeout))
+
+        def _needs_full() -> bool:
+            return (
+                not self._hist_dicts
+                or self._hist_key is None
+                or self._hist_key_is_partial()
+                or bool(getattr(self, "_hist_need_full", False))
+            )
+
+        while time.monotonic() < deadline:
+            with self._hist_build_lock:
+                building = bool(self._hist_building)
+            if building:
+                time.sleep(0.05)
+                continue
+            if not _needs_full():
                 return
             if self._node is not None:
-                # Node owns datadir — cannot scan now; serve cache only.
                 return
-            self._hist_building = True
-            self._hist_build_error = None
-
-        def _job() -> None:
             try:
-                rows = self.wallet_history(2000, full_chain=full_chain)
+                rows = self.wallet_history(2000, full_chain=True)
                 dicts = [self._txrow_to_dict(r) for r in rows]
                 self._hist_dicts = dicts
                 self._recent_cache = list(dicts)[:50]
+                with self._hist_build_lock:
+                    self._hist_need_full = False
+                try:
+                    self.balance_sats()
+                except Exception:
+                    logger.exception("balance snapshot after history failed")
+                return
+            except Exception:
+                logger.exception("sync history before node failed")
+                return
+        logger.warning("history snapshot before node timed out after %.0fs", timeout)
+
+    def request_history_build(self, *, full_chain: bool = True) -> None:
+        """Kick a background full-history scan (non-blocking for UI).
+
+        Safe while the P2P node owns the datadir: wallet_history uses ReadOnlyChain
+        on chain.sqlite (WAL mode=ro) so Sent/Received still populate when peers
+        are down / handshake fails but the node process stays up.
+        """
+        # Defer full scans while solo-mining: concurrent ReadOnlyChain + live
+        # accept_block has segfaulted sqlite on macOS (null pager page).
+        if self._mining:
+            with self._hist_build_lock:
+                if full_chain:
+                    self._hist_need_full = True
+            return
+        with self._hist_build_lock:
+            if full_chain:
+                self._hist_need_full = True
+            if self._hist_building:
+                return
+            self._hist_building = True
+            self._hist_build_error = None
+            want_full = bool(full_chain or getattr(self, "_hist_need_full", False))
+
+        def _job() -> None:
+            try:
+                do_full = want_full
+                rows = self.wallet_history(2000, full_chain=do_full)
+                dicts = [self._txrow_to_dict(r) for r in rows]
+                self._hist_dicts = dicts
+                self._recent_cache = list(dicts)[:50]
+                if self._node is None:
+                    try:
+                        self.balance_sats()
+                    except Exception:
+                        logger.debug("balance snapshot after hist job failed", exc_info=True)
+                if do_full:
+                    with self._hist_build_lock:
+                        self._hist_need_full = False
             except Exception as e:  # noqa: BLE001
                 logger.exception("history build failed")
                 self._hist_build_error = str(e)
             finally:
                 with self._hist_build_lock:
                     self._hist_building = False
+                    need_again = bool(getattr(self, "_hist_need_full", False))
+                if need_again:
+                    self.request_history_build(full_chain=True)
 
         threading.Thread(target=_job, name="mhcoin-hist-build", daemon=True).start()
 
@@ -549,19 +825,55 @@ class CoreController:
         building = False
         with self._hist_build_lock:
             building = bool(self._hist_building)
-        # Prefer last full snapshot; else recent cache.
-        txs = list(self._hist_dicts) if self._hist_dicts else list(self._recent_cache)
-        partial = not bool(self._hist_dicts)
-        if self._node is None and not building and (
-            not self._hist_dicts or self._hist_key is None
+        # Merge full snapshot + recent + durable send log (dedupe by txid+kind).
+        txs: list[dict] = []
+        seen: set[tuple] = set()
+
+        def _add(rows: list) -> None:
+            for d in rows:
+                if not isinstance(d, dict):
+                    continue
+                k = (str(d.get("txid") or ""), str(d.get("kind") or ""), str(d.get("type") or ""))
+                if k in seen:
+                    continue
+                seen.add(k)
+                txs.append(d)
+
+        _add(list(self._hist_dicts or []))
+        _add(list(self._recent_cache or []))
+        # Ensure transfer-log sends are visible even before/without a full scan.
+        try:
+            addr_now = self.default_address()
+        except Exception:
+            addr_now = ""
+        try:
+            log_rows = self._merge_transfer_log([], addr_now or "")
+            _add([self._txrow_to_dict(r) for r in log_rows])
+        except Exception:
+            logger.debug("history log merge failed", exc_info=True)
+        key_partial = self._hist_key_is_partial()
+        partial = (not bool(self._hist_dicts)) or key_partial
+        # Upgrade stuck partial / empty scans even while the node is running
+        # (ReadOnlyChain). Unlock used to kick full_chain=False which set
+        # _hist_dicts and blocked a full rebuild — Sent silently missing.
+        if not building and (
+            not self._hist_dicts or self._hist_key is None or key_partial
         ):
             self.request_history_build(full_chain=True)
             with self._hist_build_lock:
                 building = bool(self._hist_building)
+        sliced = txs[:limit]
+        counts = {"mined": 0, "sent": 0, "received": 0, "other": 0}
+        for d in sliced:
+            typ = str(d.get("type") or "other")
+            if typ not in counts:
+                typ = "other"
+            counts[typ] += 1
         return {
             "ok": True,
-            "txs": txs[:limit],
-            "count": len(txs[:limit]),
+            "txs": sliced,
+            "count": len(sliced),
+            "counts": counts,
             "building": building,
             "partial": partial and not building,
             "cached": True,
@@ -577,6 +889,27 @@ class CoreController:
         """Fast path for Overview: recent window; transfers ranked above mining."""
         return self.wallet_history(limit=limit, full_chain=full_chain)
 
+    def _history_scan_sources(self):
+        """Chain + mempool for wallet_history.
+
+        When the P2P node owns the datadir, open chain.sqlite read-only (WAL) so
+        Sent/Received still classify without LocalNode / disk lock contention.
+        Returns (chain, mempool_txs, cleanup_fn).
+        """
+        if self._node is not None:
+            roc = ReadOnlyChain(self.data_dir)
+            mem_txs: list = []
+            try:
+                mp_path = self.data_dir / "mempool.json"
+                if mp_path.is_file():
+                    mem_txs = list(Mempool(mp_path).list_txs())
+            except Exception:
+                logger.debug("readonly mempool load failed", exc_info=True)
+            return roc, mem_txs, roc.close
+
+        node = self._get_local()
+        return node.chain, list(node.mempool.list_txs()), None
+
     def wallet_history(self, limit: int = 2000, *, full_chain: bool = True) -> list[TxRow]:
         """Wallet activity with cache keyed by (address, tip, mempool size)."""
         try:
@@ -584,30 +917,58 @@ class CoreController:
         except WalletError:
             return []
         pkh = address_to_pubkey_hash(addr, hrp=self.hrp)
+        # All keys in wallet.json — Sent must show even if user switches active wallet.
+        owned_pkh: dict[bytes, str] = {pkh: addr}
+        try:
+            for w in self.list_wallets():
+                a = str(w.get("address") or "")
+                if not a:
+                    continue
+                try:
+                    owned_pkh[address_to_pubkey_hash(a, hrp=self.hrp)] = a
+                except Exception:
+                    continue
+        except Exception:
+            logger.debug("list_wallets for history failed", exc_info=True)
 
-        with self._io:
-            node = self._get_local()
-            h = node.chain.height
+        # Hold _io only when LocalNode owns the datadir (not for ReadOnlyChain).
+        hold_io = self._node is None
+        if hold_io:
+            self._io.acquire()
+        cleanup = None
+        try:
+            chain, mempool_txs, cleanup = self._history_scan_sources()
+            h = chain.height
             if h < 0:
                 return []
-            tip = node.chain.tip_hash.hex() if node.chain.tip_hash else ""
-            mem_n = len(node.mempool)
-            key = ("hist-v2", addr, tip, mem_n, bool(full_chain), int(limit))
+            tip = chain.tip_hash.hex() if chain.tip_hash else ""
+            mem_n = len(mempool_txs)
+            key = ("hist-v4", tuple(sorted(owned_pkh.values())), tip, mem_n, bool(full_chain), int(limit))
             if self._hist_key == key and self._hist_rows:
                 return list(self._hist_rows)[:limit]
 
-            start = 0 if full_chain else max(0, h - 120)
+            # Classification window (UI limit). Prev-out index always covers the
+            # full active chain — otherwise Sent is missed when the spent UTXO
+            # was created outside a short window (_tx_spends_ours → False).
+            window_start = 0 if full_chain else max(0, h - 120)
             tx_index: dict[str, object] = {}
-            blocks: list[tuple[int, object]] = []
-            for height in range(start, h + 1):
-                block = node.chain.get_block_by_height(height)
+            window_blocks: list[tuple[int, object]] = []
+            for height in range(0, h + 1):
+                block = chain.get_block_by_height(height)
                 if block is None:
                     continue
-                blocks.append((height, block))
                 for tx in block.transactions:
                     tx_index[tx.txid_hex()] = tx
+                if height >= window_start:
+                    window_blocks.append((height, block))
 
             def _out_is_ours(out) -> bool:
+                try:
+                    return out.pubkey_hash() in owned_pkh
+                except Exception:
+                    return False
+
+            def _out_is_active(out) -> bool:
                 try:
                     return out.pubkey_hash() == pkh
                 except Exception:
@@ -620,11 +981,19 @@ class CoreController:
                     return None
 
             def _tx_spends_ours(tx) -> bool:
+                """True iff any input spends an outpoint we owned.
+
+                Relies on full-chain tx_index. Missing prev outs must NOT be
+                treated as 'not ours' for windowed scans — that historically
+                dropped Sent (and self-spend-with-no-change vanished entirely).
+                """
                 if tx.is_coinbase():
                     return False
                 for tin in tx.inputs:
                     prev = tx_index.get(tin.prev_txid.hex())
                     if prev is None:
+                        # Should not happen with full-chain index; fail closed
+                        # as 'unknown' → not Sent (avoid false Sent).
                         continue
                     vout = int(tin.prev_vout)
                     if 0 <= vout < len(prev.outputs) and _out_is_ours(prev.outputs[vout]):
@@ -674,7 +1043,7 @@ class CoreController:
             mining_rows: list[TxRow] = []
             transfer_rows: list[TxRow] = []
 
-            for height, block in reversed(blocks):
+            for height, block in reversed(window_blocks):
                 try:
                     block_ts = int(block.header.timestamp)
                 except Exception:
@@ -686,11 +1055,14 @@ class CoreController:
                     paid_out = sum(o.value for o in foreign)
                     spends = _tx_spends_ours(tx)
                     from_a = _from_addrs(tx)
+                    # Prefer from-addrs that are our keys (multi-wallet).
+                    from_ours = [a for a in from_a if a in owned_pkh.values()]
                     to_ours = [a for a in (_addr_of_out(o) for o in ours) if a]
                     to_foreign = [a for a in (_addr_of_out(o) for o in foreign) if a]
                     fee = _fee_sats(tx)
 
                     if tx.is_coinbase():
+                        # Mining reward for whichever of our keys got the coinbase.
                         if to_us > 0:
                             mining_rows.append(
                                 TxRow(
@@ -708,23 +1080,57 @@ class CoreController:
                             )
                         continue
 
-                    # Sent ONLY if we spent our own outpoint (never treat foreign change as our send).
-                    # Skip pure self-churn (no external payout) — shows as 0.00000000 MHC otherwise.
-                    if spends and paid_out > 0:
-                        transfer_rows.append(
-                            TxRow(
-                                kind="Sent",
-                                amount_sats=paid_out,
-                                detail=tx.txid_hex(),
-                                height=height,
-                                txid=tx.txid_hex(),
-                                timestamp=block_ts,
-                                from_addrs=from_a or [addr],
-                                to_addrs=to_foreign,
-                                fee_sats=fee,
-                                confirmations=_confs(height),
+                    # Sent: spent our key(s). Amount = external payout, else internal
+                    # payout to another of our keys (exclude change back to spenders).
+                    if spends and (paid_out > 0 or to_us > 0):
+                        internal_to = [a for a in to_ours if a not in from_ours]
+                        if paid_out > 0:
+                            sent_amt = paid_out
+                            to_list = to_foreign
+                        else:
+                            sent_amt = sum(
+                                int(o.value)
+                                for o in ours
+                                if _addr_of_out(o) in internal_to
                             )
-                        )
+                            to_list = internal_to
+                        if sent_amt > 0 and to_list:
+                            transfer_rows.append(
+                                TxRow(
+                                    kind="Sent",
+                                    amount_sats=sent_amt,
+                                    detail=tx.txid_hex(),
+                                    height=height,
+                                    txid=tx.txid_hex(),
+                                    timestamp=block_ts,
+                                    from_addrs=from_ours or from_a or [addr],
+                                    to_addrs=to_list,
+                                    fee_sats=fee,
+                                    confirmations=_confs(height),
+                                )
+                            )
+                        # Mirror internal transfer as Received on destination wallet.
+                        if internal_to and paid_out == 0:
+                            recv_amt = sum(
+                                int(o.value)
+                                for o in ours
+                                if _addr_of_out(o) in internal_to
+                            )
+                            if recv_amt > 0:
+                                transfer_rows.append(
+                                    TxRow(
+                                        kind="Received",
+                                        amount_sats=recv_amt,
+                                        detail=tx.txid_hex(),
+                                        height=height,
+                                        txid=tx.txid_hex() + ":recv",
+                                        timestamp=block_ts,
+                                        from_addrs=from_ours or from_a,
+                                        to_addrs=internal_to,
+                                        fee_sats=0,
+                                        confirmations=_confs(height),
+                                    )
+                                )
                     elif to_us > 0:
                         transfer_rows.append(
                             TxRow(
@@ -742,7 +1148,7 @@ class CoreController:
                         )
 
             pending: list[TxRow] = []
-            for tx in reversed(node.mempool.list_txs()):
+            for tx in reversed(mempool_txs):
                 if tx.is_coinbase():
                     continue
                 ours = [o for o in tx.outputs if _out_is_ours(o)]
@@ -798,6 +1204,23 @@ class CoreController:
                 )
             )
             rows = pending + confirmed
+            # Durable send journal (mempool can be wiped when mining pauses P2P).
+            rows = self._merge_transfer_log(rows, addr)
+            # Mark log entries confirmed when we see them on-chain.
+            try:
+                onchain = {r.txid for r in transfer_rows if r.txid}
+                log_rows = self._load_transfer_log()
+                changed = False
+                for e in log_rows:
+                    if e.get("txid") in onchain and not e.get("confirmed"):
+                        e["confirmed"] = True
+                        changed = True
+                if changed:
+                    self._transfer_log_path().write_text(
+                        json.dumps({"txs": log_rows}, indent=2), encoding="utf-8"
+                    )
+            except Exception:
+                logger.debug("transfer log confirm update failed", exc_info=True)
             self._hist_key = key
             self._hist_rows = list(rows)
             try:
@@ -805,6 +1228,14 @@ class CoreController:
             except Exception:
                 pass
             return rows[:limit]
+        finally:
+            if cleanup is not None:
+                try:
+                    cleanup()
+                except Exception:
+                    pass
+            if hold_io:
+                self._io.release()
 
     # --- mining -------------------------------------------------------------
 
@@ -834,30 +1265,61 @@ class CoreController:
         with self._mine_log_lock:
             self._mine_log.append(line)
 
+    def _wait_datadir_free(self, *, timeout: float = 8.0) -> None:
+        """Wait until chain disk lock is free (zombie node thread after stop)."""
+        deadline = time.monotonic() + max(0.5, float(timeout))
+        last_err: Exception | None = None
+        while time.monotonic() < deadline:
+            try:
+                with chain_disk_lock(self.data_dir, timeout=0.35):
+                    return
+            except Exception as e:  # noqa: BLE001
+                last_err = e
+                time.sleep(0.15)
+        raise RuntimeError(
+            f"chain still busy after stopping node ({last_err}) — wait a moment and retry"
+        )
+
     def start_mining(self, address: str | None = None, on_block: Callable | None = None) -> None:
         if self._mining:
             return
         addr = address or self.default_address()
         if not validate_address(addr, hrp=self.hrp):
             raise ValueError("invalid reward address")
-        # Same datadir: pause P2P node while SoloMiner writes blocks.
-        self._resume_node_after_mine = self._node is not None
-        if self._node is not None:
-            self.stop_node()
-        self.ensure_chain()
+        # Bitcoin-style: mine through the live P2P node (same process owns datadir).
+        # Do NOT stop the node — template/accept go via NodeRuntime + relay INV.
+        self._resume_node_after_mine = False
+        if self._node is None:
+            self._mine_log_line("Starting P2P node for live mining…")
+            self.start_node(skip_history_wait=True)
+            deadline = time.monotonic() + 15.0
+            while time.monotonic() < deadline:
+                rt = self._node
+                if rt is not None and not getattr(rt, "_stopped", False):
+                    try:
+                        if rt.chain.height >= 0:
+                            break
+                    except Exception:
+                        pass
+                time.sleep(0.05)
+        if self._node is None or getattr(self._node, "_stopped", False):
+            raise RuntimeError("P2P node failed to start — cannot mine")
+        # Drop LocalNode handle so we never open a second writer on the datadir.
+        with self._io:
+            self._close_local()
         self._miner_stop.clear()
         self._mining = True
         reward_addr = addr
+        tip_h = -1
         try:
-            tip_h = -1
-            with self._io:
-                node = self._get_local()
-                tip_h = int(node.chain.height)
+            tip_h = int(self._node.chain.height)
+            self._tip_height_hint = max(0, tip_h)
         except Exception:
-            tip_h = -1
+            tip_h = int(getattr(self, "_tip_height_hint", 0) or 0)
         self._mine_log_line(f"MHCOIN Solo Miner · {self.network} · tip #{tip_h}")
         self._mine_log_line(f"reward  {reward_addr}")
         self._mine_log_line(f"data    {self.data_dir}")
+        self._mine_log_line("mode    live node (P2P stays online)")
         self._mine_log_line("────────────────────────────────")
         self._mine_log_line("searching nonce… (Stop to quit)")
 
@@ -866,6 +1328,12 @@ class CoreController:
                 while not self._miner_stop.is_set():
                     t0 = time.time()
                     height = -1
+                    bits = 0
+                    block = None
+                    rt = self._node
+                    if rt is None or getattr(rt, "_stopped", False) or not getattr(rt, "_running", True):
+                        self._mine_log_line("P2P node not running — mining stopped")
+                        break
                     try:
 
                         def _prog(nonce: int, _h: bytes, hps: float) -> None:
@@ -873,10 +1341,8 @@ class CoreController:
                                 raise KeyboardInterrupt()
                             self._hashrate = hps
                             now = time.time()
-                            # Throttle terminal-style progress (~2 lines/sec).
                             if now - self._mine_log_last_prog >= 0.5:
                                 self._mine_log_last_prog = now
-                                # Strip ANSI for GUI log panel.
                                 plain = (
                                     f"· height {height}  nonce {nonce:,}  "
                                     f"{hps/1000:.1f} kH/s" if hps >= 1000 else
@@ -884,41 +1350,31 @@ class CoreController:
                                 )
                                 self._mine_log_line(plain)
 
-                        with self._io:
-                            node = self._get_local()
-                            if node.chain.height < 0 or node.chain.tip_hash is None:
-                                break
-                            height = node.chain.height + 1
-                            params = get_network_params(self.network)
-                            tip = node.chain.get_block_by_hash(node.chain.tip_hash)
-                            bits = tip.header.bits if tip else params.genesis_bits
-                            if self.network in ("regtest", "localnet"):
-                                bits = REGTEST_NBITS
-                            block = build_block_template(
-                                height=height,
-                                previous_hash=node.chain.tip_hash,
-                                timestamp=int(time.time()),
-                                bits=bits,
-                                mempool=node.mempool,
-                                utxo=node.chain.utxo,
-                                miner_pubkey_hash=address_to_pubkey_hash(reward_addr, hrp=self.hrp),
-                            )
+                        block, height, bits = rt.prepare_block_template(
+                            reward_addr, hrp=self.hrp
+                        )
                         self._mine_log_line(f"template #{height}  bits=0x{bits:08x}")
-                        # Mine outside lock so GUI can refresh
                         mine_block(block, progress=_prog)
                     except KeyboardInterrupt:
                         break
+                    except Exception as e:
+                        logger.exception("mine template/PoW failed")
+                        self._mine_log_line(f"WARN mine step: {e}")
+                        time.sleep(0.5)
+                        continue
                     if self._miner_stop.is_set():
                         break
-                    with self._io:
-                        node = self._get_local()
-                        # Tip may have moved; only connect if still extends
-                        if node.chain.tip_hash != block.header.previous_block_hash:
+                    rt = self._node
+                    if rt is None or block is None:
+                        break
+                    try:
+                        # Tip may have moved while hashing (peer block) — retry.
+                        if rt.chain.tip_hash != block.header.previous_block_hash:
                             self._mine_log_line(f"stale template #{height} — retry")
                             continue
-                        connected = node.chain.connect_block(block)
-                        node.mempool.clear_included(block.transactions[1:])
+                        connected = rt.accept_block(block)
                         reward = block.transactions[0].outputs[0].value
+                        self._tip_height_hint = int(connected)
                         self._blocks_found += 1
                         self._rewards_sats += reward
                         elapsed = max(time.time() - t0, 1e-9)
@@ -939,9 +1395,10 @@ class CoreController:
                         self._invalidate_history_cache()
                         try:
                             pkh = address_to_pubkey_hash(reward_addr, hrp=self.hrp)
-                            self._balance_cache_sats = int(
-                                node.chain.utxo.balance_for_pubkey_hash(pkh)
-                            )
+                            with rt.chain._lock:
+                                self._balance_cache_sats = int(
+                                    rt.chain.utxo.balance_for_pubkey_hash(pkh)
+                                )
                             self._balance_cache_valid = True
                         except Exception:
                             pass
@@ -963,8 +1420,12 @@ class CoreController:
                             )
                         except Exception:
                             pass
-                    if on_block:
-                        on_block(connected, block.block_hash().hex(), reward)
+                        if on_block:
+                            on_block(connected, block.block_hash().hex(), reward)
+                    except Exception as e:
+                        logger.exception("accept mined block failed")
+                        self._mine_log_line(f"stale/reject #{height}: {e}")
+                        continue
                     time.sleep(0.05)
             except Exception as e:
                 logger.exception("miner stopped: %s", e)
@@ -973,32 +1434,23 @@ class CoreController:
                 self._mining = False
                 self._hashrate = 0.0
                 self._mine_log_line("■ Mining stopped.")
-                # Snapshot UTXO balance + recent before P2P node reclaims the datadir.
+                # Node stays up — only refresh balance cache + history.
                 try:
-                    with self._io:
-                        if self._local is not None:
-                            try:
-                                pkh = address_to_pubkey_hash(reward_addr, hrp=self.hrp)
-                                self._balance_cache_sats = int(
-                                    self._local.chain.utxo.balance_for_pubkey_hash(pkh)
-                                )
-                                self._balance_cache_valid = True
-                            except Exception:
-                                pass
-                    try:
-                        self.refresh_recent_cache(limit=50, full_chain=True)
-                    except Exception:
-                        pass
+                    rt = self._node
+                    if rt is not None:
+                        pkh = address_to_pubkey_hash(reward_addr, hrp=self.hrp)
+                        with rt.chain._lock:
+                            self._balance_cache_sats = int(
+                                rt.chain.utxo.balance_for_pubkey_hash(pkh)
+                            )
+                            self._tip_height_hint = max(0, int(rt.chain.height))
+                        self._balance_cache_valid = True
                 except Exception:
                     pass
-                if self._resume_node_after_mine:
-                    self._resume_node_after_mine = False
-                    try:
-                        self.start_node()
-                        self._mine_log_line("Node resumed after mining.")
-                    except Exception:
-                        logger.exception("resume node after mining failed")
-                        self._mine_log_line("WARN: failed to resume node after mining")
+                try:
+                    self.request_history_build(full_chain=True)
+                except Exception:
+                    pass
 
         self._miner_thread = threading.Thread(target=_loop, name="mhcoin-miner", daemon=True)
         self._miner_thread.start()
@@ -1022,60 +1474,101 @@ class CoreController:
         host: str = "0.0.0.0",
         port: int | None = None,
         connect: list[str] | None = None,
+        skip_history_wait: bool = False,
     ) -> None:
-        if self._node is not None:
-            return
-        if self._mining:
-            raise RuntimeError("Stop mining before starting the P2P node")
-        params = get_network_params(self.network)
-        listen = port or params.default_port
-        peers = list(connect) if connect is not None else default_connect_peers(self.network)
-        # Full-node style (Bitcoin Core): listen for inbound + dial seeds/gossip.
-        # NAT users still work outbound-only if inbound is filtered by the router.
-        with self._io:
-            node = self._get_local()
-            if node.chain.height < 0:
-                node.chain.init_with_genesis(get_network_genesis(self.network))
-            self._close_local()
-            rt = NodeRuntime(
-                data_dir=self.data_dir,
-                network=self.network,
-                host=host,
-                port=listen,
-                connect=peers,
-                enable_listen=True,
-            )
-            self._node = rt
-
-        def _run() -> None:
+        with self._node_ctrl:
+            if self._node is not None:
+                return
+            if self._mining:
+                raise RuntimeError("Stop mining before starting the P2P node")
+            params = get_network_params(self.network)
+            listen = port or params.default_port
+            peers = list(connect) if connect is not None else default_connect_peers(self.network)
+            if skip_history_wait:
+                try:
+                    self.request_history_build(full_chain=True)
+                except Exception:
+                    pass
+            else:
+                self._ensure_history_before_node(timeout=20.0)
             try:
-                rt.start(blocking=True)
+                self.balance_sats()
             except Exception:
-                logger.exception("node stopped")
-            finally:
-                # Clear handle if the run-loop exits on its own.
-                if self._node is rt:
-                    self._node = None
-                    self._node_thread = None
+                logger.exception("balance snapshot before node failed")
+            if not self._balance_cache_valid:
+                hint = self._balance_hint_from_history()
+                if hint is not None:
+                    self._balance_cache_sats = int(hint)
+                    self._balance_cache_valid = True
+            with self._io:
+                node = self._get_local()
+                if node.chain.height < 0:
+                    node.chain.init_with_genesis(get_network_genesis(self.network))
+                try:
+                    self._tip_height_hint = max(0, int(node.chain.height))
+                except Exception:
+                    pass
+                self._close_local()
+                rt = NodeRuntime(
+                    data_dir=self.data_dir,
+                    network=self.network,
+                    host=host,
+                    port=listen,
+                    connect=peers,
+                    enable_listen=True,
+                )
+                self._node = rt
 
-        self._node_thread = threading.Thread(target=_run, name="mhcoin-node", daemon=True)
-        self._node_thread.start()
+            def _run() -> None:
+                try:
+                    rt.start(blocking=True)
+                except Exception:
+                    logger.exception("node stopped")
+                finally:
+                    if self._node is rt:
+                        self._node = None
+                        self._node_thread = None
 
-    def stop_node(self) -> None:
-        if self._node is None:
-            return
-        rt = self._node
-        try:
-            rt.stop()
-        except Exception:
-            logger.exception("node stop failed")
-        th = self._node_thread
-        if th is not None and th.is_alive() and th is not threading.current_thread():
-            th.join(timeout=15.0)
-        self._node = None
-        self._node_thread = None
-        # Brief pause so SQLite release settles before LocalNode reopens the files.
-        time.sleep(0.15)
+            self._node_thread = threading.Thread(target=_run, name="mhcoin-node", daemon=True)
+            self._node_thread.start()
+
+    def stop_node(self, *, rebuild_history: bool = True, join_timeout: float = 3.0) -> None:
+        """Stop P2P node.
+
+        keep join_timeout short — Desktop API (and UI) used to freeze for 15s+ when
+        Start mining called stop_node under the global state lock.
+        """
+        with self._node_ctrl:
+            rt = self._node
+            th = self._node_thread
+            if rt is None and not (th and th.is_alive()):
+                return
+            if rt is not None:
+                try:
+                    rt.stop()
+                except Exception:
+                    logger.exception("node stop failed")
+            if th is not None and th.is_alive() and th is not threading.current_thread():
+                th.join(timeout=max(0.5, float(join_timeout)))
+                if th.is_alive():
+                    logger.warning("node thread still alive after %.1fs join", join_timeout)
+                    try:
+                        if rt is not None:
+                            rt.stop()
+                    except Exception:
+                        pass
+                    th.join(timeout=2.0)
+            self._node = None
+            if th is None or not th.is_alive():
+                self._node_thread = None
+            with self._io:
+                self._close_local()
+            time.sleep(0.1)
+        if rebuild_history:
+            try:
+                self.request_history_build(full_chain=True)
+            except Exception:
+                logger.debug("post-stop history rebuild failed", exc_info=True)
 
     def last_txid(self) -> str | None:
         return self._last_txid

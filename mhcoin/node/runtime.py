@@ -151,29 +151,46 @@ class NodeRuntime:
     def accept_block(self, block: Block) -> int:
         return self.relay.accept_block(block)
 
-    def mine_one(self, miner_address: str, *, hrp: str | None = None) -> tuple[int, str]:
-        """Mine, validate via connect_block, clear mempool, announce BLOCK INV."""
-        if self.chain.height < 0:
+    def prepare_block_template(
+        self, miner_address: str, *, hrp: str | None = None
+    ) -> tuple[Block, int, int]:
+        """Build a block template from the live node tip/mempool (Bitcoin-style).
+
+        Callers mine outside locks, then submit via accept_block().
+        Returns (block, height, bits).
+        """
+        # Chain is open from __init__; _running flips true after p2p.start() in a
+        # worker thread — only refuse once stop() has been called.
+        if getattr(self, "_stopped", False):
+            raise RuntimeError("node stopped")
+        if self.chain.height < 0 or self.chain.tip_hash is None:
             raise RuntimeError("chain not initialized")
         params = get_network_params(self.network)
         use_hrp = hrp or params.address_hrp
         pkh = address_to_pubkey_hash(miner_address, hrp=use_hrp)
-        height = self.chain.height + 1
-        assert self.chain.tip_hash is not None
-        # Mining bits: use tip bits (genesis bits for early chain); retarget is future work
-        tip = self.chain.get_block_by_hash(self.chain.tip_hash)
-        bits = tip.header.bits if tip is not None else params.genesis_bits
-        if self.network in ("regtest", "localnet"):
-            bits = REGTEST_NBITS
-        block = build_block_template(
-            height=height,
-            previous_hash=self.chain.tip_hash,
-            timestamp=int(time.time()),
-            bits=bits,
-            mempool=self.mempool,
-            utxo=self.chain.utxo,
-            miner_pubkey_hash=pkh,
-        )
+        with self.chain._lock:
+            tip_hash = self.chain.tip_hash
+            if tip_hash is None:
+                raise RuntimeError("chain not initialized")
+            height = self.chain.height + 1
+            tip = self.chain.get_block_by_hash(tip_hash)
+            bits = tip.header.bits if tip is not None else params.genesis_bits
+            if self.network in ("regtest", "localnet"):
+                bits = REGTEST_NBITS
+            block = build_block_template(
+                height=height,
+                previous_hash=tip_hash,
+                timestamp=int(time.time()),
+                bits=bits,
+                mempool=self.mempool,
+                utxo=self.chain.utxo,
+                miner_pubkey_hash=pkh,
+            )
+        return block, height, bits
+
+    def mine_one(self, miner_address: str, *, hrp: str | None = None) -> tuple[int, str]:
+        """Mine one block on the live node and announce BLOCK INV to peers."""
+        block, _height, _bits = self.prepare_block_template(miner_address, hrp=hrp)
         mine_block(block)
         new_height = self.relay.accept_block(block)
         self._write_status()
