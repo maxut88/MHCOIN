@@ -297,6 +297,10 @@ class SyncManager:
             try:
                 height = self.relay.accept_block(block, source_peer=peer)
                 self.progress_height = height
+                # Keep sync heartbeat alive during slow local validation / disk IO
+                # so IBD does not false-timeout mid-batch.
+                with self._lock:
+                    self._last_activity = time.time()
                 logger.info(
                     "Sync applied block height=%s hash=%s",
                     height,
