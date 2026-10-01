@@ -9,7 +9,6 @@ from mhcoin.blockchain.chain import Blockchain
 from mhcoin.blockchain.genesis import mine_regtest_genesis
 from mhcoin.consensus.params import get_network_params
 from mhcoin.consensus.proof_of_work import mine_block
-from mhcoin.constants import REGTEST_NBITS
 from mhcoin.mempool import Mempool, MempoolError
 from mhcoin.mining.block_template import build_block_template
 from mhcoin.transaction.transaction import Transaction
@@ -45,11 +44,17 @@ class LocalNode:
         pkh = address_to_pubkey_hash(miner_address, hrp=self.hrp)
         height = self.chain.height + 1
         assert self.chain.tip_hash is not None
+        tip_hash = self.chain.tip_hash
+        bits = self.chain.get_next_work_for_parent(tip_hash)
+        mtp = self.chain.median_time_past_for_parent(tip_hash)
+        ts = int(time.time())
+        if ts <= mtp:
+            ts = mtp + 1
         block = build_block_template(
             height=height,
-            previous_hash=self.chain.tip_hash,
-            timestamp=int(time.time()),
-            bits=REGTEST_NBITS,
+            previous_hash=tip_hash,
+            timestamp=ts,
+            bits=bits,
             mempool=self.mempool,
             utxo=self.chain.utxo,
             miner_pubkey_hash=pkh,

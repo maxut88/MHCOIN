@@ -13,11 +13,11 @@ import time
 from typing import TYPE_CHECKING, Callable
 
 from mhcoin.blockchain.block import Block, BlockHeader
-from mhcoin.blockchain.chain import Blockchain, ChainError
+from mhcoin.blockchain.chain import Blockchain, BlockIndexEntry, ChainError
 from mhcoin.blockchain.validation import ValidationError
-from mhcoin.consensus.difficulty import bits_to_target
+from mhcoin.consensus.difficulty import bits_to_target, pow_limit_for_network
 from mhcoin.consensus.proof_of_work import verify_proof_of_work
-from mhcoin.constants import MAX_FUTURE_BLOCK_TIME, REGTEST_NBITS, SUPPORTED_BLOCK_VERSIONS
+from mhcoin.constants import MAX_FUTURE_BLOCK_TIME, SUPPORTED_BLOCK_VERSIONS
 from mhcoin.network.constants import (
     DEFAULT_HEADERS_TIMEOUT,
     DEFAULT_SYNC_TIMEOUT,
@@ -384,22 +384,57 @@ class SyncManager:
         self, headers: list[BlockHeader], expected_prev: bytes
     ) -> list[bytes]:
         prev = expected_prev
+        parent = self.chain.get_index(expected_prev)
+        if parent is None:
+            raise ValidationError("unknown parent for header chain")
+        overlay: dict[bytes, BlockIndexEntry] = {}
         hashes: list[bytes] = []
+        limit = pow_limit_for_network(self.chain.network)
         for i, hdr in enumerate(headers):
             if hdr.previous_block_hash != prev:
                 raise ValidationError(f"header chain broken at index {i}")
             if hdr.version not in SUPPORTED_BLOCK_VERSIONS:
                 raise ValidationError(f"unsupported header version {hdr.version}")
             try:
-                if bits_to_target(hdr.bits) > bits_to_target(REGTEST_NBITS):
-                    raise ValidationError("unexpected header bits (too easy)")
+                expected_bits = self.chain.get_next_work_for_parent(prev, overlay=overlay)
+            except ChainError as e:
+                raise ValidationError(str(e)) from e
+            if hdr.bits != expected_bits:
+                raise ValidationError(
+                    f"unexpected header bits at index {i}: "
+                    f"got 0x{hdr.bits:08x}, expected 0x{expected_bits:08x}"
+                )
+            try:
+                target = bits_to_target(hdr.bits)
             except ValueError as e:
                 raise ValidationError(str(e)) from e
+            if target > limit:
+                raise ValidationError("header target exceeds POW_LIMIT")
             if not verify_proof_of_work(hdr):
                 raise ValidationError(f"invalid header PoW at index {i}")
+            try:
+                mtp = self.chain.median_time_past_for_parent(prev, overlay=overlay)
+            except ChainError as e:
+                raise ValidationError(str(e)) from e
+            if hdr.timestamp <= mtp:
+                raise ValidationError(
+                    f"header timestamp {hdr.timestamp} <= median time past {mtp}"
+                )
             if hdr.timestamp > int(time.time()) + MAX_FUTURE_BLOCK_TIME:
                 raise ValidationError("header timestamp too far in future")
             h = hdr.block_hash()
+            parent_entry = overlay.get(prev) or self.chain.get_index(prev)
+            if parent_entry is None:
+                raise ValidationError("missing parent index during header validation")
+            overlay[h] = BlockIndexEntry(
+                block_hash=h,
+                prev_hash=prev,
+                height=parent_entry.height + 1,
+                chain_work=0,
+                status=0,
+                bits=hdr.bits,
+                timestamp=hdr.timestamp,
+            )
             hashes.append(h)
             prev = h
             if len(hashes) > MAX_HEADERS:

@@ -24,7 +24,6 @@ from mhcoin.blockchain.chain import ChainError
 from mhcoin.config_loader import resolve_data_dir
 from mhcoin.consensus.params import get_network_params
 from mhcoin.consensus.proof_of_work import mine_block
-from mhcoin.constants import REGTEST_NBITS
 from mhcoin.desktop.prefs import save_preferred_network
 from mhcoin.desktop.seeds import default_connect_peers
 from mhcoin.mempool import Mempool
@@ -636,7 +635,9 @@ class CoreController:
     def _invalidate_history_cache(self) -> None:
         self._hist_key = None
         self._hist_rows = []
-        # Keep _hist_dicts until rebuild finishes so UI stays responsive.
+        self._hist_dicts = []
+        self._recent_cache = []
+        self._hist_need_full = True
 
 
     def _transfer_log_path(self) -> Path:
@@ -1125,18 +1126,25 @@ class CoreController:
                     fee = _fee_sats(tx)
 
                     if tx.is_coinbase():
-                        # Mining reward for whichever of our keys got the coinbase.
-                        if to_us > 0:
+                        # Mining reward only for the *active* wallet — other
+                        # wallets' coinbases must not leak into this history.
+                        active_outs = [o for o in tx.outputs if _out_is_active(o)]
+                        to_active = sum(o.value for o in active_outs)
+                        if to_active > 0:
                             mining_rows.append(
                                 TxRow(
                                     kind="Mining reward",
-                                    amount_sats=to_us,
+                                    amount_sats=to_active,
                                     detail=f"block {height}",
                                     height=height,
                                     txid=tx.txid_hex(),
                                     timestamp=block_ts,
                                     from_addrs=["coinbase"],
-                                    to_addrs=to_ours,
+                                    to_addrs=[
+                                        a
+                                        for a in (_addr_of_out(o) for o in active_outs)
+                                        if a
+                                    ],
                                     fee_sats=0,
                                     confirmations=_confs(height),
                                 )

@@ -8,7 +8,6 @@ from pathlib import Path
 from mhcoin.blockchain.chain import Blockchain
 from mhcoin.blockchain.genesis import mine_regtest_genesis
 from mhcoin.consensus.proof_of_work import mine_block
-from mhcoin.constants import REGTEST_NBITS
 from mhcoin.crypto.hashing import hash160
 from mhcoin.crypto.keys import KeyPair
 from mhcoin.mempool import Mempool
@@ -119,12 +118,19 @@ def mine_extending_block(
     """Build + PoW a tip-extending block paying kp."""
     assert chain.tip_hash is not None
     height = chain.height + 1
+    tip_hash = chain.tip_hash
+    bits = chain.get_next_work_for_parent(tip_hash)
+    mtp = chain.median_time_past_for_parent(tip_hash)
+    if timestamp is None:
+        timestamp = int(time.time())
+    if timestamp <= mtp:
+        timestamp = mtp + 1
     pkh = hash160(kp.public_key_compressed)
     block = build_block_template(
         height=height,
-        previous_hash=chain.tip_hash,
-        timestamp=int(time.time()) if timestamp is None else timestamp,
-        bits=REGTEST_NBITS,
+        previous_hash=tip_hash,
+        timestamp=timestamp,
+        bits=bits,
         mempool=mempool,
         utxo=chain.utxo,
         miner_pubkey_hash=pkh,

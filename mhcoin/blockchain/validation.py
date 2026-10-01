@@ -7,6 +7,7 @@ import time
 from mhcoin.blockchain.block import Block
 from mhcoin.blockchain.merkle import verify_merkle_root
 from mhcoin.consensus.block_reward import get_block_subsidy
+from mhcoin.consensus.difficulty import bits_to_target
 from mhcoin.consensus.proof_of_work import verify_proof_of_work
 from mhcoin.constants import (
     MAX_BLOCK_SIZE,
@@ -77,11 +78,15 @@ def validate_block(
     height: int,
     expected_prev: bytes,
     expected_bits: int,
+    median_time_past: int | None = None,
+    pow_limit: int | None = None,
     now: int | None = None,
 ) -> None:
     """
-    Full Stage 4 consensus checks. Does not mutate UTXO.
-    Stage 4: block must extend active tip (expected_prev); no reorg.
+    Full consensus checks. Does not mutate UTXO.
+
+    ``expected_bits`` must equal ``block.header.bits`` exactly (from get_next_work).
+    ``median_time_past`` when set requires timestamp > MTP.
     """
     raw_size = len(block.serialize())
     if raw_size > MAX_BLOCK_SIZE:
@@ -92,14 +97,30 @@ def validate_block(
 
     if block.header.previous_block_hash != expected_prev:
         raise ValidationError("bad previous_block_hash")
-    # Bits must be at least as hard as the network minimum (may be harder → more work).
-    from mhcoin.consensus.difficulty import bits_to_target
 
+    # Exact difficulty schedule — reject easier *or* harder mismatches.
     try:
-        if bits_to_target(block.header.bits) > bits_to_target(expected_bits):
-            raise ValidationError("unexpected difficulty bits (too easy)")
+        bits_to_target(block.header.bits)  # reject malformed compact
+        bits_to_target(expected_bits)
     except ValueError as e:
         raise ValidationError(f"invalid difficulty bits: {e}") from e
+    if block.header.bits != expected_bits:
+        raise ValidationError(
+            f"unexpected difficulty bits: got 0x{block.header.bits:08x}, "
+            f"expected 0x{expected_bits:08x}"
+        )
+    if pow_limit is not None:
+        target = bits_to_target(block.header.bits)
+        if target <= 0:
+            raise ValidationError("non-positive PoW target")
+        if target > pow_limit:
+            raise ValidationError("target exceeds POW_LIMIT")
+
+    if median_time_past is not None:
+        if block.header.timestamp <= median_time_past:
+            raise ValidationError(
+                f"block timestamp {block.header.timestamp} <= median time past {median_time_past}"
+            )
 
     clock = int(time.time()) if now is None else now
     if block.header.timestamp > clock + MAX_FUTURE_BLOCK_TIME:

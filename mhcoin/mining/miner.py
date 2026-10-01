@@ -12,7 +12,6 @@ from pathlib import Path
 from mhcoin.blockchain.genesis import get_network_genesis
 from mhcoin.consensus.params import get_network_params
 from mhcoin.consensus.proof_of_work import mine_block
-from mhcoin.constants import REGTEST_NBITS
 from mhcoin.mining.block_template import build_block_template
 from mhcoin.node.local_node import LocalNode
 from mhcoin.wallet.addresses import address_to_pubkey_hash, validate_address
@@ -175,17 +174,18 @@ class SoloMiner:
         self.ensure_chain()
         if self._stop:
             raise RuntimeError("stopped")
-        params = get_network_params(self.network)
         height = self.node.chain.height + 1
         assert self.node.chain.tip_hash is not None
-        tip = self.node.chain.get_block_by_hash(self.node.chain.tip_hash)
-        bits = tip.header.bits if tip is not None else params.genesis_bits
-        if self.network in ("regtest", "localnet"):
-            bits = REGTEST_NBITS
+        tip_hash = self.node.chain.tip_hash
+        bits = self.node.chain.get_next_work_for_parent(tip_hash)
+        mtp = self.node.chain.median_time_past_for_parent(tip_hash)
+        ts = int(time.time())
+        if ts <= mtp:
+            ts = mtp + 1
         block = build_block_template(
             height=height,
-            previous_hash=self.node.chain.tip_hash,
-            timestamp=int(time.time()),
+            previous_hash=tip_hash,
+            timestamp=ts,
             bits=bits,
             mempool=self.node.mempool,
             utxo=self.node.chain.utxo,
