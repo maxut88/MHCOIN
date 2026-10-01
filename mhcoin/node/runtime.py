@@ -14,8 +14,8 @@ from mhcoin.blockchain.block import Block
 from mhcoin.blockchain.chain import Blockchain
 from mhcoin.blockchain.genesis import get_network_genesis
 from mhcoin.consensus.params import PROTOCOL_VERSION, SOFTWARE_VERSION, get_network_params
-from mhcoin.consensus.proof_of_work import mine_block
 from mhcoin.mempool import Mempool
+from mhcoin.mining.abortable_pow import MiningAborted, mine_block_cancellable
 from mhcoin.mining.block_template import build_block_template
 from mhcoin.network.p2p import P2PConfig, P2PManager
 from mhcoin.network.relay import TxRelay
@@ -192,7 +192,23 @@ class NodeRuntime:
     def mine_one(self, miner_address: str, *, hrp: str | None = None) -> tuple[int, str]:
         """Mine one block on the live node and announce BLOCK INV to peers."""
         block, _height, _bits = self.prepare_block_template(miner_address, hrp=hrp)
-        mine_block(block)
+        parent = block.header.previous_block_hash
+        epoch0 = int(self.chain.tip_epoch)
+
+        def _abort() -> bool:
+            if getattr(self, "_stopped", False) or not getattr(self, "_running", True):
+                return True
+            if int(self.chain.tip_epoch) != epoch0:
+                return True
+            tip = self.chain.tip_hash
+            return tip is not None and tip != parent
+
+        try:
+            mine_block_cancellable(block, abort_check=_abort)
+        except MiningAborted as e:
+            raise RuntimeError("mining aborted: tip moved or node stopped") from e
+        if self.chain.tip_hash != parent:
+            raise RuntimeError("stale template after PoW")
         new_height = self.relay.accept_block(block)
         self._write_status()
         return new_height, block.block_hash().hex()
