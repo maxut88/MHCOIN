@@ -7,8 +7,7 @@
 # Usage:
 #   ./packaging/mine_mainnet.sh
 #   ./packaging/mine_mainnet.sh mhc1youraddress…
-#   MHCOIN_MINER_WORKERS=8 ./packaging/mine_mainnet.sh mhc1…
-#   (default: all CPU cores)
+#   MHCOIN_MINER_ADDRESS=mhc1… ./packaging/mine_mainnet.sh
 #
 # Stop: Ctrl+C
 set -euo pipefail
@@ -40,17 +39,11 @@ if [[ -z "${ADDR}" ]]; then
   exit 1
 fi
 
-WORKERS_ARGS=()
-if [[ -n "${MHCOIN_MINER_WORKERS:-}" ]]; then
-  WORKERS_ARGS=(--workers "${MHCOIN_MINER_WORKERS}")
-fi
-
 echo
 echo "Starting solo miner…"
 echo "  network: ${MHCOIN_NETWORK}"
 echo "  address: ${ADDR}"
-echo "  workers: ${MHCOIN_MINER_WORKERS:-all cores}"
 echo "  stop:    Ctrl+C"
 echo
 
-exec "${PY}" -m mhcoin.cli mining start --network "${MHCOIN_NETWORK}" --address "${ADDR}" "${WORKERS_ARGS[@]}"
+exec "${PY}" -m mhcoin.cli mining start --network "${MHCOIN_NETWORK}" --address "${ADDR}"

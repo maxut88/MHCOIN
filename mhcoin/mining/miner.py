@@ -12,7 +12,7 @@ from pathlib import Path
 from mhcoin.blockchain.genesis import get_network_genesis
 from mhcoin.consensus.params import get_network_params
 from mhcoin.consensus.proof_of_work import mine_block
-from mhcoin.mining.abortable_pow import MiningAborted, mine_block_cancellable, resolve_worker_count
+from mhcoin.mining.abortable_pow import MiningAborted, mine_block_cancellable
 from mhcoin.mining.block_template import build_block_template
 from mhcoin.node.local_node import LocalNode
 from mhcoin.wallet.addresses import address_to_pubkey_hash, validate_address
@@ -67,9 +67,7 @@ def _rule(s: _Style, char: str = "─", width: int = 62) -> str:
     return s.c(s.dim, char * width)
 
 
-def format_mine_banner(
-    *, network: str, address: str, data_dir: Path, tip: int, workers: int = 1
-) -> str:
+def format_mine_banner(*, network: str, address: str, data_dir: Path, tip: int) -> str:
     s = _Style()
     lines = [
         s.c(s.cyan + s.bold, "╔════════════════════════════════════════════════════════════╗"),
@@ -80,7 +78,6 @@ def format_mine_banner(
         s.c(s.cyan + s.bold, "╚════════════════════════════════════════════════════════════╝"),
         f"  {s.c(s.dim, 'tip')}      {s.c(s.bold, '#' + str(tip))}",
         f"  {s.c(s.dim, 'reward')}   {address}",
-        f"  {s.c(s.dim, 'workers')}  {s.c(s.bold, str(workers))} CPU process(es)",
         f"  {s.c(s.dim, 'data')}     {data_dir}",
         f"  {s.c(s.dim, 'stop')}     Ctrl+C",
         _rule(s),
@@ -149,7 +146,6 @@ class SoloMiner:
         network: str,
         hrp: str,
         address: str,
-        workers: int | None = None,
     ):
         params = get_network_params(network)
         if not validate_address(address, hrp=hrp):
@@ -159,7 +155,6 @@ class SoloMiner:
         self.address = address
         self.pkh = address_to_pubkey_hash(address, hrp=hrp)
         self.node = LocalNode(data_dir, hrp=hrp, network=params.name)
-        self.workers = resolve_worker_count(workers)
         self._stop = False
 
     def ensure_chain(self) -> None:
@@ -201,9 +196,6 @@ class SoloMiner:
         def _progress(nonce: int, _h: bytes, hps: float) -> None:
             if self._stop:
                 raise KeyboardInterrupt("stop requested")
-            if self.workers > 1:
-                print(format_mine_progress(height=height, nonce=nonce, hps=hps), flush=True)
-                return
             if nonce > 0 and nonce % 500_000 == 0:
                 print(format_mine_progress(height=height, nonce=nonce, hps=hps), flush=True)
 
@@ -214,12 +206,7 @@ class SoloMiner:
             return tip is not None and tip != tip_hash
 
         try:
-            mine_block_cancellable(
-                block,
-                progress=_progress,
-                abort_check=_abort,
-                workers=self.workers,
-            )
+            mine_block_cancellable(block, progress=_progress, abort_check=_abort)
         except MiningAborted:
             if self._stop:
                 raise RuntimeError("stopped") from None
@@ -255,7 +242,6 @@ class SoloMiner:
                 address=self.address,
                 data_dir=self.node.data_dir,
                 tip=int(self.node.chain.height),
-                workers=self.workers,
             ),
             flush=True,
         )
