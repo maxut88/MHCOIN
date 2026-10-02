@@ -9,7 +9,7 @@ import threading
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Callable
 
 from mhcoin.network.addrdb import AddrDB
 from mhcoin.network.seeds import HARDCODED_SEEDS
@@ -55,6 +55,8 @@ class P2PConfig:
     handshake_timeout: float = DEFAULT_HANDSHAKE_TIMEOUT
     ping_interval: float = DEFAULT_PING_INTERVAL
     start_height: int = 0
+    # If set, VERSION uses live height (process-start height goes stale and blocks IBD).
+    get_start_height: Callable[[], int] | None = None
     data_dir: Path | None = None
     outbound_target: int = DEFAULT_OUTBOUND_TARGET
     reconnect_interval: float = DEFAULT_RECONNECT_INTERVAL
@@ -336,6 +338,7 @@ class P2PManager:
             our_nonce=self.our_nonce,
             our_listen_port=self.config.port,
             start_height=self.config.start_height,
+            get_start_height=self.config.get_start_height,
             on_handshaked=self._on_handshaked,
             on_close=self._on_close,
             handshake_timeout=handshake_timeout,

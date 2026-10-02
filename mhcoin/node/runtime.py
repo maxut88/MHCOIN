@@ -67,6 +67,7 @@ class NodeRuntime:
                 port=port,
                 max_peers=max_peers,
                 start_height=height,
+                get_start_height=lambda: max(self.chain.height, 0),
                 data_dir=data_dir,
                 connect_seeds=list(self.connect_targets),
                 enable_listen=enable_listen,
