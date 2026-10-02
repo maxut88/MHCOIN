@@ -93,6 +93,7 @@ class Peer:
         our_nonce: int,
         our_listen_port: int,
         start_height: int = 0,
+        get_start_height: Callable[[], int] | None = None,
         on_handshaked: Callable[[Peer], None] | None = None,
         on_close: Callable[[Peer], None] | None = None,
         handshake_timeout: float = DEFAULT_HANDSHAKE_TIMEOUT,
@@ -104,6 +105,7 @@ class Peer:
         self.our_nonce = our_nonce
         self.our_listen_port = our_listen_port
         self.start_height = start_height
+        self.get_start_height = get_start_height
         self.on_handshaked = on_handshaked
         self.on_close = on_close
         self.handshake_timeout = handshake_timeout
@@ -208,12 +210,18 @@ class Peer:
                 self.close()
 
     def send_version(self) -> None:
+        height = self.start_height
+        if self.get_start_height is not None:
+            try:
+                height = max(0, int(self.get_start_height()))
+            except Exception:
+                height = self.start_height
         vp = VersionPayload(
             protocol_version=PROTOCOL_VERSION,
             services=SERVICES_NODE_NETWORK,
             timestamp=int(time.time()),
             nonce=self.our_nonce,
-            start_height=self.start_height,
+            start_height=height,
             network=self.network,
             listen_port=self.our_listen_port,
             software_version=SOFTWARE_VERSION,
@@ -224,7 +232,7 @@ class Peer:
             self._set_state(PeerState.VERSION_SENT)
         elif self.state == PeerState.VERSION_RECEIVED:
             pass  # already have remote VERSION
-        logger.info("VERSION sent to %s", self.addr)
+        logger.info("VERSION sent to %s (height=%s)", self.addr, height)
 
     def send_verack(self) -> None:
         self.send_raw("VERACK", encode_verack())
