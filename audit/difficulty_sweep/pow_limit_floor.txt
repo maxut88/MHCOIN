@@ -1,9 +1,0 @@
-POW_LIMIT FLOOR ANALYSIS
-POW_LIMIT = 0xfffff000000000000000000000000000000000000000000000000000000
-Minimum relative difficulty ≈ 1× (genesis target)
-At 1× hashrate: expected interval ≈ 600s
-At 0.1× hashrate: expected interval ≈ 6000s (cannot ease)
-At 0.01× hashrate: expected interval ≈ 60000s (cannot ease)
-WINDOW/DAMPING cannot solve this — separate consensus decision.
-sim div10: mean_interval=6000.0 rel=1.0000
-sim div100: mean_interval=60000.0 rel=1.0000

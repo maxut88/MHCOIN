@@ -54,3 +54,7 @@ Desktop.ini
 .vscode/
 *.swp
 *~
+
+# Local / internal research (not for GitHub)
+SOURCE_COMMIT.txt
+audit/
