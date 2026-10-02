@@ -39,6 +39,7 @@ from mhcoin.network.messages import (
     encode_getdata,
     encode_getheaders,
     encode_headers,
+    encode_inv,
 )
 from mhcoin.network.security import RateLimiter
 from mhcoin.network.serialization import ProtocolError
@@ -124,10 +125,19 @@ class SyncManager:
         remote_h = peer.remote_start_height or 0
         our_h = self._get_our_height()
         if remote_h <= our_h:
+            # We are ahead (or equal): offer missing blocks so lagging peers catch up
+            # even if their IBD aborted (e.g. duplicate WAN/LAN path closed mid-sync).
+            self.offer_catchup(peer)
             return
         with self._lock:
             if self.is_syncing:
-                return
+                sp = self.sync_peer
+                # Allow restart if current sync peer is gone / not handshaked.
+                if sp is not None and sp is not peer and getattr(sp, "state", None) is not None:
+                    from mhcoin.network.peer import PeerState
+
+                    if sp.state == PeerState.HANDSHAKED:
+                        return
             self.sync_peer = peer
             self.target_hint = remote_h
             self.progress_height = our_h
@@ -138,6 +148,52 @@ class SyncManager:
             remote_h,
         )
         self._request_headers(peer)
+
+    def offer_catchup(self, peer: Peer) -> None:
+        """INV active-chain blocks the peer is missing (seed → lagging client)."""
+        their_h = int(peer.remote_start_height or 0)
+        our_h = self._get_our_height()
+        if their_h < 0 or their_h >= our_h:
+            return
+        # Cap batch to avoid huge INV on very stale peers (they still run GETHEADERS).
+        start = their_h + 1
+        end = min(our_h, their_h + 64)
+        items: list[InventoryVector] = []
+        for h in range(start, end + 1):
+            try:
+                block = self.chain.get_block_by_height(h)
+            except Exception:
+                block = None
+            if block is None:
+                continue
+            items.append(InventoryVector(INV_TYPE_BLOCK, block.block_hash()))
+        if not items:
+            return
+        logger.info(
+            "Offering catch-up INV to %s blocks %s..%s (count=%s)",
+            peer.addr,
+            start,
+            start + len(items) - 1,
+            len(items),
+        )
+        try:
+            peer.send_raw("INV", encode_inv(items))
+        except Exception:
+            logger.debug("catch-up INV failed to %s", peer.addr, exc_info=True)
+
+    def on_peer_disconnected(self, peer: Peer) -> None:
+        """Abort in-flight sync if the sync peer drops (WAN/LAN duplicate close)."""
+        with self._lock:
+            if self.sync_peer is not peer:
+                return
+            was_syncing = self.is_syncing
+            self.state = SyncState.IDLE
+            self.sync_peer = None
+            self._pending_hashes = []
+            self._inflight.clear()
+            self._buffer.clear()
+        if was_syncing:
+            logger.info("Sync peer disconnected %s — reset to IDLE for retry", peer.addr)
 
     def consider_peer_headers(self, peer: Peer) -> None:
         """Optionally probe a peer for competing headers (fork discovery)."""
@@ -453,9 +509,9 @@ class SyncManager:
 
     def _fail(self, reason: str) -> None:
         with self._lock:
-            self.state = SyncState.FAILED
+            self.state = SyncState.IDLE
             self.sync_peer = None
             self._pending_hashes = []
             self._inflight.clear()
             self._buffer.clear()
-        logger.info("Sync failed: %s", reason)
+        logger.info("Sync failed: %s (back to IDLE)", reason)

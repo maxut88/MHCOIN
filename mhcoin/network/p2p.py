@@ -409,6 +409,21 @@ class P2PManager:
         with self._lock:
             self._peers.pop(peer.addr, None)
         logger.info("Peer disconnected %s", peer.addr)
+        if self.relay is not None and self.relay.sync is not None:
+            sync = self.relay.sync
+            try:
+                sync.on_peer_disconnected(peer)
+            except Exception:
+                logger.debug("sync on_peer_disconnected failed", exc_info=True)
+            # Retry IBD / catch-up with any remaining ahead/behind peer.
+            for other in self.handshaked_peers():
+                if other is peer:
+                    continue
+                try:
+                    sync.maybe_start(other)
+                except Exception:
+                    logger.debug("sync retry after disconnect failed", exc_info=True)
+                break
 
     def status(self) -> dict:
         return {
