@@ -114,6 +114,8 @@ Copy-Item -Recurse "dist\MHCOIN-Core" $Stage
 $Zip = "dist\release\$RelBase.zip"
 if (Test-Path $Zip) { Remove-Item -Force $Zip }
 Compress-Archive -Path "$Stage\*" -DestinationPath $Zip
+# Keep only packaged artifacts under dist\release (CI uploads this tree).
+Remove-Item -Recurse -Force $Stage
 
 Write-Host "Windows exe: $ExeOut"
 Write-Host "Windows zip: $Zip"

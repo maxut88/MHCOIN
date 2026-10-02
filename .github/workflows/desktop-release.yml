@@ -60,7 +60,12 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: MHCOIN-Core-${{ matrix.artifact }}
-          path: dist/release/*
+          path: |
+            dist/release/*.AppImage
+            dist/release/*.tar.gz
+            dist/release/*.dmg
+            dist/release/*.exe
+            dist/release/*.zip
           if-no-files-found: error
 
   release:
@@ -71,8 +76,21 @@ jobs:
       - uses: actions/download-artifact@v4
         with:
           path: artifacts
+      - name: Collect packages + SHA256SUMS
+        run: |
+          mkdir -p packages
+          find artifacts -type f \( \
+            -name 'MHCOIN-Core-*.AppImage' -o \
+            -name 'MHCOIN-Core-*-linux-x86_64.tar.gz' -o \
+            -name 'MHCOIN-Core-*-macos.dmg' -o \
+            -name 'MHCOIN-Core-*-windows-x86_64.exe' -o \
+            -name 'MHCOIN-Core-*-windows-x86_64.zip' \
+          \) -print -exec cp -t packages {} +
+          cd packages
+          sha256sum MHCOIN-Core-* | tee SHA256SUMS
+          ls -lh
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
-          files: artifacts/**/*
+          files: packages/*
           generate_release_notes: true
