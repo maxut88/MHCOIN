@@ -76,7 +76,7 @@ def test_mine_block_aborts_mid_search(tmp_path: Path):
 
 
 def test_abortable_pow_emits_progress_across_chunks(tmp_path: Path):
-    """25k abort chunks must still drive Desktop nonce/H/s log via progress()."""
+    """Progress every 100k; abort polls without Exception-chunk overhead."""
     chain = Blockchain(tmp_path / "prog", network="regtest")
     chain.init_with_genesis(get_network_genesis("regtest"))
     kp = generate_keypair()
@@ -103,7 +103,7 @@ def test_abortable_pow_emits_progress_across_chunks(tmp_path: Path):
 
     def abort() -> bool:
         polls["n"] += 1
-        return polls["n"] >= 5
+        return polls["n"] >= 20
 
     with pytest.raises(MiningAborted):
         mine_block_cancellable(
@@ -112,7 +112,8 @@ def test_abortable_pow_emits_progress_across_chunks(tmp_path: Path):
             abort_every=25_000,
             progress=progress,
         )
-    assert len(seen) >= 3, f"expected chunk-boundary progress, got {seen}"
+    assert len(seen) >= 3, f"expected 100k progress ticks, got {seen}"
+    assert all(n % 100_000 == 0 for n, _ in seen), seen
     assert all(hps > 0 for _, hps in seen)
     chain.close()
 
