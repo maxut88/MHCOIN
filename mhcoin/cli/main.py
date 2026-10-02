@@ -523,8 +523,6 @@ def mining_start(
     results = miner.run(max_blocks=blocks)
     if results:
         click.echo(f"\nMined {len(results)} block(s). Check: mhcoin wallet balance")
-    else:
-        click.echo("No blocks found.")
 
 
 @cli.group()

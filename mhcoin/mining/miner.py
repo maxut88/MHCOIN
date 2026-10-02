@@ -207,10 +207,15 @@ class SoloMiner:
 
         try:
             mine_block_cancellable(block, progress=_progress, abort_check=_abort)
-        except MiningAborted as e:
-            raise RuntimeError("stale tip or stopped") from e
+        except MiningAborted:
+            if self._stop:
+                raise RuntimeError("stopped") from None
+            raise RuntimeError("stale tip") from None
+        except KeyboardInterrupt:
+            self._stop = True
+            raise RuntimeError("stopped") from None
         if self._stop:
-            raise RuntimeError("stopped")
+            raise RuntimeError("stopped") from None
         # Tip may have moved in the last iteration.
         if self.node.chain.tip_hash != tip_hash:
             raise RuntimeError("stale tip")
@@ -245,7 +250,15 @@ class SoloMiner:
                 if max_blocks is not None and len(found) >= max_blocks:
                     break
                 t0 = time.time()
-                result = self.mine_one()
+                try:
+                    result = self.mine_one()
+                except RuntimeError as e:
+                    msg = str(e)
+                    if msg == "stopped" or self._stop:
+                        break
+                    if msg == "stale tip":
+                        continue
+                    raise
                 elapsed = time.time() - t0
                 found.append(result)
                 session_reward += int(result.reward_sats)
@@ -261,10 +274,14 @@ class SoloMiner:
                     flush=True,
                 )
         except KeyboardInterrupt:
-            s = _Style()
-            print(f"\n{s.c(s.yellow, '■ Stopped.')}  session {len(found)} blocks · "
-                  f"{format_mhc(session_reward)} MHC", flush=True)
+            self._stop = True
         finally:
+            s = _Style()
+            print(
+                f"\n{s.c(s.yellow, '■ Stopped.')}  session {len(found)} blocks · "
+                f"{format_mhc(session_reward)} MHC",
+                flush=True,
+            )
             self.node.close()
         return found
 
