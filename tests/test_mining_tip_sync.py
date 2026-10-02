@@ -70,7 +70,7 @@ def test_mine_block_aborts_mid_search(tmp_path: Path):
         return polls["n"] >= 3
 
     with pytest.raises(MiningAborted):
-        mine_block_cancellable(block, abort_check=abort, abort_every=1, workers=1)
+        mine_block_cancellable(block, abort_check=abort, abort_every=1)
     assert polls["n"] >= 3
     chain.close()
 
@@ -111,8 +111,7 @@ def test_abortable_pow_emits_progress_across_chunks(tmp_path: Path):
             abort_check=abort,
             abort_every=25_000,
             progress=progress,
-            workers=1,
-        )
+                    )
     assert len(seen) >= 3, f"expected 100k progress ticks, got {seen}"
     assert all(n % 100_000 == 0 for n, _ in seen), seen
     assert all(hps > 0 for _, hps in seen)
@@ -159,7 +158,7 @@ def test_remote_block_cancels_stale_pow_and_advances_tip(tmp_path: Path):
             # Give accept_block a moment to bump tip_epoch
             time.sleep(0.05)
             mine_block_cancellable(
-                stale, abort_check=_abort, abort_every=100, workers=1
+                stale, abort_check=_abort, abort_every=100
             )
         except MiningAborted:
             aborted.set()
@@ -286,8 +285,7 @@ def test_p2p_accept_while_cpu_mining(tmp_path: Path):
                 hard,
                 abort_check=lambda: stop.is_set(),
                 abort_every=500,
-                workers=1,
-            )
+                            )
         except MiningAborted:
             pass
 
@@ -449,8 +447,7 @@ def test_sqlite_stress_poll_while_mining(tmp_path: Path):
                         or chain.tip_epoch != epoch
                         or chain.tip_hash != tip,
                         abort_every=200,
-                        workers=1,
-                    )
+                                            )
                 except MiningAborted:
                     continue
         except BaseException as e:
@@ -471,34 +468,3 @@ def test_sqlite_stress_poll_while_mining(tmp_path: Path):
     assert chain.height >= 1
     chain.close()
 
-
-def test_parallel_pow_finds_valid_block(tmp_path: Path):
-    """Multi-process PoW finds a regtest-valid nonce (consensus hash path)."""
-    chain = Blockchain(tmp_path / "par", network="regtest")
-    chain.init_with_genesis(get_network_genesis("regtest"))
-    kp = generate_keypair()
-    pkh = hash160(kp.public_key_compressed)
-    tip = chain.tip_hash
-    assert tip is not None
-    bits = chain.get_next_work_for_parent(tip)
-    block = build_block_template(
-        height=1,
-        previous_hash=tip,
-        timestamp=chain.median_time_past_for_parent(tip) + 1,
-        bits=bits,
-        mempool=Mempool(),
-        utxo=chain.utxo,
-        miner_pubkey_hash=pkh,
-    )
-    rates: list[float] = []
-
-    def progress(_n: int, _h: bytes, hps: float) -> None:
-        rates.append(hps)
-
-    mine_block_cancellable(block, workers=2, progress=progress)
-    from mhcoin.consensus.proof_of_work import verify_proof_of_work
-
-    assert verify_proof_of_work(block.header)
-    chain.accept_block(block)
-    assert chain.height == 1
-    chain.close()
