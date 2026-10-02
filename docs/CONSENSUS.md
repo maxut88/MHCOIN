@@ -11,10 +11,24 @@ Authoritative source: `mhcoin/consensus/params.py`.
 | Initial subsidy | 50 MHC |
 | Halving | every 210,000 blocks |
 | Block interval target | 600 seconds |
+| Difficulty window | 30 blocks (per-block retarget) |
+| Difficulty damping | 1/16 |
+| MTP window | 11 |
+| Max future block time | 7200 seconds |
+| Mainnet POW_LIMIT | genesis target (`bits = 0x1e0fffff`) |
 | PoW | double SHA-256 (`HASH256` of header) |
 | Ledger | UTXO |
 
+**Mainnet consensus fingerprint** (canonical source-tree hash):
+
+`21f256498747b313795b65c9e26f0dd1cb23ee762813bc0d593c2c513e787ae9`
+
+**Mainnet genesis:**
+
+`62e078a7ca0dfeac4c6451e5852d5ec714c7aacbff4e48f1d8cc8aa9560a0000`
+
 Changing any of these without a coordinated protocol upgrade is a hard fork.
+Do not document or ship obsolete W60/D1/8 difficulty parameters.
 
 ## Consensus-critical vs policy
 
