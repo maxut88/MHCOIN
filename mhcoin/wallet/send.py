@@ -72,6 +72,7 @@ def build_send_tx(
     amount_sats: int,
     fee_sats: int = DEFAULT_FEE_SATOSHIS,
     hrp: str = DEFAULT_ADDRESS_HRP,
+    exclude_outpoints: set[str] | None = None,
 ) -> SendResult:
     if amount_sats <= 0:
         raise ValueError("amount must be positive")
@@ -79,6 +80,8 @@ def build_send_tx(
         raise ValueError("fee must be non-negative")
     to_hash = address_to_pubkey_hash(to_address, hrp=hrp)
     available = utxo.all_for_pubkey_hash(from_pubkey_hash)
+    if exclude_outpoints:
+        available = [e for e in available if e.outpoint.key() not in exclude_outpoints]
     need = amount_sats + fee_sats
     coins = select_coins(available, need)
     total_in = sum(c.output.value for c in coins)

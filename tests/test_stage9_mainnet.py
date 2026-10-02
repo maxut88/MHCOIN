@@ -45,7 +45,8 @@ def test_production_consensus_table():
     assert PROTOCOL_VERSION == 1
     assert MIN_SUPPORTED_PROTOCOL_VERSION == 1
     assert MAX_SUPPORTED_PROTOCOL_VERSION == 1
-    assert SOFTWARE_VERSION == "0.3.0"
+    from mhcoin import __version__ as _pkg_ver
+    assert SOFTWARE_VERSION == _pkg_ver
     assert "MAX_SUPPLY_COINS" in CONSENSUS_CRITICAL_SHARED
     assert "genesis_hash_hex" in CONSENSUS_CRITICAL_PER_NETWORK
 

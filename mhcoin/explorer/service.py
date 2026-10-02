@@ -195,29 +195,54 @@ def _page(title: str, body: str, *, tip: int | None = None, hero: bool = False) 
   .kpi .val {{ font-size: 1.2rem; font-weight: 780; margin-top: .2rem; letter-spacing: -.02em; }}
   .kpi .hint {{ color: var(--muted); font-size: .75rem; margin-top: .15rem; }}
   .blocks-row {{
-    display: grid; grid-template-columns: minmax(0, 1.65fr) minmax(280px, 1fr);
-    gap: 1rem; align-items: stretch; margin: 0 0 1rem;
+    display: grid; grid-template-columns: minmax(0, 1.7fr) minmax(300px, .95fr);
+    gap: .75rem; align-items: start; margin: 0 0 1rem;
   }}
-  @media (max-width: 980px) {{ .blocks-row {{ grid-template-columns: 1fr; }} }}
+  @media (max-width: 1100px) {{ .blocks-row {{ grid-template-columns: 1fr; }} }}
   .blocks-side {{
-    display: flex; flex-direction: column; gap: .85rem; min-height: 0;
+    display: flex; flex-direction: column; gap: .65rem; min-width: 0;
   }}
   .blocks-row .term {{
-    margin: 0; flex: 1 1 auto; max-height: min(42vh, 420px); overflow: auto;
+    margin: 0; max-height: min(38vh, 360px); overflow: auto;
     display: flex; flex-direction: column;
   }}
   .blocks-row .term .term-feed {{ flex: 1; overflow: auto; }}
-  .blocks-row .card {{ margin: 0; }}
-  .peers-panel {{ font-size: .78rem; }}
-  .peers-panel table {{ font-size: .74rem; }}
-  .peers-panel .ip {{ font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-weight: 650; }}
+  .blocks-row > .card {{ margin: 0; min-width: 0; }}
+  .blocks-row > .card .table-wrap {{ overflow-x: auto; }}
+  .blocks-row > .card table {{ font-size: .74rem; }}
+  .blocks-row > .card th, .blocks-row > .card td {{ padding: .38rem .32rem; }}
+  .peers-panel.card {{ padding: .75rem .8rem; }}
+  .peers-panel {{ font-size: .72rem; min-width: 0; }}
+  .peers-panel .card-head {{ margin-bottom: .4rem; }}
+  .peers-panel .table-wrap {{ overflow-x: auto; }}
+  .peers-panel table {{
+    font-size: .7rem; width: 100%;
+    border-collapse: collapse; table-layout: auto;
+  }}
+  .peers-panel th, .peers-panel td {{
+    vertical-align: middle; white-space: nowrap;
+    padding: .28rem .28rem; overflow: visible;
+  }}
+  .peers-panel th:nth-child(2), .peers-panel td:nth-child(2),
+  .peers-panel th:nth-child(5), .peers-panel td:nth-child(5),
+  .peers-panel th:nth-child(6), .peers-panel td:nth-child(6) {{ text-align: center; }}
+  .peers-panel th:nth-child(3), .peers-panel td:nth-child(3),
+  .peers-panel th:nth-child(4), .peers-panel td:nth-child(4) {{ text-align: right; }}
+  .peers-panel .ip {{
+    font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    font-weight: 650; white-space: nowrap; font-size: .68rem;
+  }}
   .peers-panel .dir {{
-    display: inline-block; font-size: .65rem; font-weight: 700; letter-spacing: .04em;
-    text-transform: uppercase; padding: .12rem .35rem; border-radius: 6px;
+    display: inline-block; font-size: .6rem; font-weight: 700; letter-spacing: .03em;
+    text-transform: uppercase; padding: .08rem .25rem; border-radius: 5px;
     background: var(--soft); color: var(--muted);
   }}
   .peers-panel .dir.in {{ background: #e8f5e9; color: #1b5e20; }}
   .peers-panel .dir.out {{ background: #e3f2fd; color: #0d47a1; }}
+  .peers-panel .peers-total {{
+    margin: .4rem 0 0; font-size: .74rem; font-weight: 650;
+  }}
+  .peers-panel > .muted {{ margin: 0 0 .35rem !important; font-size: .7rem !important; }}
   .card {{ background: var(--panel); border: 1px solid var(--line); border-radius: 14px; padding: 1rem 1.1rem; margin: 0 0 1rem; }}
   .card-head {{ display: flex; align-items: center; justify-content: space-between; gap: .75rem; margin-bottom: .75rem; }}
   .card-head h1 {{ margin: 0; font-size: 1.05rem; }}
@@ -430,20 +455,6 @@ class ExplorerApp:
             out["sync_state"] = sync.get("state")
             out["updated"] = int(path.stat().st_mtime)
             out["updated_age"] = D.format_age(int(path.stat().st_mtime), now=int(_time.time()))
-            reported_hps = raw.get("reported_hashrate_hps")
-            if reported_hps is None:
-                reported_hps = sum(
-                    int(p.get("hps") or 0)
-                    for p in (raw.get("peers") or [])
-                    if p.get("mining")
-                )
-            out["reported_hashrate_hps"] = int(reported_hps or 0)
-            out["reported_hashrate"] = D.format_hps(float(out["reported_hashrate_hps"] or 0))
-            out["reported_miners"] = int(
-                raw.get("reported_miners")
-                if raw.get("reported_miners") is not None
-                else sum(1 for p in (raw.get("peers") or []) if p.get("mining"))
-            )
             peers_out: list[dict[str, Any]] = []
             for p in raw.get("peers") or []:
                 addr = str(p.get("addr") or "")
@@ -453,6 +464,8 @@ class ExplorerApp:
                 # Strip IPv6 brackets if present
                 if host.startswith("[") and host.endswith("]"):
                     host = host[1:-1]
+                mining = bool(p.get("mining"))
+                hps = int(p.get("hps") or 0) if mining else 0
                 peers_out.append(
                     {
                         "addr": addr,
@@ -465,14 +478,18 @@ class ExplorerApp:
                         "agent": p.get("agent") or "—",
                         "network": p.get("network") or "",
                         "protocol": p.get("protocol"),
-                        "mining": bool(p.get("mining")),
-                        "hps": int(p.get("hps") or 0),
-                        "hashrate": D.format_hps(float(p.get("hps") or 0))
-                        if p.get("mining") and int(p.get("hps") or 0) > 0
-                        else None,
+                        "mining": mining,
+                        "hps": hps,
+                        "hashrate": D.format_hps(float(hps)) if mining and hps > 0 else None,
                         "status_age": p.get("status_age"),
                     }
                 )
+            # Live total = sum of rows shown (same source as peers table)
+            reported_hps = sum(int(p.get("hps") or 0) for p in peers_out if p.get("mining"))
+            reported_n = sum(1 for p in peers_out if p.get("mining"))
+            out["reported_hashrate_hps"] = int(reported_hps)
+            out["reported_hashrate"] = D.format_hps(float(reported_hps)) if reported_hps > 0 else None
+            out["reported_miners"] = int(reported_n)
             # Stable order: inbound first, then IP
             peers_out.sort(key=lambda x: (0 if x["inbound"] else 1, x.get("ip") or ""))
             out["peers"] = peers_out
@@ -767,11 +784,19 @@ def _found_terminal(blocks: list[dict[str, Any]]) -> str:
     return f'<div class="term-feed" id="liveFinds">{"".join(cards)}</div>'
 
 
-def _peers_panel(peers: list[dict[str, Any]] | None, *, peer_count: Any = None) -> str:
+def _peers_panel(
+    peers: list[dict[str, Any]] | None,
+    *,
+    peer_count: Any = None,
+    total_hps: Any = None,
+    total_hashrate: Any = None,
+) -> str:
     rows: list[str] = []
+    sum_hps = 0
     for p in peers or []:
         ip = p.get("ip") or "—"
         port = p.get("port") or ""
+        ip_full = f"{ip}:{port}" if port else str(ip)
         direction = "in" if p.get("inbound") else "out"
         dir_lbl = "in" if direction == "in" else "out"
         height = p.get("height")
@@ -780,28 +805,32 @@ def _peers_panel(peers: list[dict[str, Any]] | None, *, peer_count: Any = None) 
         state = p.get("state") or "—"
         hr = p.get("hashrate") or ("—" if not p.get("mining") else "…")
         mine = "yes" if p.get("mining") else "no"
+        if p.get("mining"):
+            sum_hps += int(p.get("hps") or 0)
         rows.append(
             "<tr>"
-            f'<td class="ip" title="{_esc(p.get("addr") or ip)}">{_esc(ip)}'
-            + (f'<div class="muted" style="font-size:.68rem">:{_esc(port)}</div>' if port else "")
-            + "</td>"
+            f'<td class="ip" title="{_esc(p.get("addr") or ip_full)}">{_esc(ip_full)}</td>'
             f'<td><span class="dir {direction}">{dir_lbl}</span></td>'
-            f'<td class="num">{_esc(height_s)}</td>'
-            f'<td class="num">{_esc(hr)}</td>'
-            f'<td class="muted">{mine}</td>'
-            f'<td class="muted">{_esc(agent)}</td>'
-            f'<td class="muted">{_esc(state)}</td>'
+            f"<td>{_esc(height_s)}</td>"
+            f"<td>{_esc(hr)}</td>"
+            f"<td>{mine}</td>"
+            f"<td>{_esc(agent)}</td>"
+            f"<td>{_esc(state)}</td>"
             "</tr>"
         )
     n = peer_count if peer_count is not None else len(peers or [])
+    total_s = total_hashrate or D.format_hps(float(sum_hps)) or "—"
+    if total_hps is None:
+        total_hps = sum_hps
     body = (
         f"""
     <div class="table-wrap peers-panel"><table>
-      <tr>
+      <thead><tr>
         <th>IP</th><th>Dir</th><th>Height</th><th>H/s</th><th>Mining</th><th>Version</th><th>State</th>
-      </tr>
-      {"".join(rows)}
+      </tr></thead>
+      <tbody>{"".join(rows)}</tbody>
     </table></div>
+    <p class="peers-total" id="peersTotal">Total live: {_esc(total_s)} · {_esc(sum(1 for p in (peers or []) if p.get("mining")))} miners</p>
     """
         if rows
         else '<p class="muted" id="peersEmpty">No peers connected to the seed.</p>'
@@ -813,7 +842,7 @@ def _peers_panel(peers: list[dict[str, Any]] | None, *, peer_count: Any = None) 
         f'<span class="muted" style="font-size:.85rem" id="peersCount">{_esc(n)} online</span>'
         f"</div>"
         f'<p class="muted" style="margin:0 0 .55rem;font-size:.75rem">'
-        f"Nodes linked to this seed. H/s is live STATUS from each miner (advisory)."
+        f"Live H/s from each miner (STATUS). Total = sum of rows."
         f"</p>"
         f'<div id="peersTable">{body}</div>'
         f"</section>"
@@ -826,21 +855,29 @@ def _render_home(data: dict[str, Any]) -> bytes:
     node = data.get("node") or {}
     peers = node.get("peer_count")
     peers_s = "—" if peers is None else str(peers)
-    hr = data.get("network_hashrate") or "—"
+    hr_implied = data.get("network_hashrate") or "—"
     hr_win = data.get("network_hashrate_window")
     hr_short = data.get("network_hashrate_short")
+    reported_hps = int(node.get("reported_hashrate_hps") or 0)
     reported_hr = node.get("reported_hashrate")
-    reported_n = node.get("reported_miners") or 0
-    hr_hint = (
-        f"implied @10m · obs {hr_win or '—'}"
-        + (f" · recent {hr_short}" if hr_short else "")
-    )
-    if reported_hr and int(node.get("reported_hashrate_hps") or 0) > 0:
-        hr_hint = f"live {reported_hr} ({reported_n} miners) · {hr_hint}"
-    elif reported_n:
-        hr_hint = f"live … ({reported_n} miners) · {hr_hint}"
+    reported_n = int(node.get("reported_miners") or 0)
+    # KPI main = live miner sum when available; implied stays in the hint.
+    if reported_hps > 0 and reported_hr:
+        hr_lbl = "Hashrate (live)"
+        hr = reported_hr
+        hr_hint = (
+            f"total {reported_n} miners · implied {hr_implied}"
+            + (f" · obs {hr_win}" if hr_win else "")
+            + (f" · recent {hr_short}" if hr_short else "")
+        )
     else:
-        hr_hint = f"live — · {hr_hint}"
+        hr_lbl = "Hashrate (implied)"
+        hr = hr_implied
+        hr_hint = (
+            "live — · implied @10m"
+            + (f" · obs {hr_win}" if hr_win else "")
+            + (f" · recent {hr_short}" if hr_short else "")
+        )
     halv = data.get("halving") or {}
     charts = data.get("charts") or {}
     spark_iv = _sparkline(charts.get("intervals") or [])
@@ -848,7 +885,12 @@ def _render_home(data: dict[str, Any]) -> bytes:
     eta_hint = data.get("next_block_hint") or "—"
     overdue = bool(data.get("next_block_overdue"))
     eta_cls = "err" if overdue else "muted"
-    peers_panel = _peers_panel(node.get("peers") or [], peer_count=peers)
+    peers_panel = _peers_panel(
+        node.get("peers") or [],
+        peer_count=peers,
+        total_hps=reported_hps,
+        total_hashrate=reported_hr,
+    )
     miners = data.get("top_miners") or []
     miner_rows = []
     for m in miners[:8]:
@@ -895,7 +937,7 @@ def _render_home(data: dict[str, Any]) -> bytes:
           <div class="hint" id="kpiAge">{_esc(data.get("tip_age") or "—")} ago</div>
         </div>
         <div class="stat">
-          <div class="lbl">Hashrate (implied)</div>
+          <div class="lbl" id="kpiHashLbl">{_esc(hr_lbl)}</div>
           <div class="val" id="kpiHashrate">{_esc(hr)}</div>
           <div class="hint" id="kpiHashHint">{_esc(hr_hint)}</div>
         </div>
@@ -1091,6 +1133,14 @@ def _render_home(data: dict[str, Any]) -> bytes:
           );
         }}).join('');
       }}
+      function fmtHps(hps) {{
+        hps = Number(hps) || 0;
+        if (hps <= 0) return null;
+        if (hps >= 1e9) return (hps / 1e9).toFixed(2) + ' GH/s';
+        if (hps >= 1e6) return (hps / 1e6).toFixed(2) + ' MH/s';
+        if (hps >= 1e3) return (hps / 1e3).toFixed(1) + ' kH/s';
+        return Math.round(hps).toLocaleString() + ' H/s';
+      }}
       function renderPeers(peers, count) {{
         var box = document.getElementById('peersTable');
         var cnt = document.getElementById('peersCount');
@@ -1100,26 +1150,32 @@ def _render_home(data: dict[str, Any]) -> bytes:
           box.innerHTML = '<p class="muted" id="peersEmpty">No peers connected to the seed.</p>';
           return;
         }}
+        var sum = 0, miners = 0;
         var rows = peers.map(function (p) {{
           var dir = p.inbound ? 'in' : 'out';
           var height = (p.height == null) ? '—' : ('#' + p.height);
-          var port = p.port ? ('<div class="muted" style="font-size:.68rem">:' + esc(p.port) + '</div>') : '';
+          var ipFull = p.ip || '—';
+          if (p.port) ipFull += ':' + p.port;
           var hr = p.hashrate || (p.mining ? '…' : '—');
           var mine = p.mining ? 'yes' : 'no';
+          if (p.mining) {{ miners += 1; sum += Number(p.hps) || 0; }}
           return '<tr>' +
-            '<td class="ip" title="' + esc(p.addr || p.ip || '') + '">' + esc(p.ip || '—') + port + '</td>' +
+            '<td class="ip" title="' + esc(p.addr || ipFull) + '">' + esc(ipFull) + '</td>' +
             '<td><span class="dir ' + dir + '">' + dir + '</span></td>' +
-            '<td class="num">' + esc(height) + '</td>' +
-            '<td class="num">' + esc(hr) + '</td>' +
-            '<td class="muted">' + mine + '</td>' +
-            '<td class="muted">' + esc(p.agent || '—') + '</td>' +
-            '<td class="muted">' + esc(p.state || '—') + '</td>' +
+            '<td>' + esc(height) + '</td>' +
+            '<td>' + esc(hr) + '</td>' +
+            '<td>' + mine + '</td>' +
+            '<td>' + esc(p.agent || '—') + '</td>' +
+            '<td>' + esc(p.state || '—') + '</td>' +
             '</tr>';
         }}).join('');
+        var total = fmtHps(sum) || '—';
         box.innerHTML =
           '<div class="table-wrap peers-panel"><table>' +
-          '<tr><th>IP</th><th>Dir</th><th>Height</th><th>H/s</th><th>Mining</th><th>Version</th><th>State</th></tr>' +
-          rows + '</table></div>';
+          '<thead><tr><th>IP</th><th>Dir</th><th>Height</th><th>H/s</th><th>Mining</th><th>Version</th><th>State</th></tr></thead>' +
+          '<tbody>' + rows + '</tbody></table></div>' +
+          '<p class="peers-total" id="peersTotal">Total live: ' + esc(total) +
+          ' · ' + miners + ' miners</p>';
       }}
             function renderBlocks(blocks) {{
         var el = document.getElementById('latestBlocks');
@@ -1245,7 +1301,28 @@ async function tick() {{
           var tip = d.tip_height;
           var node = d.node || {{}};
           var hrEl = document.getElementById('kpiHashrate');
-          if (hrEl && d.network_hashrate) hrEl.textContent = d.network_hashrate;
+          var hrLbl = document.getElementById('kpiHashLbl');
+          var hh = document.getElementById('kpiHashHint');
+          if (node.reported_hashrate_hps > 0 && node.reported_hashrate) {{
+            if (hrLbl) hrLbl.textContent = 'Hashrate (live)';
+            if (hrEl) hrEl.textContent = node.reported_hashrate;
+            if (hh) {{
+              var parts = ['total ' + (node.reported_miners || 0) + ' miners'];
+              if (d.network_hashrate) parts.push('implied ' + d.network_hashrate);
+              if (d.network_hashrate_window) parts.push('obs ' + d.network_hashrate_window);
+              if (d.network_hashrate_short) parts.push('recent ' + d.network_hashrate_short);
+              hh.textContent = parts.join(' · ');
+            }}
+          }} else {{
+            if (hrLbl) hrLbl.textContent = 'Hashrate (implied)';
+            if (hrEl && d.network_hashrate) hrEl.textContent = d.network_hashrate;
+            if (hh) {{
+              var parts2 = ['live —', 'implied @10m'];
+              if (d.network_hashrate_window) parts2.push('obs ' + d.network_hashrate_window);
+              if (d.network_hashrate_short) parts2.push('recent ' + d.network_hashrate_short);
+              hh.textContent = parts2.join(' · ');
+            }}
+          }}
           var ageEl = document.getElementById('kpiAge');
           if (ageEl && d.tip_age) ageEl.textContent = d.tip_age + ' ago';
           var hEl = document.getElementById('kpiHeight');
@@ -1256,20 +1333,6 @@ async function tick() {{
           if (txs && d.total_transactions != null) txs.textContent = d.total_transactions;
           var mint = document.getElementById('kpiMint');
           if (mint && d.minted_mhc) mint.textContent = d.minted_mhc;
-          var hh = document.getElementById('kpiHashHint');
-          if (hh) {{
-            var parts = [];
-            if (node.reported_hashrate_hps > 0) {{
-              parts.push('live ' + (node.reported_hashrate || '') +
-                ' (' + (node.reported_miners || 0) + ' miners)');
-            }} else {{
-              parts.push('live —');
-            }}
-            parts.push('implied @10m');
-            if (d.network_hashrate_window) parts.push('obs ' + d.network_hashrate_window);
-            if (d.network_hashrate_short) parts.push('recent ' + d.network_hashrate_short);
-            hh.textContent = parts.join(' · ');
-          }}
           var diff = document.getElementById('kpiDiff');
           if (diff && d.tip_difficulty_display) diff.textContent = d.tip_difficulty_display;
           var bits = document.getElementById('kpiBits');

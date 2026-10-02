@@ -254,6 +254,7 @@ class Wallet:
         password: str | None = None,
         fee_sats: int | None = None,
         utxo: UTXOSet | None = None,
+        exclude_outpoints: set[str] | None = None,
     ) -> SendResult:
         from mhcoin.constants import DEFAULT_FEE_SATOSHIS
 
@@ -279,6 +280,7 @@ class Wallet:
                 amount_sats=amount,
                 fee_sats=fee_sats if fee_sats is not None else DEFAULT_FEE_SATOSHIS,
                 hrp=self.paths.hrp,
+                exclude_outpoints=exclude_outpoints,
             )
         except ValueError as e:
             raise WalletError(str(e)) from e
