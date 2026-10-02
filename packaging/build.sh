@@ -22,6 +22,17 @@ OUT_NAME="MHCOIN-Core-${VERSION}"
 
 echo "=== MHCOIN Core Desktop build ${VERSION} ($(uname -s)) ==="
 
+# On macOS: allow building on a new OS while targeting older runtimes.
+if [[ "$(uname -s)" == "Darwin" ]]; then
+  MACOS_MIN="${MHCOIN_MACOS_MIN:-${MACOSX_DEPLOYMENT_TARGET:-11.0}}"
+  export MACOSX_DEPLOYMENT_TARGET="${MACOS_MIN}"
+  export MHCOIN_MACOS_MIN="${MACOS_MIN}"
+  export CFLAGS="${CFLAGS:+$CFLAGS }-mmacosx-version-min=${MACOS_MIN}"
+  export CXXFLAGS="${CXXFLAGS:+$CXXFLAGS }-mmacosx-version-min=${MACOS_MIN}"
+  export LDFLAGS="${LDFLAGS:+$LDFLAGS }-mmacosx-version-min=${MACOS_MIN}"
+  echo "MACOSX_DEPLOYMENT_TARGET=${MACOSX_DEPLOYMENT_TARGET}"
+fi
+
 python3 -m pip install -U pip wheel setuptools pyinstaller >/dev/null
 python3 -m pip install -e ".[desktop]" >/dev/null 2>&1 \
   || { python3 -m pip install -r requirements.txt >/dev/null; python3 -m pip install 'pywebview>=5.0' >/dev/null; }
@@ -85,6 +96,11 @@ EOF
     rm -rf "${STAGE}"
     ;;
   Darwin)
+    MACOS_MIN="${MHCOIN_MACOS_MIN:-${MACOSX_DEPLOYMENT_TARGET:-11.0}}"
+    export MACOSX_DEPLOYMENT_TARGET="${MACOS_MIN}"
+    export MHCOIN_MACOS_MIN="${MACOS_MIN}"
+    echo "macOS minimum system: ${MACOS_MIN}"
+
     APP="${DIST}/MHCOIN-Core.app"
     if [[ ! -d "${APP}" ]]; then
       APP="${DIST}/release/${OUT_NAME}.app"
@@ -109,11 +125,12 @@ EOF
   <key>CFBundlePackageType</key><string>APPL</string>
   <key>CFBundleIconFile</key><string>mhcoin</string>
   <key>CFBundleShortVersionString</key><string>${VERSION}</string>
+  <key>LSMinimumSystemVersion</key><string>${MACOS_MIN}</string>
   <key>NSHighResolutionCapable</key><true/>
 </dict></plist>
 EOF
     else
-      # Ensure PyInstaller .app also carries the MHCOIN icon
+      # Ensure PyInstaller .app also carries the MHCOIN icon + min OS
       ICNS="${ROOT}/packaging/icons/mhcoin.icns"
       if [[ ! -f "${ICNS}" ]]; then
         ICNS="${ROOT}/mhcoin/desktop/assets/mhcoin.icns"
@@ -122,12 +139,25 @@ EOF
         mkdir -p "${APP}/Contents/Resources"
         cp "${ICNS}" "${APP}/Contents/Resources/mhcoin.icns"
       fi
+      /usr/libexec/PlistBuddy -c "Add :LSMinimumSystemVersion string ${MACOS_MIN}" \
+        "${APP}/Contents/Info.plist" 2>/dev/null \
+        || /usr/libexec/PlistBuddy -c "Set :LSMinimumSystemVersion ${MACOS_MIN}" \
+          "${APP}/Contents/Info.plist" 2>/dev/null || true
     fi
-    DMG="${DIST}/release/${OUT_NAME}-macos.dmg"
+    # legacy builds get a distinct artifact name for side-by-side testing
+    if [[ "${MHCOIN_MACOS_LEGACY:-0}" == "1" ]]; then
+      TAG="macos${MACOS_MIN//./}-legacy"
+      DMG="${DIST}/release/${OUT_NAME}-${TAG}.dmg"
+      VOL="MHCOIN Core ${MACOS_MIN}+"
+    else
+      DMG="${DIST}/release/${OUT_NAME}-macos.dmg"
+      VOL="MHCOIN Core"
+    fi
     mkdir -p "${DIST}/release"
     rm -f "${DMG}"
-    hdiutil create -volname "MHCOIN Core" -srcfolder "${APP}" -ov -format UDZO "${DMG}"
+    hdiutil create -volname "${VOL}" -srcfolder "${APP}" -ov -format UDZO "${DMG}"
     echo "macOS DMG: ${DMG}"
+    ls -la "${DMG}"
     ;;
   MINGW*|MSYS*|CYGWIN*|Windows*)
     echo "On Windows use: powershell -File packaging/build.ps1"

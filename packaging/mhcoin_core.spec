@@ -201,6 +201,11 @@ coll = COLLECT(
 )
 
 if sys.platform == "darwin":
+    # Build on newest macOS but still run on older ones when
+    # MACOSX_DEPLOYMENT_TARGET / MHCOIN_MACOS_MIN is set (e.g. 11.0).
+    _macos_min = os.environ.get("MHCOIN_MACOS_MIN") or os.environ.get(
+        "MACOSX_DEPLOYMENT_TARGET", "11.0"
+    )
     app = BUNDLE(
         coll,
         name="MHCOIN-Core.app",
@@ -212,5 +217,6 @@ if sys.platform == "darwin":
             "CFBundleShortVersionString": "0.3.3",
             "CFBundleIconFile": "mhcoin.icns",
             "NSHighResolutionCapable": True,
+            "LSMinimumSystemVersion": str(_macos_min),
         },
     )

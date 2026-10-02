@@ -1342,6 +1342,30 @@ class CoreController:
             "log": self.mine_log_lines(),
         }
 
+    def _broadcast_miner_status(self, *, force: bool = False) -> None:
+        """Advise peers of local mining hashrate (STATUS). Throttled ~10s."""
+        now = time.time()
+        last = float(getattr(self, "_status_last_broadcast", 0.0) or 0.0)
+        if not force and (now - last) < 10.0:
+            return
+        rt = self._node
+        if rt is None or getattr(rt, "_stopped", False):
+            return
+        p2p = getattr(rt, "p2p", None)
+        if p2p is None:
+            return
+        try:
+            from mhcoin.network.messages import StatusPayload, encode_status
+
+            mining = bool(self._mining)
+            hps = int(max(0.0, float(self._hashrate or 0.0))) if mining else 0
+            n = p2p.broadcast("STATUS", encode_status(StatusPayload(mining=mining, hps=hps)))
+            self._status_last_broadcast = now
+            if n:
+                logger.debug("STATUS broadcast mining=%s hps=%s peers=%s", mining, hps, n)
+        except Exception:
+            logger.debug("STATUS broadcast failed", exc_info=True)
+
     def mine_log_lines(self, limit: int = 200) -> list[str]:
         with self._mine_log_lock:
             lines = list(self._mine_log)
@@ -1412,6 +1436,8 @@ class CoreController:
         self._mine_log_line("mode    live node (P2P stays online)")
         self._mine_log_line("────────────────────────────────")
         self._mine_log_line("searching nonce… (Stop to quit)")
+        self._status_last_broadcast = 0.0
+        self._broadcast_miner_status(force=True)
 
         def _loop() -> None:
             try:
@@ -1430,6 +1456,7 @@ class CoreController:
                             if self._miner_stop.is_set():
                                 raise KeyboardInterrupt()
                             self._hashrate = hps
+                            self._broadcast_miner_status()
                             now = time.time()
                             if now - self._mine_log_last_prog >= 0.5:
                                 self._mine_log_last_prog = now
@@ -1554,6 +1581,7 @@ class CoreController:
             finally:
                 self._mining = False
                 self._hashrate = 0.0
+                self._broadcast_miner_status(force=True)
                 self._mine_log_line("■ Mining stopped.")
                 # Node stays up — only refresh balance cache + history.
                 try:
