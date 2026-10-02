@@ -36,6 +36,7 @@ from mhcoin.transaction.serialization import (
     write_u16,
     write_u32,
     write_u64,
+    write_u8,
     write_varint,
 )
 from mhcoin.transaction.transaction import Transaction
@@ -172,6 +173,44 @@ def decode_pong(payload: bytes) -> int:
     if len(payload) != 8:
         raise ProtocolError("PONG payload must be 8 bytes")
     return decode_ping(payload)
+
+
+# Advisory miner/node status (post-handshake). Old peers ignore unknown commands.
+STATUS_FLAG_MINING = 0x01
+
+
+@dataclass(frozen=True)
+class StatusPayload:
+    mining: bool
+    hps: int  # integer hashes/sec
+
+
+def encode_status(s: StatusPayload) -> bytes:
+    """
+    STATUS payload:
+
+      flags: uint8   (bit0 = mining)
+      hps:   uint64  (integer H/s)
+    """
+    flags = STATUS_FLAG_MINING if s.mining else 0
+    hps = int(s.hps)
+    if hps < 0:
+        raise ProtocolError("STATUS hps must be >= 0")
+    return write_u8(flags & 0xFF) + write_u64(hps & 0xFFFFFFFFFFFFFFFF)
+
+
+def decode_status(payload: bytes) -> StatusPayload:
+    if len(payload) != 9:
+        raise ProtocolError("STATUS payload must be 9 bytes")
+    try:
+        r = Reader(payload)
+        flags = r.u8()
+        hps = r.u64()
+        if r.remaining() != 0:
+            raise ProtocolError("trailing bytes in STATUS")
+        return StatusPayload(mining=bool(flags & STATUS_FLAG_MINING), hps=int(hps))
+    except SerializationError as e:
+        raise ProtocolError(str(e)) from e
 
 
 def _encode_inventory(items: list[InventoryVector] | list[tuple[int, bytes]], *, max_items: int) -> bytes:

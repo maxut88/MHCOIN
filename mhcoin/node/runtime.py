@@ -252,6 +252,10 @@ class NodeRuntime:
                 "bans": len(self.p2p.bans.list_bans()),
                 "pid": os.getpid(),
             }
+            peers = status["peers"] or []
+            reported = sum(int(p.get("hps") or 0) for p in peers if p.get("mining"))
+            status["reported_hashrate_hps"] = reported
+            status["reported_miners"] = sum(1 for p in peers if p.get("mining"))
             self.status_path.write_text(json.dumps(status, indent=2), encoding="utf-8")
         except Exception:
             logger.debug("status write skipped (node shutting down)", exc_info=True)

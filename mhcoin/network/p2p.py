@@ -194,19 +194,36 @@ class P2PManager:
             return len(self._peers)
 
     def get_peers(self) -> list[dict]:
+        now = time.time()
+        stale_after = 60.0
         with self._lock:
-            return [
-                {
-                    "addr": p.addr,
-                    "inbound": p.inbound,
-                    "state": p.state.value,
-                    "protocol": p.protocol_version,
-                    "height": p.remote_start_height,
-                    "agent": p.software_version,
-                    "network": p.remote_network,
-                }
-                for p in self._peers.values()
-            ]
+            out = []
+            for p in self._peers.values():
+                fresh = (
+                    p.status_recv_at > 0
+                    and (now - p.status_recv_at) <= stale_after
+                )
+                mining = bool(p.reported_mining) if fresh else False
+                hps = int(p.reported_hps) if fresh and mining else 0
+                out.append(
+                    {
+                        "addr": p.addr,
+                        "inbound": p.inbound,
+                        "state": p.state.value,
+                        "protocol": p.protocol_version,
+                        "height": p.remote_start_height,
+                        "agent": p.software_version,
+                        "network": p.remote_network,
+                        "mining": mining,
+                        "hps": hps,
+                        "status_age": (
+                            round(now - p.status_recv_at, 1)
+                            if p.status_recv_at > 0
+                            else None
+                        ),
+                    }
+                )
+            return out
 
     def get_peers_objects(self) -> list[Peer]:
         with self._lock:

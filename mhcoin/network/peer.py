@@ -24,6 +24,7 @@ from mhcoin.network.messages import (
     VersionPayload,
     decode_ping,
     decode_pong,
+    decode_status,
     decode_verack,
     decode_version,
     encode_ping,
@@ -133,6 +134,11 @@ class Peer:
         self.remote_start_height: int | None = None
         self.remote_network: str | None = None
         self.remote_listen_port: int | None = None
+        # Advisory STATUS from peer (live mining hashrate) — not consensus.
+        self.reported_hps: int = 0
+        self.reported_mining: bool = False
+        self.status_recv_at: float = 0.0
+        self._status_last_accept: float = 0.0
 
         self.last_recv = time.time()
         self.last_send = time.time()
@@ -324,6 +330,8 @@ class Peer:
             self._on_ping(msg.payload)
         elif cmd == "PONG":
             self._on_pong(msg.payload)
+        elif cmd == "STATUS":
+            self._on_status(msg.payload)
         elif cmd == "INV":
             if self.relay is not None:
                 self.relay.on_inv(self, msg.payload)
@@ -450,3 +458,24 @@ class Peer:
         self._pending_ping = None
         self._ping_sent_at = None
         logger.info("PONG received from %s", self.addr)
+
+    def _on_status(self, payload: bytes) -> None:
+        """Advisory mining status — rate-limited, never disconnects on bad payload."""
+        now = time.time()
+        if now - self._status_last_accept < 3.0:
+            return
+        try:
+            st = decode_status(payload)
+        except ProtocolError as e:
+            logger.debug("bad STATUS from %s: %s", self.addr, e)
+            return
+        self._status_last_accept = now
+        self.status_recv_at = now
+        self.reported_mining = bool(st.mining)
+        self.reported_hps = int(st.hps) if st.mining else 0
+        logger.debug(
+            "STATUS from %s mining=%s hps=%s",
+            self.addr,
+            self.reported_mining,
+            self.reported_hps,
+        )
