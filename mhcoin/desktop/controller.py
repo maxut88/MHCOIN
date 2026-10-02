@@ -26,7 +26,7 @@ from mhcoin.consensus.params import get_network_params
 from mhcoin.desktop.prefs import save_preferred_network
 from mhcoin.desktop.seeds import default_connect_peers
 from mhcoin.mempool import Mempool
-from mhcoin.mining.abortable_pow import MiningAborted, mine_block_cancellable
+from mhcoin.mining.abortable_pow import MiningAborted, mine_block_cancellable, resolve_worker_count
 from mhcoin.mining.miner import format_mine_plain_found
 from mhcoin.mining.block_template import build_block_template
 from mhcoin.node.local_node import LocalNode
@@ -1409,6 +1409,8 @@ class CoreController:
         self._mine_log_line(f"MHCOIN Solo Miner · {self.network} · tip #{tip_h}")
         self._mine_log_line(f"reward  {reward_addr}")
         self._mine_log_line(f"data    {self.data_dir}")
+        n_workers = resolve_worker_count(None)
+        self._mine_log_line(f"workers {n_workers} CPU process(es)")
         self._mine_log_line("mode    live node (P2P stays online)")
         self._mine_log_line("────────────────────────────────")
         self._mine_log_line("searching nonce… (Stop to quit)")
@@ -1459,7 +1461,12 @@ class CoreController:
                             return tip is not None and tip != parent
 
                         try:
-                            mine_block_cancellable(block, progress=_prog, abort_check=_abort)
+                            mine_block_cancellable(
+                                block,
+                                progress=_prog,
+                                abort_check=_abort,
+                                workers=n_workers,
+                            )
                         except MiningAborted:
                             if self._miner_stop.is_set():
                                 break
