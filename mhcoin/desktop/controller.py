@@ -319,11 +319,59 @@ class CoreController:
         self.ensure_chain()
         return addr
 
+    def _invalidate_balance_cache(self) -> None:
+        self._balance_cache_sats = 0
+        self._balance_cache_valid = False
+
+    def _refresh_balance_cache(self, address: str | None = None) -> None:
+        """Recompute balance cache for the active (or given) address.
+
+        Prefer live NodeRuntime UTXO while the P2P node owns the datadir.
+        """
+        try:
+            addr = address or self.default_address()
+        except WalletError:
+            self._invalidate_balance_cache()
+            return
+        try:
+            pkh = address_to_pubkey_hash(addr, hrp=self.hrp)
+        except Exception:
+            self._invalidate_balance_cache()
+            return
+        rt = self._node
+        live = (
+            rt is not None
+            and not getattr(rt, "_stopped", False)
+            and getattr(rt, "_running", False)
+        )
+        if live:
+            assert rt is not None
+            try:
+                with rt.chain._lock:
+                    self._balance_cache_sats = int(rt.chain.utxo.balance_for_pubkey_hash(pkh))
+                self._balance_cache_valid = True
+                return
+            except Exception:
+                logger.debug("live balance refresh failed", exc_info=True)
+        if self._mining:
+            # Datadir locked by miner — leave cache invalid rather than show
+            # another wallet's stale total.
+            self._invalidate_balance_cache()
+            return
+        try:
+            with self._io:
+                node = self._get_local()
+                self._balance_cache_sats = int(node.chain.utxo.balance_for_pubkey_hash(pkh))
+                self._balance_cache_valid = True
+        except Exception:
+            self._invalidate_balance_cache()
+
     def _reset_session_wallet_stats(self) -> None:
         """Clear process-local mining counters when the active wallet changes."""
         self._blocks_found = 0
         self._rewards_sats = 0
         self._hashrate = 0.0
+        self._invalidate_balance_cache()
         self._invalidate_history_cache()
 
     def list_wallets(self) -> list[dict]:
@@ -363,9 +411,23 @@ class CoreController:
         return Wallet(self.paths).default_address()
 
     def unlock(self, password: str, wallet_id: str | None = None) -> str:
+        prev: str | None = None
+        try:
+            prev = self.default_address()
+        except WalletError:
+            prev = None
         w = Wallet(self.paths, password=password)
         addr = w.unlock_with_password(password, wallet_id=wallet_id or None)
         self._password = password
+        # Overview/Settings switch only calls unlock(wallet_id=…) — must not keep
+        # mining rewards / balance cache from the previous active wallet.
+        if prev is not None and prev != addr:
+            if self._mining:
+                self.stop_mining()
+            self._reset_session_wallet_stats()
+        else:
+            self._invalidate_balance_cache()
+        self._refresh_balance_cache(addr)
         return addr
 
     def lock(self) -> None:
@@ -375,7 +437,6 @@ class CoreController:
         """Leave the wallet UI: clear unlock immediately; stop mining/node in background."""
         self.lock()
         self._reset_session_wallet_stats()
-
         def _cleanup() -> None:
             try:
                 if self._mining:
@@ -473,18 +534,51 @@ class CoreController:
     def send(self, to_address: str, amount_mhc: str, password: str, fee_mhc: str | None = None) -> str:
         self.ensure_chain()
         with self._io:
-            node = self._get_local()
-            if node.chain.height < 0:
-                raise WalletError("no blockchain yet — mine or sync first")
             fee = parse_amount_mhc(fee_mhc) if fee_mhc else None
             w = Wallet(self.paths, password=password)
-            result = w.send(to_address, amount_mhc, password=password, fee_sats=fee, utxo=node.chain.utxo)
-            node.submit_tx(result.tx)
-            if self._node is not None:
+            rt = self._node
+            live = (
+                rt is not None
+                and not getattr(rt, "_stopped", False)
+                and getattr(rt, "_running", False)
+            )
+            if live:
+                # Prefer live P2P node — LocalNode mempool/UTXO go stale while mining.
+                assert rt is not None
                 try:
-                    self._node.submit_tx(result.tx)
+                    rt.mempool.reload()
+                    rt.mempool.evict_spent_on_chain(rt.chain.utxo)
                 except Exception:
-                    pass
+                    logger.debug("mempool refresh before send failed", exc_info=True)
+                if rt.chain.height < 0:
+                    raise WalletError("no blockchain yet — mine or sync first")
+                result = w.send(
+                    to_address,
+                    amount_mhc,
+                    password=password,
+                    fee_sats=fee,
+                    utxo=rt.chain.utxo,
+                    exclude_outpoints=rt.mempool.spent_keys(),
+                )
+                rt.submit_tx(result.tx)
+            else:
+                node = self._get_local()
+                if node.chain.height < 0:
+                    raise WalletError("no blockchain yet — mine or sync first")
+                try:
+                    node.mempool.reload()
+                    node.mempool.evict_spent_on_chain(node.chain.utxo)
+                except Exception:
+                    logger.debug("local mempool refresh before send failed", exc_info=True)
+                result = w.send(
+                    to_address,
+                    amount_mhc,
+                    password=password,
+                    fee_sats=fee,
+                    utxo=node.chain.utxo,
+                    exclude_outpoints=node.mempool.spent_keys(),
+                )
+                node.submit_tx(result.tx)
             self._password = password
             self._last_txid = result.txid_hex
             try:
@@ -1533,12 +1627,14 @@ class CoreController:
                         self._mine_log_line("────────────────────────────────")
                         self._invalidate_history_cache()
                         try:
-                            pkh = address_to_pubkey_hash(reward_addr, hrp=self.hrp)
-                            with rt.chain._lock:
-                                self._balance_cache_sats = int(
-                                    rt.chain.utxo.balance_for_pubkey_hash(pkh)
-                                )
-                            self._balance_cache_valid = True
+                            # Only refresh Overview balance if still on this wallet.
+                            if self.default_address() == reward_addr:
+                                pkh = address_to_pubkey_hash(reward_addr, hrp=self.hrp)
+                                with rt.chain._lock:
+                                    self._balance_cache_sats = int(
+                                        rt.chain.utxo.balance_for_pubkey_hash(pkh)
+                                    )
+                                self._balance_cache_valid = True
                         except Exception:
                             pass
                         try:
@@ -1587,13 +1683,8 @@ class CoreController:
                 try:
                     rt = self._node
                     if rt is not None:
-                        pkh = address_to_pubkey_hash(reward_addr, hrp=self.hrp)
-                        with rt.chain._lock:
-                            self._balance_cache_sats = int(
-                                rt.chain.utxo.balance_for_pubkey_hash(pkh)
-                            )
-                            self._tip_height_hint = max(0, int(rt.chain.height))
-                        self._balance_cache_valid = True
+                        self._tip_height_hint = max(0, int(rt.chain.height))
+                        self._refresh_balance_cache()
                 except Exception:
                     pass
                 try:

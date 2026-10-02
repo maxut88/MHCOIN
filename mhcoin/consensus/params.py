@@ -67,7 +67,11 @@ MAX_FUTURE_BLOCK_TIME = 2 * 60 * 60  # 7200s — future-timestamp policy/consens
 PROTOCOL_VERSION = 1
 MIN_SUPPORTED_PROTOCOL_VERSION = 1
 MAX_SUPPORTED_PROTOCOL_VERSION = 1
-SOFTWARE_VERSION = "0.3.0"
+# Keep aligned with package release (mhcoin.__version__ / DMG name).
+try:
+    from mhcoin import __version__ as SOFTWARE_VERSION
+except Exception:  # pragma: no cover
+    SOFTWARE_VERSION = "0.3.4"
 USER_AGENT = f"/MHCOIN:{SOFTWARE_VERSION}/"
 
 # Compatibility rule (Stage 9):

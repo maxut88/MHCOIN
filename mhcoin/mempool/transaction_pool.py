@@ -92,5 +92,22 @@ class Mempool:
         for tx in txs:
             self.remove(tx.txid_hex())
 
+    def spent_keys(self) -> set[str]:
+        return set(self._spent)
+
+    def evict_spent_on_chain(self, utxo: UTXOSet) -> int:
+        """Drop mempool txs whose inputs are already gone from the UTXO set
+        (confirmed in a block or otherwise spent on disk)."""
+        drop: list[str] = []
+        for hx, tx in list(self._txs.items()):
+            for tin in tx.inputs:
+                op = OutPoint(txid=tin.prev_txid, vout=tin.prev_vout)
+                if not utxo.has(op):
+                    drop.append(hx)
+                    break
+        for hx in drop:
+            self.remove(hx)
+        return len(drop)
+
     def __len__(self) -> int:
         return len(self._txs)

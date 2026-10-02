@@ -19,7 +19,7 @@ Independent Proof-of-Work blockchain. **Not** a Bitcoin Core fork.
 | Ledger | UTXO |
 | Mainnet P2P port | **8333** |
 | Mainnet magic | `4D48434E` (`MHCN`) |
-| Software | 0.3.3 |
+| Software | 0.3.4 |
 
 ## Mainnet identity (frozen)
 
@@ -52,8 +52,8 @@ Download binaries from **[GitHub Releases](https://github.com/maxut88/MHCOIN/rel
 
 ### Linux
 
-1. Download `MHCOIN-Core-0.3.3-x86_64.AppImage` **or** `MHCOIN-Core-0.3.3-linux-x86_64.tar.gz`.
-2. AppImage: `chmod +x MHCOIN-Core-0.3.3-x86_64.AppImage && ./MHCOIN-Core-0.3.3-x86_64.AppImage`
+1. Download `MHCOIN-Core-0.3.4-x86_64.AppImage` **or** `MHCOIN-Core-0.3.4-linux-x86_64.tar.gz`.
+2. AppImage: `chmod +x MHCOIN-Core-0.3.4-x86_64.AppImage && ./MHCOIN-Core-0.3.4-x86_64.AppImage`
 3. tarball: extract and run the bundled `MHCOIN-Core` binary.
 4. Allow sync from genesis, create or open a wallet, then Receive / Send / Mining.
 
@@ -65,7 +65,7 @@ export MHCOIN_CONNECT=176.38.3.168:8333
 
 ### macOS
 
-1. Download `MHCOIN-Core-0.3.3-macos.dmg`.
+1. Download `MHCOIN-Core-0.3.4-macos.dmg`.
 2. Open the DMG and install **MHCOIN Core**.
 3. Launch, sync from genesis, create/open a wallet.
 
@@ -73,7 +73,7 @@ Apple Silicon: current Release builds are native (`macos-14` / arm64).
 
 ### Windows
 
-1. Download `MHCOIN-Core-0.3.3-windows-x86_64.exe`.
+1. Download `MHCOIN-Core-0.3.4-windows-x86_64.exe`.
 2. Launch **MHCOIN Core**, sync from genesis, create/open a wallet.
 
 Wallet data defaults to `~/.mhcoin/mainnet/` (Windows: `%USERPROFILE%\.mhcoin\mainnet\`).
@@ -129,6 +129,15 @@ mhcoin node start --network mainnet --host 0.0.0.0 --port 8333
 ```
 
 Peer discovery: hardcoded/DNS seeds, then ADDR gossip ([docs/DISCOVERY.md](docs/DISCOVERY.md)). No central block server.
+
+## LAN block explorer (seed VPS)
+
+Read-only explorer against the live mainnet `chain.sqlite` (WAL `mode=ro`; never writes chain/wallet):
+
+- URL: **`http://192.168.0.221:8766/`** (LAN; next to download `:8765`)
+- JSON: `/api/`, `/api/block/<height|hash>`, `/api/tx/<txid>`, `/api/address/<mhc1…>`
+- Launch: `PYTHONPATH=/data/MHCOIN python3 rc1_ops/run_explorer.py`  
+  (`MHCOIN_DATA_DIR`, `MHCOIN_EXPLORER_HOST`, `MHCOIN_EXPLORER_PORT`)
 
 ## Documentation
 
