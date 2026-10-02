@@ -487,11 +487,18 @@ def mining_mine(
 @click.option("--network", default=None, help="localnet | testnet | mainnet | regtest")
 @click.option("--data-dir", default=None, type=click.Path(), help="Chain/wallet data directory")
 @click.option("--blocks", default=None, type=int, help="Stop after N found blocks (default: run until Ctrl+C)")
+@click.option(
+    "--workers",
+    default=None,
+    type=int,
+    help="PoW CPU processes (default: all cores; or MHCOIN_MINER_WORKERS)",
+)
 def mining_start(
     address: str,
     network: str | None,
     data_dir: str | None,
     blocks: int | None,
+    workers: int | None,
 ) -> None:
     """Continuous solo mining to --address. No extra config needed.
 
@@ -519,6 +526,7 @@ def mining_start(
         network=paths.network,
         hrp=paths.hrp,
         address=address,
+        workers=workers,
     )
     results = miner.run(max_blocks=blocks)
     if results:
@@ -755,4 +763,7 @@ def audit_fingerprint() -> None:
 
 
 if __name__ == "__main__":
+    import multiprocessing as mp
+
+    mp.freeze_support()
     cli(prog_name="mhcoin")

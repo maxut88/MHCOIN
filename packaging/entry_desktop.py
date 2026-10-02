@@ -22,6 +22,9 @@ def _prepare_env() -> None:
 
 
 def main() -> None:
+    import multiprocessing as mp
+
+    mp.freeze_support()
     _prepare_env()
     from mhcoin.desktop.webui import run_web_desktop
 
