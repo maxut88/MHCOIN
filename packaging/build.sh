@@ -81,6 +81,8 @@ EOF
       echo "NOTE: appimagetool not found — skip AppImage (tarball is ready)."
       echo "      Or: bash packaging/linux/fetch_appimagetool.sh && re-run build."
     fi
+    # Keep only packaged artifacts under dist/release (CI uploads this tree).
+    rm -rf "${STAGE}"
     ;;
   Darwin)
     APP="${DIST}/MHCOIN-Core.app"
