@@ -28,7 +28,7 @@ class ReadOnlyChain:
         self._db = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True, check_same_thread=False)
         try:
             self._db.execute("PRAGMA query_only=ON")
-            self._db.execute("PRAGMA busy_timeout=5000")
+            self._db.execute("PRAGMA busy_timeout=30000")
         except sqlite3.Error:
             pass
         self._height = -1
