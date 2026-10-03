@@ -1,4 +1,4 @@
-# MHCOIN solo miner via PowerShell (same chain as Desktop).
+# MHCOIN live miner via PowerShell (same chain as Desktop).
 # Stop Desktop mining first. Usage: .\packaging\mine_mainnet.ps1 [mhc1…]
 $ErrorActionPreference = "Stop"
 $Root = Split-Path -Parent $PSScriptRoot
@@ -22,7 +22,7 @@ if (-not $Addr) {
 $Addr = ($Addr -replace "\s+", "")
 if (-not $Addr) { throw "No address — abort." }
 
-Write-Host "`nStarting solo miner…"
+Write-Host "`nStarting live miner…"
 Write-Host "  network: $($env:MHCOIN_NETWORK)"
 Write-Host "  address: $Addr"
 Write-Host "  stop:    Ctrl+C`n"

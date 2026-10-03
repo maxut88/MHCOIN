@@ -43,12 +43,19 @@ export MHCOIN_DATA="$HOME/.mhcoin/mainnet"
 
 mhcoin genesis verify --network mainnet
 mhcoin wallet create
-mhcoin node start --network mainnet --connect 176.38.3.168:8333
-mhcoin mining start --address mhc1YOUR_ADDRESS
+# Optional dedicated node (Desktop/CLI mining also start P2P themselves):
+# mhcoin node start --network mainnet
+
+# Live miner — syncs tip, mines, broadcasts blocks (same as Desktop):
+mhcoin mining start --network mainnet --address mhc1YOUR_ADDRESS
 ```
+
+You should see `MHCOIN Live Miner` / `mode live` / `synced to network tip`.
+Do **not** run Desktop mining and this CLI on the same data-dir at once.
 
 ## Notes
 
 - Private keys stay encrypted on disk; unlock/send needs your password.
 - Mining only needs your address in the coinbase (no password).
-- Desktop GUI: `docs/DESKTOP.md`.
+- Mainnet terminal mining is **online** (P2P). Use `--offline` only for local experiments.
+- Desktop GUI: `docs/DESKTOP.md` — Mining tab → Start, or **Instructions** for terminal.

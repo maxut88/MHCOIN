@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# MHCOIN solo miner via terminal (same chain as Desktop: ~/.mhcoin/mainnet).
+# MHCOIN live miner via terminal (same mainnet tip as Desktop: ~/.mhcoin/mainnet).
 #
 # IMPORTANT: Stop mining in Desktop (or quit the app) first — only one process
 # may write the same datadir at a time.
@@ -40,7 +40,7 @@ if [[ -z "${ADDR}" ]]; then
 fi
 
 echo
-echo "Starting solo miner…"
+echo "Starting live miner…"
 echo "  network: ${MHCOIN_NETWORK}"
 echo "  address: ${ADDR}"
 echo "  stop:    Ctrl+C"

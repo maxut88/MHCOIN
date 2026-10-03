@@ -1,5 +1,5 @@
 @echo off
-REM MHCOIN solo miner via terminal (same chain as Desktop: %USERPROFILE%\.mhcoin\mainnet)
+REM MHCOIN live miner via terminal (same chain as Desktop: %USERPROFILE%\.mhcoin\mainnet)
 REM
 REM IMPORTANT: Stop mining in Desktop (or quit the app) first — only one process
 REM may write the same datadir at a time.
@@ -33,7 +33,7 @@ if "%ADDR%"=="" (
 )
 
 echo.
-echo Starting solo miner...
+echo Starting live miner...
 echo   network: %MHCOIN_NETWORK%
 echo   address: %ADDR%
 echo   stop:    Ctrl+C
