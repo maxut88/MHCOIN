@@ -17,7 +17,7 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import parse_qs, urlparse
 
-from mhcoin.consensus.params import get_network_params
+from mhcoin.consensus.params import SOFTWARE_VERSION, get_network_params
 from mhcoin.desktop.controller import CoreController
 from mhcoin.network.seeds import default_connect_peers
 from mhcoin.wallet.wallet import WalletError
@@ -149,8 +149,9 @@ def _open_native_window(url: str, state: Any | None = None) -> tuple[bool, str]:
         except Exception:
             pass
         bridge = _NativeBridge()
+        win_title = f"MHCOIN Core {SOFTWARE_VERSION}"
         window = webview.create_window(
-            "MHCOIN Core",
+            win_title,
             url,
             width=720,
             height=780,
@@ -160,6 +161,15 @@ def _open_native_window(url: str, state: Any | None = None) -> tuple[bool, str]:
             js_api=bridge,
         )
         _GUI["window"] = window
+        # macOS WebKit often replaces the window title with <title> from HTML.
+        try:
+            window.set_title(win_title)
+        except Exception:
+            pass
+        try:
+            window.events.loaded += lambda: window.set_title(win_title)
+        except Exception:
+            pass
 
         def _on_closing() -> bool:
             # pywebview: return False cancels close; True/None allows it.
@@ -203,7 +213,7 @@ HTML = r"""<!DOCTYPE html>
 <head>
 <meta charset="utf-8"/>
 <meta name="viewport" content="width=device-width, initial-scale=1"/>
-<title>MHCOIN Core</title>
+<title>MHCOIN Core __APP_VERSION__</title>
 <link rel="icon" type="image/svg+xml" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Cdefs%3E%3ClinearGradient id='g' x1='12' y1='8' x2='52' y2='56' gradientUnits='userSpaceOnUse'%3E%3Cstop stop-color='%235dffc0'/%3E%3Cstop offset='.42' stop-color='%232dd4a0'/%3E%3Cstop offset='1' stop-color='%230f7a55'/%3E%3C/linearGradient%3E%3C/defs%3E%3Ccircle cx='32' cy='32' r='30' fill='url(%23g)'/%3E%3Cpath d='M14 46V18h7.2l9.8 17.6L40.8 18H48v28h-5.8V27.6L36.2 46h-4.1L21.8 27.6V46H14z' fill='%2306261a'/%3E%3C/svg%3E"/>
 <style>
   @import url('https://fonts.googleapis.com/css2?family=DM+Sans:wght@500;600;700&family=JetBrains+Mono:wght@450;600&display=swap');
@@ -2373,7 +2383,9 @@ def make_handler(state: DesktopState):
         def do_GET(self) -> None:  # noqa: N802
             path = urlparse(self.path).path
             if path in ("/", "/index.html"):
-                raw = HTML.encode("utf-8")
+                raw = (
+                    HTML.replace("__APP_VERSION__", SOFTWARE_VERSION, 1).encode("utf-8")
+                )
                 self.send_response(200)
                 self.send_header("Content-Type", "text/html; charset=utf-8")
                 self.send_header("Content-Length", str(len(raw)))

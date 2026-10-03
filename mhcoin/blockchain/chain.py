@@ -5,6 +5,7 @@ from __future__ import annotations
 import logging
 import sqlite3
 import threading
+import time
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -266,59 +267,111 @@ class Blockchain:
                 self._store_undo(block.block_hash(), undo)
             self._db.commit()
 
+    def _utxo_consistent_with_tip(self) -> bool:
+        """True when in-memory UTXO matches active tip (supply + tip coinbase)."""
+        if self._tip_hash is None or self._height < 0:
+            return True
+        try:
+            circ = sum(int(e.output.value) for e in self.utxo._mem.values())
+            issued = sum(get_block_subsidy(h) for h in range(self._height + 1))
+            if circ != issued:
+                return False
+        except Exception:
+            return False
+        try:
+            row = self._db.execute(
+                "SELECT raw FROM block_index WHERE block_hash=?",
+                (self._tip_hash,),
+            ).fetchone()
+            if not row or not row[0]:
+                return False
+            tip_block = Block.deserialize(row[0])
+            cb = tip_block.transactions[0]
+            from mhcoin.utxo import OutPoint
+
+            return self.utxo.has(OutPoint(txid=cb.txid(), vout=0))
+        except Exception:
+            return False
+
     def _repair_utxo_if_needed(self) -> None:
         """Rebuild UTXO when tip marker, supply, or tip coinbase disagrees with chain."""
         with self._lock:
             if self._tip_hash is None or self._height < 0:
                 return
+            # Avoid repair storms (balance poll used to rebuild 300+ blocks every tick).
+            now = time.time()
+            last = float(getattr(self, "_utxo_repair_at", 0.0) or 0.0)
+            last_fail = float(getattr(self, "_utxo_repair_fail_at", 0.0) or 0.0)
+            if now - last_fail < 30.0:
+                return
             tip_hex = self._tip_hash.hex()
             marked = self.utxo.get_meta("tip_hash")
             reasons: list[str] = []
             if marked != tip_hex:
+                # Meta missing/stale but UTXO already matches tip — just stamp meta.
+                if self._utxo_consistent_with_tip():
+                    try:
+                        self.utxo.set_meta("tip_hash", tip_hex)
+                    except Exception:
+                        logger.debug("utxo tip_meta stamp failed", exc_info=True)
+                    return
                 reasons.append(f"tip_meta utxo={marked} chain={tip_hex}")
-            else:
-                try:
-                    circ = sum(int(e.output.value) for e in self.utxo._mem.values())
-                    issued = sum(get_block_subsidy(h) for h in range(self._height + 1))
-                    if circ != issued:
-                        reasons.append(f"supply circ={circ} issued={issued}")
-                except Exception as e:
-                    reasons.append(f"supply_check:{e}")
-                # Tip coinbase must exist in UTXO — catches "height advanced, UTXO stuck".
-                try:
-                    row = self._db.execute(
-                        "SELECT raw FROM block_index WHERE block_hash=?",
-                        (self._tip_hash,),
-                    ).fetchone()
-                    if row:
-                        tip_block = Block.deserialize(row[0])
-                        cb = tip_block.transactions[0]
-                        from mhcoin.utxo import OutPoint
-
-                        op = OutPoint(txid=cb.txid(), vout=0)
-                        if not self.utxo.has(op):
-                            reasons.append("missing_tip_coinbase")
-                except Exception as e:
-                    reasons.append(f"tip_cb_check:{e}")
+            elif not self._utxo_consistent_with_tip():
+                reasons.append("supply_or_tip_coinbase_mismatch")
             if not reasons:
                 return
+            if now - last < 15.0:
+                return
+            self._utxo_repair_at = now
             logger.warning(
                 "UTXO repair at height=%s — %s",
                 self._height,
                 "; ".join(reasons),
             )
-            self._rebuild_utxo_from_active()
+            try:
+                self._rebuild_utxo_from_active()
+            except Exception:
+                self._utxo_repair_fail_at = time.time()
+                logger.exception(
+                    "UTXO rebuild failed at height=%s — will retry after cooldown",
+                    self._height,
+                )
+                raise
 
     def _rebuild_utxo_from_active(self) -> None:
-        self.utxo.clear_all()
+        # Must run under chain._lock (caller holds it). Prefetch blocks first so a
+        # mid-rebuild failure does not wipe a good UTXO set via clear_all.
+        blocks: list[tuple[int, Block]] = []
         for h in range(self._height + 1):
-            block = self.get_block_by_height(h)
-            if block is None:
+            row = self._db.execute(
+                "SELECT raw FROM block_index WHERE height=? AND status=?",
+                (h, STATUS_ACTIVE),
+            ).fetchone()
+            if not row or not row[0]:
                 raise ChainError(f"missing block at {h} during UTXO rebuild")
+            try:
+                blocks.append((h, Block.deserialize(row[0])))
+            except Exception as e:
+                raise ChainError(f"bad block at {h} during UTXO rebuild: {e}") from e
+        self.utxo.clear_all()
+        # clear_all leaves meta; drop tip marker until rebuild finishes cleanly.
+        try:
+            if self.utxo._conn is not None:
+                self.utxo._conn.execute("DELETE FROM meta WHERE key=?", ("tip_hash",))
+                self.utxo._conn.commit()
+        except Exception:
+            pass
+        for h, block in blocks:
             undo = self.utxo.apply_block_with_undo(block.transactions, h)
             self._store_undo(block.block_hash(), undo)
         if self._tip_hash is not None:
             self.utxo.set_meta("tip_hash", self._tip_hash.hex())
+            # Verify stamp stuck (macOS sqlite quirks / failed commit).
+            stamped = self.utxo.get_meta("tip_hash")
+            if stamped != self._tip_hash.hex():
+                raise ChainError(
+                    f"utxo tip_meta not persisted after rebuild (got {stamped!r})"
+                )
         self._db.commit()
 
     def _load_tip(self) -> None:
