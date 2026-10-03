@@ -188,6 +188,8 @@ class SoloMiner:
         # Live when we have dial targets (or user forced connect list), unless offline.
         self._live = (not offline) and bool(seeds)
         self._local = None
+        self._hashrate = 0.0
+        self._status_last_broadcast = 0.0
         if not self._live:
             self._local = LocalNode(self.data_dir, hrp=hrp, network=params.name)
 
@@ -325,6 +327,44 @@ class SoloMiner:
                 flush=True,
             )
 
+    def _broadcast_miner_status(self, *, force: bool = False, mining: bool | None = None) -> None:
+        """Advise peers of terminal mining hashrate (STATUS). Throttled ~10s."""
+        if not self._live or self._rt is None:
+            return
+        now = time.time()
+        if not force and (now - float(self._status_last_broadcast or 0.0)) < 10.0:
+            return
+        rt = self._rt
+        if getattr(rt, "_stopped", False):
+            return
+        p2p = getattr(rt, "p2p", None)
+        if p2p is None:
+            return
+        try:
+            from mhcoin.network.messages import StatusPayload, encode_status
+
+            is_mining = (not self._stop) if mining is None else bool(mining)
+            hps = int(max(0.0, float(self._hashrate or 0.0))) if is_mining else 0
+            try:
+                height = int(rt.chain.height)
+            except Exception:
+                height = -1
+            n = p2p.broadcast(
+                "STATUS",
+                encode_status(StatusPayload(mining=is_mining, hps=hps, height=height)),
+            )
+            self._status_last_broadcast = now
+            if n:
+                logger.debug(
+                    "STATUS broadcast mining=%s hps=%s height=%s peers=%s",
+                    is_mining,
+                    hps,
+                    height,
+                    n,
+                )
+        except Exception:
+            logger.debug("STATUS broadcast failed", exc_info=True)
+
     def request_stop(self, *_args) -> None:
         self._stop = True
 
@@ -407,6 +447,8 @@ class SoloMiner:
         def _progress(nonce: int, _h: bytes, hps: float) -> None:
             if self._stop:
                 raise KeyboardInterrupt("stop requested")
+            self._hashrate = float(hps or 0.0)
+            self._broadcast_miner_status()
             if nonce > 0 and nonce % 500_000 == 0:
                 print(format_mine_progress(height=height, nonce=nonce, hps=hps), flush=True)
 
@@ -486,6 +528,7 @@ class SoloMiner:
                     + (f"  net #{peer_h}" if peer_h >= 0 else ""),
                     flush=True,
                 )
+                self._broadcast_miner_status(force=True, mining=True)
         except Exception:
             pass
         try:
@@ -545,6 +588,11 @@ class SoloMiner:
 
     def close(self) -> None:
         self._stop = True
+        try:
+            self._hashrate = 0.0
+            self._broadcast_miner_status(force=True, mining=False)
+        except Exception:
+            pass
         rt = self._rt
         if rt is not None:
             try:
