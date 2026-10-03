@@ -56,3 +56,10 @@ Output: `dist/release/`
 
 **Settings → Download wallet backup** saves encrypted `wallet.json`.
 Keep your wallet password separately — it is not inside the file.
+
+## Mining
+
+- **Mining** tab → **Start mining** — live P2P (same tip as the network).
+- **Instructions** — terminal commands for macOS / Linux / Windows.
+- Do not mine from Desktop and Terminal against the same data directory at the same time.
+

@@ -1547,7 +1547,7 @@ class CoreController:
             self._tip_height_hint = max(0, tip_h)
         except Exception:
             tip_h = int(getattr(self, "_tip_height_hint", 0) or 0)
-        self._mine_log_line(f"MHCOIN Solo Miner · {self.network} · tip #{tip_h}")
+        self._mine_log_line(f"MHCOIN Live Miner · {self.network} · tip #{tip_h}")
         self._mine_log_line(f"reward  {reward_addr}")
         self._mine_log_line(f"data    {self.data_dir}")
         self._mine_log_line("mode    live node (P2P stays online)")

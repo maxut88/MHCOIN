@@ -1008,38 +1008,43 @@ async function showMineTerminalHelp(address, network){
   const net = network || "mainnet";
   const addr = (address || "").trim() || "mhc1YOUR_ADDRESS";
   const text =
-`MHCOIN — mine from Terminal (no Desktop mining)
+`MHCOIN — live mining from Terminal
+
+Same mainnet as Desktop: sync tip → mine → broadcast blocks to peers.
+Explorer Connected peers shows your STATUS (MINING yes + H/s).
 
 IMPORTANT
-• Stop mining in this app first (or Quit) — same data folder.
+• Stop mining in this app first (or Quit) — only ONE writer per data folder.
+• Do not run Desktop miner and Terminal miner on the same data-dir together.
 • Rewards go to the address below.
-• Stop miner anytime with Ctrl+C.
+• Stop anytime with Ctrl+C.
 
 Your reward address:
 ${addr}
 
 Network: ${net}
-Data folder: ~/.mhcoin/${net}
+Data folder: ~/.mhcoin/${net}   (Windows: %USERPROFILE%\\.mhcoin\\${net})
 
 ────────────────────────────────
-1) Get MHCOIN code (PUBLIC — anyone)
+1) Get MHCOIN code
 ────────────────────────────────
-git clone https://github.com/maxut88/MHCOIN.git
+git clone -b build/windows-status-hashrate https://github.com/maxut88/MHCOIN.git
 cd MHCOIN
 python3 -m venv .venv
 source .venv/bin/activate          # Windows: .venv\\Scripts\\activate
-pip install -r requirements.txt
-export PYTHONPATH="$PWD"           # Windows CMD: set PYTHONPATH=%CD%
+pip install -U pip wheel
+pip install -e .
 
 ────────────────────────────────
 2) Start miner — macOS / Linux
 ────────────────────────────────
-cd ~/MHCOIN   # or ~/src/MHCOIN — wherever you cloned
 chmod +x packaging/mine_mainnet.sh
 ./packaging/mine_mainnet.sh ${addr}
 
-# or one-liner:
-python3 -m mhcoin.cli mining start --network ${net} --address ${addr}
+# or:
+mhcoin mining start --network ${net} --address ${addr}
+
+You should see: MHCOIN Live Miner · mode live · synced to network tip
 
 ────────────────────────────────
 3) Start miner — Windows (CMD)
@@ -1048,7 +1053,7 @@ cd %USERPROFILE%\\MHCOIN
 packaging\\mine_mainnet.bat ${addr}
 
 # or:
-python -m mhcoin.cli mining start --network ${net} --address ${addr}
+mhcoin mining start --network ${net} --address ${addr}
 
 ────────────────────────────────
 4) Start miner — Windows (PowerShell)
@@ -1059,9 +1064,10 @@ cd ~\\MHCOIN
 ────────────────────────────────
 Notes
 ────────────────────────────────
-• Get code via GitHub clone (step 1 above). No API server required to mine.
-• Blockchain peers use P2P (seeds like your node :8333).
-• Solo mining today — not a stratum pool / ASIC pool yet.
+• Mainnet terminal mining is ONLINE (P2P) — not a private local chain.
+• Use --offline only for local tests; not for mainnet competition.
+• Solo PoW today — not a stratum / ASIC pool yet.
+• Desktop Mining tab → Start mining also races the same live tip.
 `;
   const copyArea = $("modalCopy");
   copyArea.classList.add("tall");
@@ -1360,7 +1366,7 @@ function colorizeMineLog(lines){
       if (inner === body) inner = `<span class="ml-green">${esc(body)}</span>`;
     } else if (/ERROR|WARN/i.test(body)) {
       inner = `<span class="ml-red">${esc(body)}</span>`;
-    } else if (/MHCOIN Solo Miner|^═|^╔|^║|^╚/.test(body)) {
+    } else if (/MHCOIN (Live|Solo) Miner|^═|^╔|^║|^╚/.test(body)) {
       inner = `<span class="ml-cyan ml-bold">${esc(body)}</span>`;
     } else if (/^session\b/i.test(body.trim()) || /Mining stopped|■/.test(body)) {
       inner = `<span class="ml-mag">${esc(body)}</span>`;
@@ -2026,7 +2032,7 @@ async function render(pre){
       <h3>Mining log</h3>
       <p class="sub">Live terminal-style output (same data as CLI miner).</p>
       <pre id="mineLog" class="mine-log"></pre>
-      <p class="sub">Prefer Terminal? Open <b>Instructions</b> and paste the commands.</p>
+      <p class="sub">Live P2P mining (same tip as the network). Prefer Terminal? Open <b>Instructions</b>.</p>
       <h3>Live blocks</h3>
       <p class="sub">Streams as blocks are found (also on Overview → Activity).</p>
       <div class="act-list" id="mineLiveActs">

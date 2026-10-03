@@ -1,6 +1,6 @@
 """MHCOIN (MHC) — independent blockchain implementation."""
 
-__version__ = "0.3.7.2"
+__version__ = "0.3.7.3"
 TICKER = "MHC"
 NAME = "MHCOIN"
 DECIMALS = 8
