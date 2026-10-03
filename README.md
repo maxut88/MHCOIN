@@ -2,6 +2,7 @@
 
 [![Desktop release artifacts](https://github.com/maxut88/MHCOIN/actions/workflows/desktop-release.yml/badge.svg)](https://github.com/maxut88/MHCOIN/actions/workflows/desktop-release.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
+[![Latest release](https://img.shields.io/github/v/release/maxut88/MHCOIN)](https://github.com/maxut88/MHCOIN/releases/latest)
 
 Independent Proof-of-Work blockchain. **Not** a Bitcoin Core fork.
 
@@ -19,7 +20,7 @@ Independent Proof-of-Work blockchain. **Not** a Bitcoin Core fork.
 | Ledger | UTXO |
 | Mainnet P2P port | **8333** |
 | Mainnet magic | `4D48434E` (`MHCN`) |
-| Software | 0.3.5 |
+| Software | **0.3.7.3** |
 
 ## Mainnet identity (frozen)
 
@@ -48,14 +49,16 @@ mhcoin audit fingerprint
 
 ## Install MHCOIN Core (users)
 
-Download binaries from **[GitHub Releases](https://github.com/maxut88/MHCOIN/releases)** and verify `SHA256SUMS`.
+**Download:** [v0.3.7.3 Release](https://github.com/maxut88/MHCOIN/releases/tag/v0.3.7.3) · verify `SHA256SUMS`
 
 ### Linux
 
 1. Download `MHCOIN-Core-0.3.7.3-x86_64.AppImage` **or** `MHCOIN-Core-0.3.7.3-linux-x86_64.tar.gz`.
 2. AppImage: `chmod +x MHCOIN-Core-0.3.7.3-x86_64.AppImage && ./MHCOIN-Core-0.3.7.3-x86_64.AppImage`
-3. tarball: extract and run the bundled `MHCOIN-Core` binary.
+3. tarball: extract and run `./MHCOIN-Core`.
 4. Allow sync from genesis, create or open a wallet, then Receive / Send / Mining.
+
+If no native window opens (common on immutable desktops), the UI is at **http://127.0.0.1:18765/** in your browser — that is normal.
 
 Optional first-peer override:
 
@@ -65,15 +68,13 @@ export MHCOIN_CONNECT=176.38.3.168:8333
 
 ### macOS
 
-1. Download `MHCOIN-Core-0.3.7.3-macos.dmg`.
-2. Open the DMG and install **MHCOIN Core**.
-3. Launch, sync from genesis, create/open a wallet.
-
-Apple Silicon: current Release builds are native (`macos-14` / arm64).
+1. Download `MHCOIN-Core-0.3.7.3-macos.dmg` (Apple Silicon / recent macOS).
+2. Older Intel Macs: use `MHCOIN-Core-0.3.7.3-macos110-legacy.dmg` if the regular build will not open.
+3. Open the DMG → install **MHCOIN Core** → sync from genesis → create/open a wallet.
 
 ### Windows
 
-1. Download `MHCOIN-Core-0.3.7.3-windows-x86_64.exe`.
+1. Download `MHCOIN-Core-0.3.7.3-windows-x86_64.exe` (or the `.zip`).
 2. Launch **MHCOIN Core**, sync from genesis, create/open a wallet.
 
 Wallet data defaults to `~/.mhcoin/mainnet/` (Windows: `%USERPROFILE%\.mhcoin\mainnet\`).
@@ -81,9 +82,8 @@ Wallet data defaults to `~/.mhcoin/mainnet/` (Windows: `%USERPROFILE%\.mhcoin\ma
 ## Mining
 
 Desktop and terminal miners race the **same live mainnet tip** (P2P sync + block broadcast).
-Explorer **Connected peers** shows each miner’s STATUS (`MINING` + H/s).
 
-**Desktop (Windows / macOS / Linux):** Mining tab → payout `mhc1…` → **Start mining**.
+**Desktop:** Mining tab → payout `mhc1…` → **Start mining**.  
 Open **Instructions** for copy-paste terminal commands.
 
 **CLI (live on mainnet):**
@@ -138,15 +138,6 @@ mhcoin node start --network mainnet --host 0.0.0.0 --port 8333
 ```
 
 Peer discovery: hardcoded/DNS seeds, then ADDR gossip ([docs/DISCOVERY.md](docs/DISCOVERY.md)). No central block server.
-
-## LAN block explorer (seed VPS)
-
-Read-only explorer against the live mainnet `chain.sqlite` (WAL `mode=ro`; never writes chain/wallet):
-
-- URL: **`http://192.168.0.221:8766/`** (LAN; next to download `:8765`)
-- JSON: `/api/`, `/api/block/<height|hash>`, `/api/tx/<txid>`, `/api/address/<mhc1…>`
-- Launch: `PYTHONPATH=/data/MHCOIN python3 rc1_ops/run_explorer.py`  
-  (`MHCOIN_DATA_DIR`, `MHCOIN_EXPLORER_HOST`, `MHCOIN_EXPLORER_PORT`)
 
 ## Documentation
 
