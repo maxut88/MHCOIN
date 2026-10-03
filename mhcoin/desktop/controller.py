@@ -352,9 +352,13 @@ class CoreController:
         if live:
             assert rt is not None
             try:
-                # Auto-heal stuck UTXO (e.g. tip #306 but balance frozen at #286 → 9000).
+                # Occasional UTXO heal (rate-limited inside). Never every-poll rebuild.
                 try:
-                    rt.chain._repair_utxo_if_needed()
+                    tip_now = rt.chain.tip_hash.hex() if rt.chain.tip_hash else ""
+                    last_tip = str(getattr(self, "_balance_repair_tip", "") or "")
+                    if tip_now and tip_now != last_tip:
+                        rt.chain._repair_utxo_if_needed()
+                        self._balance_repair_tip = tip_now
                 except Exception:
                     logger.debug("live UTXO repair skipped", exc_info=True)
                 with rt.chain._lock:
@@ -366,8 +370,11 @@ class CoreController:
                 return
             except Exception:
                 logger.debug("live balance refresh failed", exc_info=True)
-        if self._mining:
-            # Datadir locked by miner without live node — keep last cache if any.
+                # Keep last cache — never open LocalNode while NodeRuntime is up
+                # (second sqlite = SIGSEGV / window close on macOS).
+                return
+        if self._mining or self._node is not None:
+            # Datadir owned by miner / P2P node — keep last cache if any.
             return
         try:
             with self._io:
@@ -885,12 +892,22 @@ class CoreController:
         return isinstance(key, tuple) and len(key) >= 5 and key[4] is False
 
     def _current_tip_hex(self) -> str:
+        """Best-effort tip hash for history cache invalidation.
+
+        Never open LocalNode while the P2P node (or solo miner) owns the
+        datadir — a second sqlite handle SIGSEGV'd Apple libsqlite / closed
+        the Desktop window on macOS.
+        """
         try:
             if self._node is not None and not getattr(self._node, "_stopped", False):
                 tip = self._node.chain.tip_hash
                 return tip.hex() if tip else ""
         except Exception:
-            pass
+            logger.debug("live tip hex read failed", exc_info=True)
+            return ""
+        # Node owns datadir, or miner has it — do not open a second chain.
+        if self._node is not None or self._mining:
+            return ""
         try:
             with self._io:
                 tip = self._get_local().chain.tip_hash
@@ -902,7 +919,7 @@ class CoreController:
         """True when cached history was built for a different tip than now."""
         key = self._hist_key
         if not isinstance(key, tuple) or len(key) < 3:
-            return True
+            return self._hist_key is None
         cached = str(key[2] or "")
         cur = self._current_tip_hex()
         if not cur:
