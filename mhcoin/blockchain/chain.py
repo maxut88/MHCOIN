@@ -267,17 +267,45 @@ class Blockchain:
             self._db.commit()
 
     def _repair_utxo_if_needed(self) -> None:
-        """If UTXO tip marker mismatches active tip, rebuild UTXO from active chain."""
+        """Rebuild UTXO when tip marker, supply, or tip coinbase disagrees with chain."""
         with self._lock:
-            if self._tip_hash is None:
+            if self._tip_hash is None or self._height < 0:
                 return
+            tip_hex = self._tip_hash.hex()
             marked = self.utxo.get_meta("tip_hash")
-            if marked == self._tip_hash.hex():
+            reasons: list[str] = []
+            if marked != tip_hex:
+                reasons.append(f"tip_meta utxo={marked} chain={tip_hex}")
+            else:
+                try:
+                    circ = sum(int(e.output.value) for e in self.utxo._mem.values())
+                    issued = sum(get_block_subsidy(h) for h in range(self._height + 1))
+                    if circ != issued:
+                        reasons.append(f"supply circ={circ} issued={issued}")
+                except Exception as e:
+                    reasons.append(f"supply_check:{e}")
+                # Tip coinbase must exist in UTXO — catches "height advanced, UTXO stuck".
+                try:
+                    row = self._db.execute(
+                        "SELECT raw FROM block_index WHERE block_hash=?",
+                        (self._tip_hash,),
+                    ).fetchone()
+                    if row:
+                        tip_block = Block.deserialize(row[0])
+                        cb = tip_block.transactions[0]
+                        from mhcoin.utxo import OutPoint
+
+                        op = OutPoint(txid=cb.txid(), vout=0)
+                        if not self.utxo.has(op):
+                            reasons.append("missing_tip_coinbase")
+                except Exception as e:
+                    reasons.append(f"tip_cb_check:{e}")
+            if not reasons:
                 return
-            logger.debug(
-                "UTXO tip mismatch (utxo=%s chain=%s) — rebuilding",
-                marked,
-                self._tip_hash.hex(),
+            logger.warning(
+                "UTXO repair at height=%s — %s",
+                self._height,
+                "; ".join(reasons),
             )
             self._rebuild_utxo_from_active()
 

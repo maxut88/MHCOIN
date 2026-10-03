@@ -183,32 +183,50 @@ STATUS_FLAG_MINING = 0x01
 class StatusPayload:
     mining: bool
     hps: int  # integer hashes/sec
+    # Optional tip height (advisory). -1 = omitted (legacy 9-byte STATUS).
+    height: int = -1
 
 
 def encode_status(s: StatusPayload) -> bytes:
     """
     STATUS payload:
 
-      flags: uint8   (bit0 = mining)
-      hps:   uint64  (integer H/s)
+      flags:  uint8   (bit0 = mining)
+      hps:    uint64  (integer H/s)
+      height: uint32  (optional tip height; present when height >= 0)
+
+    Legacy peers send/accept 9-byte payloads; newer peers use 13 bytes.
     """
     flags = STATUS_FLAG_MINING if s.mining else 0
     hps = int(s.hps)
     if hps < 0:
         raise ProtocolError("STATUS hps must be >= 0")
-    return write_u8(flags & 0xFF) + write_u64(hps & 0xFFFFFFFFFFFFFFFF)
+    out = write_u8(flags & 0xFF) + write_u64(hps & 0xFFFFFFFFFFFFFFFF)
+    h = int(s.height)
+    if h >= 0:
+        if h > 0xFFFFFFFF:
+            raise ProtocolError("STATUS height out of range")
+        out += write_u32(h)
+    return out
 
 
 def decode_status(payload: bytes) -> StatusPayload:
-    if len(payload) != 9:
-        raise ProtocolError("STATUS payload must be 9 bytes")
+    if len(payload) not in (9, 13):
+        raise ProtocolError("STATUS payload must be 9 or 13 bytes")
     try:
         r = Reader(payload)
         flags = r.u8()
         hps = r.u64()
-        if r.remaining() != 0:
+        height = -1
+        if r.remaining() == 4:
+            height = int(r.u32())
+        elif r.remaining() != 0:
             raise ProtocolError("trailing bytes in STATUS")
-        return StatusPayload(mining=bool(flags & STATUS_FLAG_MINING), hps=int(hps))
+        return StatusPayload(
+            mining=bool(flags & STATUS_FLAG_MINING),
+            hps=int(hps),
+            height=height,
+        )
     except SerializationError as e:
         raise ProtocolError(str(e)) from e
 

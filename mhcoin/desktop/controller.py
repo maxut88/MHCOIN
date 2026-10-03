@@ -185,12 +185,13 @@ class CoreController:
 
     def recent_for_ui(self, limit: int = 25) -> list[dict]:
         # Never block the UI thread on a chain scan — serve cache and refresh async.
-        if self._recent_cache or self._hist_dicts:
-            src = self._recent_cache or self._hist_dicts
-            return list(src)[:limit]
-        # Full chain required: partial windows miss Sent (prev outpoints
-        # created outside the window are absent from tx_index). With a live
-        # P2P node the scan reuses NodeRuntime.chain under chain._lock.
+        if self._hist_tip_stale() or self._hist_key is None or self._hist_key_is_partial():
+            self.request_history_build(full_chain=True)
+        # Prefer full history snapshot (all mining rewards) over the short recent trim.
+        if self._hist_dicts:
+            return list(self._hist_dicts)[:limit]
+        if self._recent_cache:
+            return list(self._recent_cache)[:limit]
         self.request_history_build(full_chain=True)
         return list(self._recent_cache)[:limit]
 
@@ -351,6 +352,11 @@ class CoreController:
         if live:
             assert rt is not None
             try:
+                # Auto-heal stuck UTXO (e.g. tip #306 but balance frozen at #286 → 9000).
+                try:
+                    rt.chain._repair_utxo_if_needed()
+                except Exception:
+                    logger.debug("live UTXO repair skipped", exc_info=True)
                 with rt.chain._lock:
                     height = int(rt.chain.height)
                     self._balance_cache_sats = int(rt.chain.utxo.balance_for_pubkey_hash(pkh))
@@ -878,6 +884,31 @@ class CoreController:
         # key = ("hist-v6", addr, tip, mem_n, bool(full_chain), int(limit))
         return isinstance(key, tuple) and len(key) >= 5 and key[4] is False
 
+    def _current_tip_hex(self) -> str:
+        try:
+            if self._node is not None and not getattr(self._node, "_stopped", False):
+                tip = self._node.chain.tip_hash
+                return tip.hex() if tip else ""
+        except Exception:
+            pass
+        try:
+            with self._io:
+                tip = self._get_local().chain.tip_hash
+                return tip.hex() if tip else ""
+        except Exception:
+            return ""
+
+    def _hist_tip_stale(self) -> bool:
+        """True when cached history was built for a different tip than now."""
+        key = self._hist_key
+        if not isinstance(key, tuple) or len(key) < 3:
+            return True
+        cached = str(key[2] or "")
+        cur = self._current_tip_hex()
+        if not cur:
+            return False
+        return cached != cur
+
     def _ensure_history_before_node(self, *, timeout: float = 120.0) -> None:
         """Wait for async history or run a sync full scan before P2P owns the datadir."""
         if self._node is not None:
@@ -948,10 +979,11 @@ class CoreController:
                         self._hist_need_full = True
                     return
                 do_full = want_full
-                rows = self.wallet_history(2000, full_chain=do_full)
+                rows = self.wallet_history(5000, full_chain=do_full)
                 dicts = [self._txrow_to_dict(r) for r in rows]
                 self._hist_dicts = dicts
-                self._recent_cache = list(dicts)[:50]
+                # Keep a generous recent window so Overview still shows mining.
+                self._recent_cache = list(dicts)[:500]
                 if self._node is None:
                     try:
                         self.balance_sats()
@@ -966,7 +998,9 @@ class CoreController:
             finally:
                 with self._hist_build_lock:
                     self._hist_building = False
-                    need_again = bool(getattr(self, "_hist_need_full", False))
+                    need_again = bool(
+                        getattr(self, "_hist_need_full", False) or self._hist_tip_stale()
+                    )
                 if need_again and not (self._mining and self._node is None):
                     self.request_history_build(full_chain=True)
 
@@ -1015,17 +1049,27 @@ class CoreController:
         except Exception:
             logger.debug("history log merge failed", exc_info=True)
         key_partial = self._hist_key_is_partial()
-        # Empty history is valid (fresh wipe / no txs yet). Only treat as partial
-        # when no completed scan key exists or the last scan was a short window.
-        partial = (self._hist_key is None) or key_partial
-        # Kick a rebuild when cache is empty/partial. Safe with live P2P node:
-        # wallet_history uses the node's chain under chain._lock (no 2nd sqlite).
+        tip_stale = self._hist_tip_stale()
+        # Empty history is valid (fresh wipe / no txs yet). Rebuild when the tip
+        # moved — otherwise mining rewards after a resync never appear.
+        partial = (self._hist_key is None) or key_partial or tip_stale
         if not building and (
-            self._hist_key is None or key_partial
+            self._hist_key is None or key_partial or tip_stale
         ):
             self.request_history_build(full_chain=True)
             with self._hist_build_lock:
                 building = bool(self._hist_building)
+        # Newest first for display (mining + sends interleaved by height).
+        try:
+            txs.sort(
+                key=lambda d: (
+                    0 if d.get("height") is not None else 1,
+                    -(int(d["height"]) if d.get("height") is not None else -1),
+                    0 if (d.get("type") == "mined") else 1,
+                )
+            )
+        except Exception:
+            pass
         sliced = txs[:limit]
         counts = {"mined": 0, "sent": 0, "received": 0, "other": 0}
         for d in sliced:
@@ -1081,20 +1125,19 @@ class CoreController:
             return []
         pkh = address_to_pubkey_hash(addr, hrp=self.hrp)
 
-        # Serialize against NodeRuntime writers via chain._lock; otherwise hold _io
-        # for LocalNode. Never open a second sqlite connection on chain.sqlite.
+        # Prefer node's chain (no second sqlite). Do NOT hold chain._lock for the
+        # whole scan — that starved P2P on macOS and left History with only the
+        # durable send log (no mining). get_block_by_height locks per read.
         hold_io = False
-        chain_lock = None
-        if self._node is not None:
-            chain_lock = self._node.chain._lock
-            chain_lock.acquire()
-        else:
+        if self._node is None:
             hold_io = True
             self._io.acquire()
         cleanup = None
         try:
             chain, mempool_txs, cleanup = self._history_scan_sources()
-            h = chain.height
+            with chain._lock:
+                h = int(chain.height)
+                tip = chain.tip_hash.hex() if chain.tip_hash else ""
             if h < 0:
                 # Fresh datadir (no genesis yet) — mark scan complete so unlock
                 # boot is not stuck on partial forever.
@@ -1106,7 +1149,6 @@ class CoreController:
                 except Exception:
                     pass
                 return []
-            tip = chain.tip_hash.hex() if chain.tip_hash else ""
             mem_n = len(mempool_txs)
             # Per-address cache — switching wallets must not reuse the other history.
             key = ("hist-v6", addr, tip, mem_n, bool(full_chain), int(limit))
@@ -1367,11 +1409,6 @@ class CoreController:
                     pass
             if hold_io:
                 self._io.release()
-            if chain_lock is not None:
-                try:
-                    chain_lock.release()
-                except Exception:
-                    pass
 
     # --- mining -------------------------------------------------------------
 
@@ -1407,10 +1444,25 @@ class CoreController:
 
             mining = bool(self._mining)
             hps = int(max(0.0, float(self._hashrate or 0.0))) if mining else 0
-            n = p2p.broadcast("STATUS", encode_status(StatusPayload(mining=mining, hps=hps)))
+            try:
+                height = int(rt.chain.height)
+            except Exception:
+                height = -1
+            n = p2p.broadcast(
+                "STATUS",
+                encode_status(
+                    StatusPayload(mining=mining, hps=hps, height=height)
+                ),
+            )
             self._status_last_broadcast = now
             if n:
-                logger.debug("STATUS broadcast mining=%s hps=%s peers=%s", mining, hps, n)
+                logger.debug(
+                    "STATUS broadcast mining=%s hps=%s height=%s peers=%s",
+                    mining,
+                    hps,
+                    height,
+                    n,
+                )
         except Exception:
             logger.debug("STATUS broadcast failed", exc_info=True)
 

@@ -134,11 +134,15 @@ class Peer:
         self.remote_start_height: int | None = None
         self.remote_network: str | None = None
         self.remote_listen_port: int | None = None
+        # Best tip height we have heard from this peer (VERSION / STATUS).
+        # remote_start_height alone stays frozen at handshake time.
+        self.best_height: int = 0
         # Advisory STATUS from peer (live mining hashrate) — not consensus.
         self.reported_hps: int = 0
         self.reported_mining: bool = False
         self.status_recv_at: float = 0.0
         self._status_last_accept: float = 0.0
+        self._catchup_last_offer: float = 0.0
 
         self.last_recv = time.time()
         self.last_send = time.time()
@@ -403,6 +407,7 @@ class Peer:
         self.remote_nonce = vp.nonce
         self.software_version = vp.software_version
         self.remote_start_height = vp.start_height
+        self.note_height(vp.start_height)
         self.remote_network = vp.network
         self.remote_listen_port = vp.listen_port
         self._got_version = True
@@ -459,6 +464,19 @@ class Peer:
         self._ping_sent_at = None
         logger.info("PONG received from %s", self.addr)
 
+    def note_height(self, height: int | None) -> None:
+        """Raise best-known advisory tip for this peer (never lowers)."""
+        if height is None:
+            return
+        try:
+            h = int(height)
+        except (TypeError, ValueError):
+            return
+        if h < 0:
+            return
+        if h > self.best_height:
+            self.best_height = h
+
     def _on_status(self, payload: bytes) -> None:
         """Advisory mining status — rate-limited, never disconnects on bad payload."""
         now = time.time()
@@ -473,9 +491,12 @@ class Peer:
         self.status_recv_at = now
         self.reported_mining = bool(st.mining)
         self.reported_hps = int(st.hps) if st.mining else 0
+        if int(st.height) >= 0:
+            self.note_height(st.height)
         logger.debug(
-            "STATUS from %s mining=%s hps=%s",
+            "STATUS from %s mining=%s hps=%s height=%s",
             self.addr,
             self.reported_mining,
             self.reported_hps,
+            st.height,
         )

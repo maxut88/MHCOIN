@@ -211,7 +211,10 @@ class P2PManager:
                         "inbound": p.inbound,
                         "state": p.state.value,
                         "protocol": p.protocol_version,
-                        "height": p.remote_start_height,
+                        "height": max(
+                            int(p.best_height or 0),
+                            int(p.remote_start_height or 0),
+                        ),
                         "agent": p.software_version,
                         "network": p.remote_network,
                         "mining": mining,

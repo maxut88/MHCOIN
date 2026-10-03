@@ -71,7 +71,7 @@ MAX_SUPPORTED_PROTOCOL_VERSION = 1
 try:
     from mhcoin import __version__ as SOFTWARE_VERSION
 except Exception:  # pragma: no cover
-    SOFTWARE_VERSION = "0.3.5"
+    SOFTWARE_VERSION = "0.3.7"
 USER_AGENT = f"/MHCOIN:{SOFTWARE_VERSION}/"
 
 # Compatibility rule (Stage 9):
