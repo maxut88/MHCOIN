@@ -1607,8 +1607,8 @@ function historyCard(t, i){
       <div class="k">Amount</div>
       <div class="v"><strong>${esc(amtText)}</strong></div>
       <div class="a"></div>
-      <div class="k">Network fee</div>
-      <div class="v">${esc(fee)}</div>
+      <div class="k">Fee</div>
+      <div class="v">${esc(isBlockReward ? "—" : fee)}</div>
       <div class="a"></div>
     </div>
   </div>`;
@@ -1868,7 +1868,7 @@ async function render(pre){
       <h3>Activity</h3>
       <p class="sub">${(s.txs||[]).length} recent · full TX details</p>
       <div class="act-list" id="recentList" style="max-height:48vh">
-        ${(s.txs||[]).slice(0,12).map((t,i)=>historyCard(t,i)).join("") || '<p class="sub">No activity yet — mined blocks and transfers will appear here.</p>'}
+        ${(s.txs||[]).slice(0,20).map((t,i)=>historyCard(t,i)).join("") || '<p class="sub">No activity yet — mined blocks and transfers will appear here.</p>'}
       </div>
       <div class="row"><button class="sm" onclick="go('History')">Full history</button></div>`;
     bindCopyTxButtons($("recentList"));
@@ -1889,7 +1889,7 @@ async function render(pre){
   } else if (active === "History") {
     p.innerHTML = `
       <h2>History</h2>
-      <p class="sub">Full TXID · From / To · time · fee</p>
+      <p class="sub">All mining rewards + transfers · TXID · From / To · time · fee</p>
       <p class="mono" style="font-size:11px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${esc(s.address||"")}">${s.address||""}</p>
       <div id="histBox" class="act-list" style="max-height:68vh;overflow:auto"><p class="sub">Loading…</p></div>
       <div class="row"><button class="sm" id="histReload">Reload</button></div>`;
@@ -2392,7 +2392,7 @@ def make_handler(state: DesktopState):
             if path == "/api/history":
                 c = state.ctrl
                 try:
-                    payload = c.history_for_api(limit=2000)
+                    payload = c.history_for_api(limit=5000)
                     _json(self, 200, payload)
                 except Exception as e:  # noqa: BLE001
                     if c._recent_cache:

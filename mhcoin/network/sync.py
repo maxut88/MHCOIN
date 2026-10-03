@@ -124,10 +124,15 @@ class SyncManager:
         """Hint only: peer.start_height is NOT consensus authority."""
         remote_h = peer.remote_start_height or 0
         our_h = self._get_our_height()
-        if remote_h <= our_h:
-            # We are ahead (or equal): offer missing blocks so lagging peers catch up
+        if remote_h < our_h:
+            # We are ahead: offer missing blocks so lagging peers catch up
             # even if their IBD aborted (e.g. duplicate WAN/LAN path closed mid-sync).
             self.offer_catchup(peer)
+            return
+        if remote_h == our_h:
+            # Same height can still be a different tip (equal-height fork).
+            # Height-only catch-up is a no-op here — must exchange headers for work.
+            self._maybe_probe_headers(peer, reason="equal_height")
             return
         with self._lock:
             if self.is_syncing:
@@ -149,11 +154,36 @@ class SyncManager:
         )
         self._request_headers(peer)
 
+    def _maybe_probe_headers(self, peer: Peer, *, reason: str) -> None:
+        """Rate-limited GETHEADERS probe for equal-height / competing tips."""
+        now = time.time()
+        last = float(getattr(peer, "_headers_probe_at", 0.0) or 0.0)
+        if now - last < 30.0:
+            return
+        with self._lock:
+            if self.is_syncing:
+                return
+            self.sync_peer = peer
+        peer._headers_probe_at = now
+        logger.info(
+            "Probing headers with %s (%s us=%s peer_hint=%s)",
+            peer.addr,
+            reason,
+            self._get_our_height(),
+            peer.remote_start_height,
+        )
+        self._request_headers(peer)
+
     def offer_catchup(self, peer: Peer) -> None:
         """INV active-chain blocks the peer is missing (seed → lagging client)."""
-        their_h = int(peer.remote_start_height or 0)
+        their_h = max(int(peer.best_height or 0), int(peer.remote_start_height or 0))
         our_h = self._get_our_height()
         if their_h < 0 or their_h >= our_h:
+            return
+        # VERSION height is frozen at connect — do not spam INV every handshake tick.
+        now = time.time()
+        last = float(getattr(peer, "_catchup_last_offer", 0.0) or 0.0)
+        if now - last < 45.0:
             return
         # Cap batch to avoid huge INV on very stale peers (they still run GETHEADERS).
         start = their_h + 1
@@ -169,6 +199,7 @@ class SyncManager:
             items.append(InventoryVector(INV_TYPE_BLOCK, block.block_hash()))
         if not items:
             return
+        peer._catchup_last_offer = now
         logger.info(
             "Offering catch-up INV to %s blocks %s..%s (count=%s)",
             peer.addr,
