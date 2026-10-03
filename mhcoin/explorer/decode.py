@@ -21,6 +21,27 @@ BLOCKS_PER_PAGE = 100
 TXS_PER_PAGE = 100
 
 
+def payment_amount_sats(tx: Transaction, *, from_addr: str | None, hrp: str = DEFAULT_HRP) -> int:
+    """Value sent to others (excludes change back to from_addr).
+
+    For coinbase: full output value. For a normal send with change: payment only
+    (e.g. 1 MHC), not input/output totals (~50 MHC).
+    """
+    if tx.is_coinbase():
+        return int(tx.output_value())
+    if not tx.outputs:
+        return 0
+    if not from_addr or from_addr == "coinbase":
+        return int(tx.output_value())
+    paid = 0
+    for tout in tx.outputs:
+        addr = out_address(tout, hrp=hrp)
+        if addr and addr != from_addr:
+            paid += int(tout.value)
+    # Self-send / consolidation: no external output — show full output value.
+    return paid if paid > 0 else int(tx.output_value())
+
+
 def format_hps(hps: float | None) -> str | None:
     if hps is None or hps <= 0:
         return None
@@ -378,6 +399,16 @@ def summarize_block(
                         sz = len(tx.serialize())
                         if sz > 0:
                             fee_per_byte = round(fee_sats / sz, 3)
+                if tx.outputs:
+                    to_a = None
+                    for tout in tx.outputs:
+                        cand = out_address(tout, hrp=hrp)
+                        if cand and cand != from_a:
+                            to_a = cand
+                            break
+                    if to_a is None:
+                        to_a = out_address(tx.outputs[0], hrp=hrp)
+            pay_sats = payment_amount_sats(tx, from_addr=from_a, hrp=hrp)
             tx_rows.append(
                 {
                     "txid": tid,
@@ -386,6 +417,8 @@ def summarize_block(
                     "output_count": len(tx.outputs),
                     "output_value_sats": out_v,
                     "output_value_mhc": format_mhc(out_v),
+                    "amount_sats": pay_sats,
+                    "amount_mhc": format_mhc(pay_sats),
                     "size_bytes": len(tx.serialize()),
                     "fee_sats": fee_sats,
                     "fee_mhc": format_mhc(fee_sats) if fee_sats is not None else None,
@@ -506,6 +539,14 @@ def summarize_tx(
         if size > 0:
             fee_per_byte = fee_sats / size
 
+    from_addr = None
+    if not coinbase:
+        for entry in inputs:
+            if entry.get("address"):
+                from_addr = entry["address"]
+                break
+    pay_sats = payment_amount_sats(tx, from_addr=from_addr, hrp=hrp)
+
     conf = confirmations(tip, block_height)
     return {
         "txid": txid_hex(tx),
@@ -532,6 +573,8 @@ def summarize_tx(
         "input_value_mhc": format_mhc(in_value) if not coinbase else None,
         "output_value_sats": out_value,
         "output_value_mhc": format_mhc(out_value),
+        "amount_sats": pay_sats,
+        "amount_mhc": format_mhc(pay_sats),
         "fee_sats": fee_sats,
         "fee_mhc": format_mhc(fee_sats) if fee_sats is not None else None,
         "fee_per_byte": round(fee_per_byte, 3) if fee_per_byte is not None else None,
@@ -580,7 +623,9 @@ def address_history(
     received: list[dict[str, Any]] = []
     owned: dict[tuple[str, int], int] = {}  # (txid, vout) -> value
     total_in = 0
-    total_out = 0
+    total_spent_inputs = 0  # raw UTXO spend (includes change cycle)
+    total_paid_external = 0  # MHC paid to other addresses (NOT fee, NOT change)
+    total_fees_paid = 0  # network fees when we fully funded the tx
     tip = chain.height
     now = int(time.time())
     for h in range(0, tip + 1):
@@ -591,12 +636,27 @@ def address_history(
         ts = int(block.header.timestamp)
         for tx in block.transactions:
             txh = txid_hex(tx)
-            # spends from this address
+            spent_here = 0
             if not tx.is_coinbase():
                 for tin in tx.inputs:
                     key = (tin.prev_txid.hex(), int(tin.prev_vout))
                     if key in owned:
-                        total_out += owned.pop(key)
+                        spent_here += owned.pop(key)
+                if spent_here:
+                    total_spent_inputs += spent_here
+                    paid_ext = 0
+                    out_sum = 0
+                    for tout in tx.outputs:
+                        out_sum += int(tout.value)
+                        try:
+                            if tout.pubkey_hash() != pkh:
+                                paid_ext += int(tout.value)
+                        except Exception:
+                            paid_ext += int(tout.value)
+                    total_paid_external += paid_ext
+                    # Fee only when this address funded the whole tx (typical wallet send).
+                    if spent_here >= out_sum:
+                        total_fees_paid += max(0, spent_here - out_sum)
             for n, tout in enumerate(tx.outputs):
                 try:
                     if tout.pubkey_hash() != pkh:
@@ -604,7 +664,10 @@ def address_history(
                 except Exception:
                     continue
                 val = int(tout.value)
-                total_in += val
+                # Change back to self is not "Received" — keeps Balance ≈ Received − Sent.
+                is_change = bool(spent_here) and not tx.is_coinbase()
+                if not is_change:
+                    total_in += val
                 owned[(txh, n)] = val
                 received.append(
                     {
@@ -615,6 +678,7 @@ def address_history(
                         "value_sats": val,
                         "value_mhc": format_mhc(val),
                         "coinbase": tx.is_coinbase(),
+                        "change": is_change,
                         "timestamp": ts,
                         "time_utc": format_utc(ts),
                         "age": format_age(ts, now=now),
@@ -628,8 +692,13 @@ def address_history(
         "received_count": len(received),
         "total_received_sats": total_in,
         "total_received_mhc": format_mhc(total_in),
-        "total_sent_sats": total_out,
-        "total_sent_mhc": format_mhc(total_out),
+        # Sent = paid to others only (e.g. 1.00000000). Fee is separate.
+        "total_sent_sats": total_paid_external,
+        "total_sent_mhc": format_mhc(total_paid_external),
+        "total_fees_sats": total_fees_paid,
+        "total_fees_mhc": format_mhc(total_fees_paid),
+        "total_spent_inputs_sats": total_spent_inputs,
+        "total_spent_inputs_mhc": format_mhc(total_spent_inputs),
         "balance_sats": balance,
         "balance_mhc": format_mhc(balance),
         "utxo_count": len(owned),
@@ -772,7 +841,16 @@ def recent_transactions(
                     if len(tx.inputs) == 1 and in_sum >= out_v:
                         fee_sats = in_sum - out_v
                 if tx.outputs:
-                    to_addr = out_address(tx.outputs[0], hrp=hrp)
+                    # Prefer first non-change output as the payment destination.
+                    to_addr = None
+                    for tout in tx.outputs:
+                        cand = out_address(tout, hrp=hrp)
+                        if cand and cand != from_addr:
+                            to_addr = cand
+                            break
+                    if to_addr is None:
+                        to_addr = out_address(tx.outputs[0], hrp=hrp)
+            pay_sats = payment_amount_sats(tx, from_addr=from_addr, hrp=hrp)
             out.append(
                 {
                     "txid": txid_hex(tx),
@@ -787,6 +865,8 @@ def recent_transactions(
                     "output_count": len(tx.outputs),
                     "output_value_sats": out_v,
                     "output_value_mhc": format_mhc(out_v),
+                    "amount_sats": pay_sats,
+                    "amount_mhc": format_mhc(pay_sats),
                     "fee_sats": fee_sats,
                     "fee_mhc": format_mhc(fee_sats) if fee_sats is not None else None,
                     "from": from_addr,
