@@ -1604,7 +1604,10 @@ function historyCard(t, i){
       <div class="k">${esc(toLabel)}</div>
       <div class="v" title="${esc(toPretty)}">${esc(toPretty)}</div>
       <div class="a">${copyTo}</div>
-      <div class="k">Fee</div>
+      <div class="k">Amount</div>
+      <div class="v"><strong>${esc(amtText)}</strong></div>
+      <div class="a"></div>
+      <div class="k">Network fee</div>
       <div class="v">${esc(fee)}</div>
       <div class="a"></div>
     </div>
@@ -1855,7 +1858,7 @@ async function render(pre){
       ${switcher}
       <label>Balance</label>
       <div class="bal">${s.balance}</div>
-      ${s.balance_cached?'<p class="sub">Cached while node is running.</p>':''}
+      ${s.balance_cached?'<p class="sub">Balance from live node UTXO.</p>':''}
       ${s.mining||s.blocks_found?`<p class="sub sessionStats">Session · ${s.blocks_found||0} blocks · ${s.rewards||"0"}</p>`:`<p class="sub sessionStats" style="display:none"></p>`}
       <div class="row">
         <button class="sm" onclick="go('Receive')">Receive</button>
@@ -2331,7 +2334,9 @@ class DesktopState:
             "listen_port": info.get("listen_port"),
             "balance": balance,
             "balance_cached": bool(
-                (node_running or getattr(c, "_mining", False)) and c._balance_cache_valid
+                (node_running or getattr(c, "_mining", False))
+                and c._balance_cache_valid
+                and int(getattr(c, "_balance_cache_height", -1)) >= 0
             ),
             "address": addr,
             "wallet_exists": c.wallet_exists(),

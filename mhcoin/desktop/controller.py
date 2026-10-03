@@ -91,6 +91,7 @@ class CoreController:
         self._tip_height_hint = 0
         self._balance_cache_sats: int = 0
         self._balance_cache_valid: bool = False
+        self._balance_cache_height: int = -1
         self._recent_cache: list[dict] = []
         self._mine_log: deque[str] = deque(maxlen=500)
         self._mine_log_lock = threading.Lock()
@@ -322,11 +323,14 @@ class CoreController:
     def _invalidate_balance_cache(self) -> None:
         self._balance_cache_sats = 0
         self._balance_cache_valid = False
+        self._balance_cache_height = -1
 
     def _refresh_balance_cache(self, address: str | None = None) -> None:
         """Recompute balance cache for the active (or given) address.
 
         Prefer live NodeRuntime UTXO while the P2P node owns the datadir.
+        Must run on every UI poll — otherwise Overview freezes on a stale
+        total while peers keep finding blocks (e.g. 9000 vs chain 9100).
         """
         try:
             addr = address or self.default_address()
@@ -348,20 +352,24 @@ class CoreController:
             assert rt is not None
             try:
                 with rt.chain._lock:
+                    height = int(rt.chain.height)
                     self._balance_cache_sats = int(rt.chain.utxo.balance_for_pubkey_hash(pkh))
+                self._tip_height_hint = max(0, height)
+                self._balance_cache_height = height
                 self._balance_cache_valid = True
                 return
             except Exception:
                 logger.debug("live balance refresh failed", exc_info=True)
         if self._mining:
-            # Datadir locked by miner — leave cache invalid rather than show
-            # another wallet's stale total.
-            self._invalidate_balance_cache()
+            # Datadir locked by miner without live node — keep last cache if any.
             return
         try:
             with self._io:
                 node = self._get_local()
+                height = int(node.chain.height)
                 self._balance_cache_sats = int(node.chain.utxo.balance_for_pubkey_hash(pkh))
+                self._tip_height_hint = max(0, height)
+                self._balance_cache_height = height
                 self._balance_cache_valid = True
         except Exception:
             self._invalidate_balance_cache()
@@ -516,13 +524,26 @@ class CoreController:
         return max(0, net) if saw else None
 
     def cached_balance_text(self) -> str:
-        """Best-effort balance when the P2P node owns the datadir."""
+        """Best-effort balance when the P2P node owns the datadir.
+
+        Always re-read live UTXO when the node is up so Overview matches the
+        explorer (stale cache previously lagged by mined/received blocks).
+        """
         if self._node is None and not self._mining:
             try:
                 return self.balance_text()
             except Exception:
                 pass
+        # Refresh every poll while live — tip can advance without a local find.
+        try:
+            self._refresh_balance_cache()
+        except Exception:
+            logger.debug("cached_balance refresh failed", exc_info=True)
         if self._balance_cache_valid:
+            return f"{format_mhc(self._balance_cache_sats)} MHC"
+        # Never invent a balance from history while node/mining is up — that
+        # path under-counted (e.g. 9000 vs real UTXO 9100).
+        if self._node is not None or self._mining:
             return f"{format_mhc(self._balance_cache_sats)} MHC"
         hint = self._balance_hint_from_history()
         if hint is not None:
@@ -854,7 +875,7 @@ class CoreController:
     def _hist_key_is_partial(self) -> bool:
         """True when last wallet_history cache was a short-window (non-full) scan."""
         key = self._hist_key
-        # key = ("hist-v3", addr, tip, mem_n, bool(full_chain), int(limit))
+        # key = ("hist-v6", addr, tip, mem_n, bool(full_chain), int(limit))
         return isinstance(key, tuple) and len(key) >= 5 and key[4] is False
 
     def _ensure_history_before_node(self, *, timeout: float = 120.0) -> None:
@@ -1053,25 +1074,12 @@ class CoreController:
         return node.chain, list(node.mempool.list_txs()), None
 
     def wallet_history(self, limit: int = 2000, *, full_chain: bool = True) -> list[TxRow]:
-        """Wallet activity with cache keyed by (address, tip, mempool size)."""
+        """Activity for the *active* wallet only (cache keyed by that address)."""
         try:
             addr = self.default_address()
         except WalletError:
             return []
         pkh = address_to_pubkey_hash(addr, hrp=self.hrp)
-        # All keys in wallet.json — Sent must show even if user switches active wallet.
-        owned_pkh: dict[bytes, str] = {pkh: addr}
-        try:
-            for w in self.list_wallets():
-                a = str(w.get("address") or "")
-                if not a:
-                    continue
-                try:
-                    owned_pkh[address_to_pubkey_hash(a, hrp=self.hrp)] = a
-                except Exception:
-                    continue
-        except Exception:
-            logger.debug("list_wallets for history failed", exc_info=True)
 
         # Serialize against NodeRuntime writers via chain._lock; otherwise hold _io
         # for LocalNode. Never open a second sqlite connection on chain.sqlite.
@@ -1090,7 +1098,7 @@ class CoreController:
             if h < 0:
                 # Fresh datadir (no genesis yet) — mark scan complete so unlock
                 # boot is not stuck on partial forever.
-                key = ("hist-v5-empty", tuple(sorted(owned_pkh.values())), "", 0, True, int(limit))
+                key = ("hist-v6-empty", addr, "", 0, True, int(limit))
                 self._hist_key = key
                 self._hist_rows = []
                 try:
@@ -1100,14 +1108,15 @@ class CoreController:
                 return []
             tip = chain.tip_hash.hex() if chain.tip_hash else ""
             mem_n = len(mempool_txs)
-            key = ("hist-v5", tuple(sorted(owned_pkh.values())), tip, mem_n, bool(full_chain), int(limit))
+            # Per-address cache — switching wallets must not reuse the other history.
+            key = ("hist-v6", addr, tip, mem_n, bool(full_chain), int(limit))
             # Empty rows are a valid cache hit (wallet has no sends/receives yet).
             if self._hist_key == key:
                 return list(self._hist_rows or [])[:limit]
 
             # Classification window (UI limit). Prev-out index always covers the
             # full active chain — otherwise Sent is missed when the spent UTXO
-            # was created outside a short window (_tx_spends_ours → False).
+            # was created outside a short window.
             window_start = 0 if full_chain else max(0, h - 120)
             tx_index: dict[str, object] = {}
             window_blocks: list[tuple[int, object]] = []
@@ -1119,12 +1128,6 @@ class CoreController:
                     tx_index[tx.txid_hex()] = tx
                 if height >= window_start:
                     window_blocks.append((height, block))
-
-            def _out_is_ours(out) -> bool:
-                try:
-                    return out.pubkey_hash() in owned_pkh
-                except Exception:
-                    return False
 
             def _out_is_active(out) -> bool:
                 try:
@@ -1138,23 +1141,16 @@ class CoreController:
                 except Exception:
                     return None
 
-            def _tx_spends_ours(tx) -> bool:
-                """True iff any input spends an outpoint we owned.
-
-                Relies on full-chain tx_index. Missing prev outs must NOT be
-                treated as 'not ours' for windowed scans — that historically
-                dropped Sent (and self-spend-with-no-change vanished entirely).
-                """
+            def _tx_spends_active(tx) -> bool:
+                """True iff any input spends an outpoint of the active wallet."""
                 if tx.is_coinbase():
                     return False
                 for tin in tx.inputs:
                     prev = tx_index.get(tin.prev_txid.hex())
                     if prev is None:
-                        # Should not happen with full-chain index; fail closed
-                        # as 'unknown' → not Sent (avoid false Sent).
                         continue
                     vout = int(tin.prev_vout)
-                    if 0 <= vout < len(prev.outputs) and _out_is_ours(prev.outputs[vout]):
+                    if 0 <= vout < len(prev.outputs) and _out_is_active(prev.outputs[vout]):
                         return True
                 return False
 
@@ -1207,23 +1203,17 @@ class CoreController:
                 except Exception:
                     block_ts = None
                 for tx in block.transactions:
-                    ours = [o for o in tx.outputs if _out_is_ours(o)]
-                    foreign = [o for o in tx.outputs if not _out_is_ours(o)]
-                    to_us = sum(o.value for o in ours)
-                    paid_out = sum(o.value for o in foreign)
-                    spends = _tx_spends_ours(tx)
+                    active_outs = [o for o in tx.outputs if _out_is_active(o)]
+                    other_outs = [o for o in tx.outputs if not _out_is_active(o)]
+                    to_active = sum(int(o.value) for o in active_outs)
+                    paid_away = sum(int(o.value) for o in other_outs)
+                    spends_active = _tx_spends_active(tx)
                     from_a = _from_addrs(tx)
-                    # Prefer from-addrs that are our keys (multi-wallet).
-                    from_ours = [a for a in from_a if a in owned_pkh.values()]
-                    to_ours = [a for a in (_addr_of_out(o) for o in ours) if a]
-                    to_foreign = [a for a in (_addr_of_out(o) for o in foreign) if a]
+                    to_active_addrs = [a for a in (_addr_of_out(o) for o in active_outs) if a]
+                    to_other_addrs = [a for a in (_addr_of_out(o) for o in other_outs) if a]
                     fee = _fee_sats(tx)
 
                     if tx.is_coinbase():
-                        # Mining reward only for the *active* wallet — other
-                        # wallets' coinbases must not leak into this history.
-                        active_outs = [o for o in tx.outputs if _out_is_active(o)]
-                        to_active = sum(o.value for o in active_outs)
                         if to_active > 0:
                             mining_rows.append(
                                 TxRow(
@@ -1234,79 +1224,43 @@ class CoreController:
                                     txid=tx.txid_hex(),
                                     timestamp=block_ts,
                                     from_addrs=["coinbase"],
-                                    to_addrs=[
-                                        a
-                                        for a in (_addr_of_out(o) for o in active_outs)
-                                        if a
-                                    ],
+                                    to_addrs=to_active_addrs or [addr],
                                     fee_sats=0,
                                     confirmations=_confs(height),
                                 )
                             )
                         continue
 
-                    # Sent: spent our key(s). Amount = external payout, else internal
-                    # payout to another of our keys (exclude change back to spenders).
-                    if spends and (paid_out > 0 or to_us > 0):
-                        internal_to = [a for a in to_ours if a not in from_ours]
-                        if paid_out > 0:
-                            sent_amt = paid_out
-                            to_list = to_foreign
-                        else:
-                            sent_amt = sum(
-                                int(o.value)
-                                for o in ours
-                                if _addr_of_out(o) in internal_to
+                    # Active wallet sent: spent our UTXO, value left to others
+                    # (external or another wallet in the same file). Change to
+                    # self is not listed separately.
+                    if spends_active and paid_away > 0:
+                        transfer_rows.append(
+                            TxRow(
+                                kind="Sent",
+                                amount_sats=paid_away,
+                                detail=tx.txid_hex(),
+                                height=height,
+                                txid=tx.txid_hex(),
+                                timestamp=block_ts,
+                                from_addrs=[addr],
+                                to_addrs=to_other_addrs,
+                                fee_sats=fee,
+                                confirmations=_confs(height),
                             )
-                            to_list = internal_to
-                        if sent_amt > 0 and to_list:
-                            transfer_rows.append(
-                                TxRow(
-                                    kind="Sent",
-                                    amount_sats=sent_amt,
-                                    detail=tx.txid_hex(),
-                                    height=height,
-                                    txid=tx.txid_hex(),
-                                    timestamp=block_ts,
-                                    from_addrs=from_ours or from_a or [addr],
-                                    to_addrs=to_list,
-                                    fee_sats=fee,
-                                    confirmations=_confs(height),
-                                )
-                            )
-                        # Mirror internal transfer as Received on destination wallet.
-                        if internal_to and paid_out == 0:
-                            recv_amt = sum(
-                                int(o.value)
-                                for o in ours
-                                if _addr_of_out(o) in internal_to
-                            )
-                            if recv_amt > 0:
-                                transfer_rows.append(
-                                    TxRow(
-                                        kind="Received",
-                                        amount_sats=recv_amt,
-                                        detail=tx.txid_hex(),
-                                        height=height,
-                                        txid=tx.txid_hex() + ":recv",
-                                        timestamp=block_ts,
-                                        from_addrs=from_ours or from_a,
-                                        to_addrs=internal_to,
-                                        fee_sats=0,
-                                        confirmations=_confs(height),
-                                    )
-                                )
-                    elif to_us > 0:
+                        )
+                    elif to_active > 0 and not spends_active:
+                        # Incoming (or payment into this wallet from another).
                         transfer_rows.append(
                             TxRow(
                                 kind="Received",
-                                amount_sats=to_us,
+                                amount_sats=to_active,
                                 detail=tx.txid_hex(),
                                 height=height,
                                 txid=tx.txid_hex(),
                                 timestamp=block_ts,
                                 from_addrs=from_a,
-                                to_addrs=to_ours,
+                                to_addrs=to_active_addrs or [addr],
                                 fee_sats=fee,
                                 confirmations=_confs(height),
                             )
@@ -1316,44 +1270,44 @@ class CoreController:
             for tx in reversed(mempool_txs):
                 if tx.is_coinbase():
                     continue
-                ours = [o for o in tx.outputs if _out_is_ours(o)]
-                foreign = [o for o in tx.outputs if not _out_is_ours(o)]
-                to_us = sum(o.value for o in ours)
-                paid_out = sum(o.value for o in foreign)
-                spends = _tx_spends_ours(tx)
+                active_outs = [o for o in tx.outputs if _out_is_active(o)]
+                other_outs = [o for o in tx.outputs if not _out_is_active(o)]
+                to_active = sum(int(o.value) for o in active_outs)
+                paid_away = sum(int(o.value) for o in other_outs)
+                spends_active = _tx_spends_active(tx)
                 txid = tx.txid_hex()
                 if any(r.txid == txid for r in transfer_rows):
                     continue
                 from_a = _from_addrs(tx)
-                to_ours = [a for a in (_addr_of_out(o) for o in ours) if a]
-                to_foreign = [a for a in (_addr_of_out(o) for o in foreign) if a]
+                to_active_addrs = [a for a in (_addr_of_out(o) for o in active_outs) if a]
+                to_other_addrs = [a for a in (_addr_of_out(o) for o in other_outs) if a]
                 fee = _fee_sats(tx)
-                if spends and paid_out > 0:
+                if spends_active and paid_away > 0:
                     pending.append(
                         TxRow(
                             kind="Sent (pending)",
-                            amount_sats=paid_out,
+                            amount_sats=paid_away,
                             detail=txid,
                             height=None,
                             txid=txid,
                             timestamp=None,
-                            from_addrs=from_a or [addr],
-                            to_addrs=to_foreign,
+                            from_addrs=[addr],
+                            to_addrs=to_other_addrs,
                             fee_sats=fee,
                             confirmations=0,
                         )
                     )
-                elif to_us > 0:
+                elif to_active > 0 and not spends_active:
                     pending.append(
                         TxRow(
                             kind="Received (pending)",
-                            amount_sats=to_us,
+                            amount_sats=to_active,
                             detail=txid,
                             height=None,
                             txid=txid,
                             timestamp=None,
                             from_addrs=from_a,
-                            to_addrs=to_ours,
+                            to_addrs=to_active_addrs or [addr],
                             fee_sats=fee,
                             confirmations=0,
                         )

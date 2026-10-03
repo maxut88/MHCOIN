@@ -202,11 +202,12 @@ def _page(title: str, body: str, *, tip: int | None = None, hero: bool = False) 
   .blocks-side {{
     display: flex; flex-direction: column; gap: .65rem; min-width: 0;
   }}
+  /* Height set by JS to exactly two full BLOCK FOUND cards (peers sits below). */
   .blocks-row .term {{
-    margin: 0; max-height: min(38vh, 360px); overflow: auto;
+    margin: 0; overflow: auto;
     display: flex; flex-direction: column;
   }}
-  .blocks-row .term .term-feed {{ flex: 1; overflow: auto; }}
+  .blocks-row .term .term-feed {{ flex: 1 1 auto; overflow: visible; }}
   .blocks-row > .card {{ margin: 0; min-width: 0; }}
   .blocks-row > .card .table-wrap {{ overflow-x: auto; }}
   .blocks-row > .card table {{ font-size: .74rem; }}
@@ -594,10 +595,20 @@ def _short_hash(h: str | None, n: int = 10) -> str:
     return f"{h[:n]}…{h[-n:]}"
 
 
+def _is_wallet_addr(text: str | None) -> bool:
+    """Bech32 wallet addresses (mhc1… / mhct1…) — always show in full on the site."""
+    if not text:
+        return False
+    s = str(text).strip().lower()
+    return s.startswith("mhc1") or s.startswith("mhct1")
+
+
 def _copyable(text: str | None, *, short: bool = True, href: str | None = None, css: str = "mono") -> str:
     if not text:
         return '<span class="muted">—</span>'
-    shown = _short_hash(text) if short else text
+    # Wallet addresses are never abbreviated (Miner / From / To / Top miners).
+    do_short = bool(short) and not _is_wallet_addr(text)
+    shown = _short_hash(text) if do_short else text
     link = (
         f'<a class="{css}" href="{_esc(href)}" title="{_esc(text)}">{_esc(shown)}</a>'
         if href
@@ -718,7 +729,7 @@ def _txs_table(txs: list[dict[str, Any]], *, empty: str = "No transactions yet."
             f'<td><a href="/block/{t.get("height")}">#{t.get("height")}</a></td>'
             f"<td>{fr_html}</td>"
             f"<td>{to_html}</td>"
-            f'<td><strong class="reward">{_esc(t.get("output_value_mhc"))}</strong> <span class="muted">MHC</span></td>'
+            f'<td><strong class="reward">{_esc(t.get("amount_mhc") or t.get("output_value_mhc"))}</strong> <span class="muted">MHC</span></td>'
             f'<td class="muted">{_esc(fee if fee is not None else "—")}</td>'
             f'<td class="muted nowrap">{_esc(t.get("age") or "—")}</td>'
             f'<td class="muted num-conf">{_esc(t.get("confirmations"))}</td>'
@@ -918,7 +929,7 @@ def _render_home(data: dict[str, Any]) -> bytes:
             "<tr>"
             f"<td>{_copyable(tid, href='/tx/' + str(tid))}</td>"
             f'<td class="num">{_esc(tx.get("size_bytes") or "—")}</td>'
-            f'<td class="num">{_esc(tx.get("output_value_mhc") or tx.get("fee_mhc") or "—")}</td>'
+            f'<td class="num">{_esc(tx.get("amount_mhc") or tx.get("output_value_mhc") or tx.get("fee_mhc") or "—")}</td>'
             "</tr>"
         )
     mempool_html = (
@@ -1082,9 +1093,15 @@ def _render_home(data: dict[str, Any]) -> bytes:
         if (h.length <= 21) return h;
         return h.slice(0,10) + '…' + h.slice(-10);
       }}
+      function isWalletAddr(a) {{
+        if (!a) return false;
+        a = String(a).trim().toLowerCase();
+        return a.indexOf('mhc1') === 0 || a.indexOf('mhct1') === 0;
+      }}
       function copyable(text, href) {{
         if (!text) return '<span class="muted">—</span>';
-        var shown = shortHash(text);
+        // Full wallet addresses everywhere (Miner / From / To); hashes may stay short.
+        var shown = isWalletAddr(text) ? String(text) : shortHash(text);
         var link = href
           ? '<a class="mono" href="' + href + '" title="' + esc(text) + '">' + esc(shown) + '</a>'
           : '<span class="mono" title="' + esc(text) + '">' + esc(shown) + '</span>';
@@ -1092,9 +1109,9 @@ def _render_home(data: dict[str, Any]) -> bytes:
           '<button type="button" class="copy-btn" data-copy="' + esc(text) + '" title="Copy">⎘</button></span>';
       }}
       function shortAddr(a) {{
+        // Kept for compatibility — wallets always returned in full.
         if (!a) return '—';
-        if (a.length <= 21) return a;
-        return a.slice(0,8) + '…' + a.slice(-8);
+        return String(a);
       }}
       function fmtInterval(s) {{
         if (s == null) return '—';
@@ -1104,6 +1121,30 @@ def _render_home(data: dict[str, Any]) -> bytes:
         if (s < 3600) return Math.floor(s/60) + 'm' + nb + (s%60) + 's';
         if (s < 86400) return Math.floor(s/3600) + 'h' + nb + Math.floor((s%3600)/60) + 'm';
         return Math.floor(s/86400) + 'd';
+      }}
+      function fitLiveBlocksTwoCards() {{
+        var term = document.querySelector('.blocks-row .term');
+        var feed = document.getElementById('liveFinds');
+        if (!term || !feed) return;
+        var head = term.querySelector('.term-head');
+        var cards = feed.querySelectorAll('.found');
+        if (!cards.length) {{
+          term.style.height = '';
+          term.style.minHeight = '';
+          term.style.maxHeight = '';
+          return;
+        }}
+        var st = window.getComputedStyle(term);
+        var h = parseFloat(st.paddingTop) + parseFloat(st.paddingBottom);
+        if (head) h += head.offsetHeight;
+        var headSt = head ? window.getComputedStyle(head) : null;
+        if (headSt) h += parseFloat(headSt.marginBottom) || 0;
+        var n = Math.min(2, cards.length);
+        for (var i = 0; i < n; i++) h += cards[i].offsetHeight;
+        h = Math.ceil(h);
+        term.style.height = h + 'px';
+        term.style.minHeight = h + 'px';
+        term.style.maxHeight = h + 'px';
       }}
       function renderFinds(blocks) {{
         var feed = document.getElementById('liveFinds');
@@ -1132,6 +1173,11 @@ def _render_home(data: dict[str, Any]) -> bytes:
             '</div>'
           );
         }}).join('');
+        // After layout: viewport = exactly two full cards; rest scroll inside.
+        requestAnimationFrame(function () {{
+          fitLiveBlocksTwoCards();
+          requestAnimationFrame(fitLiveBlocksTwoCards);
+        }});
       }}
       function fmtHps(hps) {{
         hps = Number(hps) || 0;
@@ -1250,7 +1296,7 @@ def _render_home(data: dict[str, Any]) -> bytes:
             '<td>' + pill + '</td>' +
             '<td><a href="/block/' + esc(t.height) + '">#' + esc(t.height) + '</a></td>' +
             '<td>' + fr + '</td><td>' + to + '</td>' +
-            '<td><strong class="reward">' + esc(t.output_value_mhc) + '</strong> <span class="muted">MHC</span></td>' +
+            '<td><strong class="reward">' + esc(t.amount_mhc || t.output_value_mhc) + '</strong> <span class="muted">MHC</span></td>' +
             '<td class="muted">' + esc(t.fee_mhc != null ? t.fee_mhc : '—') + '</td>' +
             '<td class="muted nowrap">' + esc(t.age || '—') + '</td>' +
             '<td class="muted num-conf">' + esc(t.confirmations) + '</td></tr>';
@@ -1352,6 +1398,7 @@ async function tick() {{
           var meta = document.getElementById('hdrMeta');
           if (meta && tip != null) meta.textContent = 'Live mainnet · read-only · tip #' + tip;
           if (d.live_finds) renderFinds(d.live_finds);
+          else fitLiveBlocksTwoCards();
           if (d.recent) {{
             var bel = document.getElementById('latestBlocks');
             var cur = bel ? Number(bel.dataset.page || 1) : 1;
@@ -1380,6 +1427,10 @@ async function tick() {{
       }}
       setInterval(tick, 3000);
       tick();
+      window.addEventListener('resize', function () {{
+        requestAnimationFrame(fitLiveBlocksTwoCards);
+      }});
+      requestAnimationFrame(fitLiveBlocksTwoCards);
     }})();
     </script>
     """
@@ -1454,7 +1505,7 @@ def _render_block(b: dict[str, Any]) -> bytes:
             f'<td class="num">{i}</td>'
             f"<td>{_copyable(tid, href='/tx/' + tid)}</td>"
             f'<td class="muted">{label}</td>'
-            f'<td class="num"><strong class="reward">{_esc(tx.get("output_value_mhc"))}</strong></td>'
+            f'<td class="num"><strong class="reward">{_esc(tx.get("amount_mhc") or tx.get("output_value_mhc"))}</strong></td>'
             f'<td class="num muted">{fee_s}</td>'
             f'<td class="num muted">{_esc(rate_s)}</td>'
             "</tr>"
@@ -1525,13 +1576,26 @@ def _render_tx(t: dict[str, Any]) -> bytes:
                 + _copyable(addr, href=f"/address/{addr}", short=False)
                 + f" <strong>{_esc(val)} MHC</strong></li>"
             )
+    # Sender = first non-coinbase input address (for change labeling).
+    from_addr = None
+    for i in t.get("inputs") or []:
+        if not i.get("coinbase") and i.get("address"):
+            from_addr = i.get("address")
+            break
     outs = []
+    change_mhc = None
     for o in t.get("outputs") or []:
         addr = o.get("address") or "?"
+        tag = ""
+        if not coinbase and from_addr and addr == from_addr:
+            tag = " <span class='muted'>(change back)</span>"
+            change_mhc = o.get("value_mhc")
+        elif not coinbase and from_addr and addr != from_addr:
+            tag = " <span class='muted'>(payment)</span>"
         outs.append(
             "<li>"
             + _copyable(addr, href=f"/address/{addr}", short=False)
-            + f" <strong class='reward'>{_esc(o.get('value_mhc'))} MHC</strong></li>"
+            + f" <strong class='reward'>{_esc(o.get('value_mhc'))} MHC</strong>{tag}</li>"
         )
     conf = t.get("confirmations")
     kind = "Mined reward" if coinbase else "Transfer"
@@ -1545,12 +1609,18 @@ def _render_tx(t: dict[str, Any]) -> bytes:
     fee_row = ""
     if not coinbase:
         fee_row = f"""
-        <div class="stat"><div class="lbl">Fee</div>
+        <div class="stat"><div class="lbl">Network fee</div>
           <div class="val">{_esc(t.get("fee_mhc") or "—")} MHC</div></div>
         <div class="stat"><div class="lbl">Fee rate</div>
           <div class="val">{_esc(t.get("fee_rate") or "—")}</div></div>
 """
+        if change_mhc is not None:
+            fee_row += f"""
+        <div class="stat"><div class="lbl">Change back</div>
+          <div class="val">{_esc(change_mhc)} MHC</div></div>
+"""
     tip = _inferred_tip(height, conf)
+    amt_lbl = "Reward" if coinbase else "Sent to recipient"
     body = f"""
     <div class="shell">
     <div class="card">
@@ -1559,8 +1629,8 @@ def _render_tx(t: dict[str, Any]) -> bytes:
         <span class="muted">{included}</span>
       </div>
       <div class="stats">
-        <div class="stat"><div class="lbl">{"Reward" if coinbase else "Amount"}</div>
-          <div class="val"><strong class="reward">{_esc(t.get("output_value_mhc"))}</strong> MHC</div></div>
+        <div class="stat"><div class="lbl">{amt_lbl}</div>
+          <div class="val"><strong class="reward">{_esc(t.get("amount_mhc") or t.get("output_value_mhc"))}</strong> MHC</div></div>
         {fee_row}
         <div class="stat"><div class="lbl">Confirmations</div>
           <div class="val">{_esc(conf if conf is not None else "—")}</div></div>
@@ -1569,6 +1639,10 @@ def _render_tx(t: dict[str, Any]) -> bytes:
         <div class="stat"><div class="lbl">Size</div>
           <div class="val">{_esc(t.get("size_bytes"))} bytes</div></div>
       </div>
+      <p class="muted" style="margin:.75rem 0 0;font-size:.85rem">
+        {"Block reward credited to miner." if coinbase else
+         "You sent the payment amount to the recipient. Change returns to your wallet. Only payment + network fee leave your balance."}
+      </p>
       <div class="kv" style="margin-top:1rem">
         <div>Txid</div><div>{_copyable(t.get("txid"), short=False)}</div>
         <div>Block</div><div>{('<a href="/block/'+_esc(height)+'">#'+_esc(height)+'</a> · '+_esc(t.get("time_utc") or "")) if height is not None else "—"}</div>
@@ -1613,10 +1687,17 @@ def _render_address(a: dict[str, Any]) -> bytes:
         <div>Address</div><div>{_copyable(addr, short=False)}</div>
         <div>Balance</div><div><strong class="reward">{_esc(a.get("balance_mhc") or "0")}</strong> MHC
           <span class="muted">({_esc(a.get("utxo_count") or 0)} UTXO)</span></div>
-        <div>Received</div><div>{_esc(a.get("total_received_mhc") or "0")} MHC</div>
-        <div>Sent</div><div>{_esc(a.get("total_sent_mhc") or "0")} MHC</div>
+        <div>Received</div><div>{_esc(a.get("total_received_mhc") or "0")} MHC
+          <span class="muted"> · mining + incoming (no change)</span></div>
+        <div>Sent to others</div><div><strong>{_esc(a.get("total_sent_mhc") or "0")}</strong> MHC
+          <span class="muted"> · payments only</span></div>
+        <div>Network fees</div><div>{_esc(a.get("total_fees_mhc") or "0")} MHC</div>
         <div>Outputs</div><div>{_esc(a.get("received_count"))}{_esc(" (truncated)" if a.get("truncated") else "")}</div>
       </div>
+      <p class="muted" style="margin:.75rem 0 0;font-size:.85rem">
+        Balance ≈ Received − Sent − Fees.
+        A send spends a larger UTXO, pays the recipient, and returns change to you — change is not “Sent”.
+      </p>
     </div>
     <div class="card">
       <div class="card-head">

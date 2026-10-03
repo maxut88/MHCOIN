@@ -19,7 +19,7 @@ Independent Proof-of-Work blockchain. **Not** a Bitcoin Core fork.
 | Ledger | UTXO |
 | Mainnet P2P port | **8333** |
 | Mainnet magic | `4D48434E` (`MHCN`) |
-| Software | 0.3.4 |
+| Software | 0.3.5 |
 
 ## Mainnet identity (frozen)
 
@@ -52,8 +52,8 @@ Download binaries from **[GitHub Releases](https://github.com/maxut88/MHCOIN/rel
 
 ### Linux
 
-1. Download `MHCOIN-Core-0.3.4-x86_64.AppImage` **or** `MHCOIN-Core-0.3.4-linux-x86_64.tar.gz`.
-2. AppImage: `chmod +x MHCOIN-Core-0.3.4-x86_64.AppImage && ./MHCOIN-Core-0.3.4-x86_64.AppImage`
+1. Download `MHCOIN-Core-0.3.5-x86_64.AppImage` **or** `MHCOIN-Core-0.3.5-linux-x86_64.tar.gz`.
+2. AppImage: `chmod +x MHCOIN-Core-0.3.5-x86_64.AppImage && ./MHCOIN-Core-0.3.5-x86_64.AppImage`
 3. tarball: extract and run the bundled `MHCOIN-Core` binary.
 4. Allow sync from genesis, create or open a wallet, then Receive / Send / Mining.
 
@@ -65,7 +65,7 @@ export MHCOIN_CONNECT=176.38.3.168:8333
 
 ### macOS
 
-1. Download `MHCOIN-Core-0.3.4-macos.dmg`.
+1. Download `MHCOIN-Core-0.3.5-macos.dmg`.
 2. Open the DMG and install **MHCOIN Core**.
 3. Launch, sync from genesis, create/open a wallet.
 
@@ -73,7 +73,7 @@ Apple Silicon: current Release builds are native (`macos-14` / arm64).
 
 ### Windows
 
-1. Download `MHCOIN-Core-0.3.4-windows-x86_64.exe`.
+1. Download `MHCOIN-Core-0.3.5-windows-x86_64.exe`.
 2. Launch **MHCOIN Core**, sync from genesis, create/open a wallet.
 
 Wallet data defaults to `~/.mhcoin/mainnet/` (Windows: `%USERPROFILE%\.mhcoin\mainnet\`).
