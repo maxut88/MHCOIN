@@ -31,6 +31,25 @@ from mhcoin.utxo import UTXOSet
 
 logger = logging.getLogger("mhcoin.chain")
 
+
+def _sqlite_retry(fn, *, attempts: int = 12, base_delay: float = 0.05):
+    """Retry on transient SQLite 'database is locked' (WAL + concurrent readers)."""
+    import time
+    last = None
+    for i in range(attempts):
+        try:
+            return fn()
+        except sqlite3.OperationalError as e:
+            last = e
+            msg = str(e).lower()
+            if "locked" not in msg and "busy" not in msg:
+                raise
+            if i + 1 >= attempts:
+                raise
+            time.sleep(base_delay * (1.0 + 0.35 * i))
+    raise last  # pragma: no cover
+
+
 SCHEMA_VERSION = 2
 STATUS_SIDE = 0
 STATUS_ACTIVE = 1
@@ -89,7 +108,7 @@ class Blockchain:
             )
             try:
                 self._db.execute("PRAGMA journal_mode=WAL")
-                self._db.execute("PRAGMA busy_timeout=5000")
+                self._db.execute("PRAGMA busy_timeout=30000")
             except sqlite3.Error:
                 pass
             self._closed = False
@@ -909,17 +928,19 @@ class Blockchain:
 
     def connect_block(self, block: Block) -> int:
         """Tip-extension only (legacy API). Raises if block does not extend tip."""
-        with chain_disk_lock(self.data_dir):
-            with self._lock:
-                if self._height < 0:
-                    raise ChainError("genesis required first")
-                assert self._tip_hash is not None
-                if block.header.previous_block_hash != self._tip_hash:
-                    raise ChainError("block does not extend active tip")
-                result = self._accept_block_locked(block, mempool=None)
-                if result.orphan:
-                    raise ChainError("unexpected orphan on tip connect")
-                return result.height
+        def _do() -> int:
+            with chain_disk_lock(self.data_dir):
+                with self._lock:
+                    if self._height < 0:
+                        raise ChainError("genesis required first")
+                    assert self._tip_hash is not None
+                    if block.header.previous_block_hash != self._tip_hash:
+                        raise ChainError("block does not extend active tip")
+                    result = self._accept_block_locked(block, mempool=None)
+                    if result.orphan:
+                        raise ChainError("unexpected orphan on tip connect")
+                    return result.height
+        return _sqlite_retry(_do)
 
     def accept_block(
         self,
@@ -930,9 +951,11 @@ class Blockchain:
         """
         Full Stage 6 acceptance: store valid blocks, reorg on greater work.
         """
-        with chain_disk_lock(self.data_dir):
-            with self._lock:
-                return self._accept_block_locked(block, mempool=mempool)
+        def _do() -> AcceptResult:
+            with chain_disk_lock(self.data_dir):
+                with self._lock:
+                    return self._accept_block_locked(block, mempool=mempool)
+        return _sqlite_retry(_do)
 
     def _accept_block_locked(
         self, block: Block, *, mempool: Mempool | None

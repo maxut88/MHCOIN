@@ -49,6 +49,11 @@ class UTXOSet:
         if path is not None:
             path.parent.mkdir(parents=True, exist_ok=True)
             self._conn = sqlite3.connect(str(path), check_same_thread=False)
+            try:
+                self._conn.execute("PRAGMA journal_mode=WAL")
+                self._conn.execute("PRAGMA busy_timeout=30000")
+            except sqlite3.Error:
+                pass
             self._conn.execute(
                 """
                 CREATE TABLE IF NOT EXISTS utxo (

@@ -45,13 +45,20 @@ def _logo_html(*, size_class: str = "") -> str:
     )
 
 
-def _mint_mark(*, title: str = "Mined") -> str:
+def _mint_mark(*, title: str = "MHC Mined") -> str:
     """Tiny MHCOIN coin mark for mined / minted rows."""
     return (
         f'<span class="mint" title="{_esc(title)}">'
         f'<span class="mint-coin">{_LOGO_SVG_M}</span>'
         f"</span>"
     )
+
+
+def _type_pill(coinbase: bool) -> str:
+    """Site-wide type badge — green MHC Mined (Live Blocks green) or wrapped Transfer."""
+    if coinbase:
+        return '<span class="pill minted">MHC Mined</span>'
+    return '<span class="pill xfer">Transfer</span>'
 
 
 def _short_addr(addr: str | None, n: int = 10) -> str:
@@ -202,7 +209,7 @@ def _page(title: str, body: str, *, tip: int | None = None, hero: bool = False) 
   .blocks-side {{
     display: flex; flex-direction: column; gap: .65rem; min-width: 0;
   }}
-  /* Height set by JS to exactly two full BLOCK FOUND cards (peers sits below). */
+  /* Height set by JS to exactly two full MHC Mined cards (peers sits below). */
   .blocks-row .term {{
     margin: 0; overflow: auto;
     display: flex; flex-direction: column;
@@ -269,11 +276,13 @@ def _page(title: str, body: str, *, tip: int | None = None, hero: bool = False) 
   }}
   .mint-coin svg {{ width: 58%; height: 58%; display: block; }}
   .pill {{
-    display: inline-flex; align-items: center; padding: .12rem .45rem; border-radius: 999px;
-    font-size: .72rem; font-weight: 700; background: #111418; color: #fff; white-space: nowrap;
+    display: inline-flex; align-items: center; padding: .16rem .55rem; border-radius: 999px;
+    font-size: .72rem; font-weight: 800; color: #fff; white-space: nowrap;
+    letter-spacing: .02em;
   }}
-  .pill.minted {{ background: #0f766e; }}
-  .pill.xfer {{ background: #1f2937; }}
+  /* Same green as Live Blocks (.found .title / .reward) */
+  .pill.minted {{ background: #16a34a; box-shadow: 0 0 0 1px rgba(22,163,74,.25); }}
+  .pill.xfer {{ background: #0f766e; box-shadow: 0 0 0 1px rgba(15,118,110,.22); }}
   .alert {{
     border: 1px solid #fcd34d; background: #fffbeb; color: #92400e;
     border-radius: 12px; padding: .85rem 1rem; margin: 0 0 1rem; font-size: .92rem;
@@ -319,7 +328,20 @@ def _page(title: str, body: str, *, tip: int | None = None, hero: bool = False) 
   .mono {{ font-family: var(--mono); font-size: .72rem; word-break: break-all; }}
   .nowrap {{ white-space: nowrap; }}
   th.num, td.num {{ text-align: center; white-space: nowrap; }}
-  th.num-conf, td.num-conf {{ text-align: center; width: 1%; white-space: nowrap; }}
+  th.num-conf, td.num-conf {{
+    text-align: center; width: 1%; max-width: 3.25rem; white-space: nowrap;
+    padding-left: .25rem; padding-right: .25rem;
+  }}
+  th.hash-col, td.hash-col {{
+    width: 38%; min-width: 16rem; max-width: 42rem;
+  }}
+  td.hash-col .copy-wrap {{
+    display: flex; align-items: flex-start; gap: .35rem; max-width: 100%;
+  }}
+  td.hash-col .mono {{
+    word-break: break-all; overflow-wrap: anywhere; line-height: 1.35;
+  }}
+  td.hash-col .copy-btn {{ flex-shrink: 0; margin-top: .1rem; }}
   .muted {{ color: var(--muted); }}
   .err {{ color: #b42318; }}
   .ok {{ color: #0f766e; font-weight: 650; }}
@@ -677,11 +699,12 @@ def _blocks_table(blocks: list[dict[str, Any]]) -> str:
         )
         rows.append(
             "<tr>"
-            f'<td class="num"><span class="row-ico">{_mint_mark(title="Block mined")}'
+            f'<td class="num"><span class="row-ico">{_mint_mark(title="MHC Mined")}'
             f'<a href="/block/{h}"><strong>{h}</strong></a></span></td>'
-            f'<td>{_copyable(b.get("hash"), href="/block/" + str(b.get("hash")))}</td>'
+            f'<td class="hash-col">{_copyable(b.get("hash"), short=False, href="/block/" + str(b.get("hash")))}</td>'
             f'<td class="num">{b.get("tx_count")}</td>'
-            f'<td class="num"><strong class="reward">{_esc(b.get("reward_mhc") or "—")}</strong> <span class="muted">MHC</span></td>'
+            f'<td class="num"><strong class="reward">{_esc(b.get("reward_mhc") or "—")} MHC</strong></td>'
+            f"<td>{_type_pill(True)}</td>"
             f'<td class="muted nowrap num">{_esc(_fmt_interval(b.get("interval_seconds")))}</td>'
             f'<td class="muted nowrap num">{_esc(b.get("age") or "—")}</td>'
             f"<td>{miner_html}</td>"
@@ -691,8 +714,8 @@ def _blocks_table(blocks: list[dict[str, Any]]) -> str:
     return f"""
     <div class="table-wrap"><table>
       <tr>
-        <th class="num">Height</th><th>Hash</th><th class="num">Txs</th><th class="num">Reward</th>
-        <th class="num">Time</th><th class="num">Age</th><th>Miner</th><th class="num-conf">Confirmations</th>
+        <th class="num">Height</th><th class="hash-col">Hash</th><th class="num">Txs</th><th class="num">Reward</th><th>Type</th>
+        <th class="num">Time</th><th class="num">Age</th><th>Miner</th><th class="num-conf" title="Confirmations">Conf</th>
       </tr>
       {"".join(rows)}
     </table></div>
@@ -705,12 +728,9 @@ def _txs_table(txs: list[dict[str, Any]], *, empty: str = "No transactions yet."
     rows = []
     for t in txs:
         cb = bool(t.get("coinbase"))
-        mark = _mint_mark(title="Mined reward" if cb else "Transfer")
-        pill = (
-            '<span class="pill minted">Mined</span>'
-            if cb
-            else '<span class="pill xfer">Transfer</span>'
-        )
+        mark = _mint_mark(title="MHC Mined" if cb else "Transfer")
+        pill = _type_pill(cb)
+
         fr = t.get("from")
         to = t.get("to")
         if fr == "coinbase":
@@ -729,7 +749,7 @@ def _txs_table(txs: list[dict[str, Any]], *, empty: str = "No transactions yet."
             f'<td><a href="/block/{t.get("height")}">#{t.get("height")}</a></td>'
             f"<td>{fr_html}</td>"
             f"<td>{to_html}</td>"
-            f'<td><strong class="reward">{_esc(t.get("amount_mhc") or t.get("output_value_mhc"))}</strong> <span class="muted">MHC</span></td>'
+            f'<td><strong class="reward">{_esc(t.get("amount_mhc") or t.get("output_value_mhc"))} MHC</strong></td>'
             f'<td class="muted">{_esc(fee if fee is not None else "—")}</td>'
             f'<td class="muted nowrap">{_esc(t.get("age") or "—")}</td>'
             f'<td class="muted num-conf">{_esc(t.get("confirmations"))}</td>'
@@ -769,7 +789,7 @@ def _found_terminal(blocks: list[dict[str, Any]]) -> str:
             "<div class='found' data-height='"
             + _esc(h)
             + "'>"
-            "<div class='title'>▸ BLOCK FOUND</div>"
+            "<div class='title'>▸ MHC Mined</div>"
             "<div>  <span class='k'>height</span>   <span class='h'><a href='/block/"
             + _esc(h)
             + "'>#"
@@ -1098,10 +1118,10 @@ def _render_home(data: dict[str, Any]) -> bytes:
         a = String(a).trim().toLowerCase();
         return a.indexOf('mhc1') === 0 || a.indexOf('mhct1') === 0;
       }}
-      function copyable(text, href) {{
+      function copyable(text, href, full) {{
         if (!text) return '<span class="muted">—</span>';
-        // Full wallet addresses everywhere (Miner / From / To); hashes may stay short.
-        var shown = isWalletAddr(text) ? String(text) : shortHash(text);
+        // Full wallet addresses everywhere; block hashes use full=true.
+        var shown = (full || isWalletAddr(text)) ? String(text) : shortHash(text);
         var link = href
           ? '<a class="mono" href="' + href + '" title="' + esc(text) + '">' + esc(shown) + '</a>'
           : '<span class="mono" title="' + esc(text) + '">' + esc(shown) + '</span>';
@@ -1163,7 +1183,7 @@ def _render_home(data: dict[str, Any]) -> bytes:
           var sessionTxt = sessionN + ' blocks · ' + sessionRew.toFixed(8) + ' MHC';
           return (
             '<div class="found" data-height="' + esc(b.height) + '">' +
-            '<div class="title">▸ BLOCK FOUND</div>' +
+            '<div class="title">▸ MHC Mined</div>' +
             '<div>  <span class="k">height</span>   <span class="h"><a href="/block/' + esc(b.height) + '">#' + esc(b.height) + '</a></span></div>' +
             '<div>  <span class="k">hash</span>     <span class="hash"><a href="/block/' + esc(b.hash) + '">' + esc(b.hash) + '</a></span></div>' +
             '<div>  <span class="k">reward</span>   <span class="reward">' + esc(b.reward_mhc || '—') + ' MHC</span></div>' +
@@ -1229,16 +1249,17 @@ def _render_home(data: dict[str, Any]) -> bytes:
         var rows = blocks.map(function(b) {{
           var miner = b.miner ? copyable(b.miner, '/address/' + encodeURIComponent(b.miner)) : '<span class="muted">—</span>';
           return '<tr>' +
-            '<td class="num"><span class="row-ico">' + mintMark('Block mined') + '<a href="/block/' + esc(b.height) + '"><strong>' + esc(b.height) + '</strong></a></span></td>' +
-            '<td>' + copyable(b.hash, '/block/' + encodeURIComponent(b.hash)) + '</td>' +
+            '<td class="num"><span class="row-ico">' + mintMark('MHC Mined') + '<a href="/block/' + esc(b.height) + '"><strong>' + esc(b.height) + '</strong></a></span></td>' +
+            '<td class="hash-col">' + copyable(b.hash, '/block/' + encodeURIComponent(b.hash), true) + '</td>' +
             '<td class="num">' + esc(b.tx_count) + '</td>' +
-            '<td class="num"><strong class="reward">' + esc(b.reward_mhc || '—') + '</strong> <span class="muted">MHC</span></td>' +
+            '<td class="num"><strong class="reward">' + esc(b.reward_mhc || '—') + ' MHC</strong></td>' +
+            '<td><span class="pill minted">MHC Mined</span></td>' +
             '<td class="muted nowrap num">' + esc(fmtInterval(b.interval_seconds)) + '</td>' +
             '<td class="muted nowrap num">' + esc(b.age || '—') + '</td>' +
             '<td>' + miner + '</td>' +
             '<td class="muted num-conf">' + esc(b.confirmations) + '</td></tr>';
         }}).join('');
-        el.innerHTML = '<div class="table-wrap"><table><tr><th class="num">Height</th><th>Hash</th><th class="num">Txs</th><th class="num">Reward</th><th class="num">Time</th><th class="num">Age</th><th>Miner</th><th class="num-conf">Confirmations</th></tr>' + rows + '</table></div>';
+        el.innerHTML = '<div class="table-wrap"><table><tr><th class="num">Height</th><th class="hash-col">Hash</th><th class="num">Txs</th><th class="num">Reward</th><th>Type</th><th class="num">Time</th><th class="num">Age</th><th>Miner</th><th class="num-conf" title="Confirmations">Conf</th></tr>' + rows + '</table></div>';
       }}
       function blocksPagerHtml(page, totalPages) {{
         page = Number(page) || 1;
@@ -1286,17 +1307,17 @@ def _render_home(data: dict[str, Any]) -> bytes:
         }}
         var rows = txs.map(function(t) {{
           var cb = !!t.coinbase;
-          var pill = cb ? '<span class="pill minted">Mined</span>' : '<span class="pill xfer">Transfer</span>';
+          var pill = cb ? '<span class="pill minted">MHC Mined</span>' : '<span class="pill xfer">Transfer</span>';
           var fr = t.from === 'coinbase' ? '<span class="muted">coinbase</span>'
             : (t.from ? copyable(t.from, '/address/' + encodeURIComponent(t.from)) : '<span class="muted">—</span>');
           var to = t.to ? copyable(t.to, '/address/' + encodeURIComponent(t.to)) : '<span class="muted">—</span>';
-          var mark = mintMark(cb ? 'Mined reward' : 'Transfer');
+          var mark = mintMark(cb ? 'MHC Mined' : 'Transfer');
           return '<tr>' +
             '<td><span class="row-ico">' + mark + copyable(t.txid, '/tx/' + encodeURIComponent(t.txid)) + '</span></td>' +
             '<td>' + pill + '</td>' +
             '<td><a href="/block/' + esc(t.height) + '">#' + esc(t.height) + '</a></td>' +
             '<td>' + fr + '</td><td>' + to + '</td>' +
-            '<td><strong class="reward">' + esc(t.amount_mhc || t.output_value_mhc) + '</strong> <span class="muted">MHC</span></td>' +
+            '<td><strong class="reward">' + esc(t.amount_mhc || t.output_value_mhc) + ' MHC</strong></td>' +
             '<td class="muted">' + esc(t.fee_mhc != null ? t.fee_mhc : '—') + '</td>' +
             '<td class="muted nowrap">' + esc(t.age || '—') + '</td>' +
             '<td class="muted num-conf">' + esc(t.confirmations) + '</td></tr>';
@@ -1495,7 +1516,6 @@ def _render_block(b: dict[str, Any]) -> bytes:
     txs = []
     for i, tx in enumerate(b.get("transactions") or []):
         tid = tx.get("txid") or ""
-        label = "Mined" if tx.get("coinbase") else "Transfer"
         fee = tx.get("fee_mhc")
         fee_s = f'{_esc(fee)}' if fee is not None else "—"
         rate = tx.get("fee_per_byte")
@@ -1504,7 +1524,7 @@ def _render_block(b: dict[str, Any]) -> bytes:
             "<tr>"
             f'<td class="num">{i}</td>'
             f"<td>{_copyable(tid, href='/tx/' + tid)}</td>"
-            f'<td class="muted">{label}</td>'
+            f"<td>{_type_pill(bool(tx.get('coinbase')))}</td>"
             f'<td class="num"><strong class="reward">{_esc(tx.get("amount_mhc") or tx.get("output_value_mhc"))}</strong></td>'
             f'<td class="num muted">{fee_s}</td>'
             f'<td class="num muted">{_esc(rate_s)}</td>'
@@ -1512,9 +1532,10 @@ def _render_block(b: dict[str, Any]) -> bytes:
         )
     if not txs:
         for i, tid in enumerate(b.get("txids") or []):
+            pill = _type_pill(i == 0)
             txs.append(
                 f'<tr><td class="num">{i}</td><td>{_copyable(tid, href="/tx/" + tid)}</td>'
-                f'<td class="muted">{"Mined" if i == 0 else ""}</td>'
+                f"<td>{pill}</td>"
                 f'<td></td><td></td><td></td></tr>'
             )
 
@@ -1537,7 +1558,7 @@ def _render_block(b: dict[str, Any]) -> bytes:
         <div>Merkle root</div><div>{_copyable(b.get("merkle_root"), short=False)}</div>
         <div>Time</div><div>{_esc(b.get("time_utc") or b.get("timestamp"))} <span class="muted">({_esc(b.get("age") or "—")} ago)</span></div>
         <div>Miner</div><div>{_copyable(miner, href="/address/" + str(miner), short=False) if miner else "—"}</div>
-        <div>Reward</div><div><strong class="reward">{_esc(b.get("reward_mhc") or "—")}</strong> MHC</div>
+        <div>Reward</div><div><strong class="reward">{_esc(b.get("reward_mhc") or "—")} MHC</strong></div>
         <div>Difficulty</div><div>{_esc(b.get("difficulty_display") or "—")} <span class="muted">({_esc(b.get("bits") or "")})</span></div>
         <div>Target</div><div class="mono">{_esc(b.get("target_short") or b.get("target") or "—")}</div>
         <div>Nonce</div><div class="mono">{_esc(b.get("nonce"))}</div>
@@ -1598,7 +1619,6 @@ def _render_tx(t: dict[str, Any]) -> bytes:
             + f" <strong class='reward'>{_esc(o.get('value_mhc'))} MHC</strong>{tag}</li>"
         )
     conf = t.get("confirmations")
-    kind = "Mined reward" if coinbase else "Transfer"
     badge = f'<span class="badge">{conf} confirmations</span>' if conf else ""
     height = t.get("block_height")
     included = (
@@ -1609,7 +1629,7 @@ def _render_tx(t: dict[str, Any]) -> bytes:
     fee_row = ""
     if not coinbase:
         fee_row = f"""
-        <div class="stat"><div class="lbl">Network fee</div>
+        <div class="stat"><div class="lbl">Fee</div>
           <div class="val">{_esc(t.get("fee_mhc") or "—")} MHC</div></div>
         <div class="stat"><div class="lbl">Fee rate</div>
           <div class="val">{_esc(t.get("fee_rate") or "—")}</div></div>
@@ -1625,12 +1645,12 @@ def _render_tx(t: dict[str, Any]) -> bytes:
     <div class="shell">
     <div class="card">
       <div class="card-head">
-        <h1>{kind} {badge}</h1>
+        <h1>{_type_pill(coinbase)} {badge}</h1>
         <span class="muted">{included}</span>
       </div>
       <div class="stats">
         <div class="stat"><div class="lbl">{amt_lbl}</div>
-          <div class="val"><strong class="reward">{_esc(t.get("amount_mhc") or t.get("output_value_mhc"))}</strong> MHC</div></div>
+          <div class="val"><strong class="reward">{_esc(t.get("amount_mhc") or t.get("output_value_mhc"))} MHC</strong></div></div>
         {fee_row}
         <div class="stat"><div class="lbl">Confirmations</div>
           <div class="val">{_esc(conf if conf is not None else "—")}</div></div>
@@ -1667,14 +1687,14 @@ def _render_address(a: dict[str, Any]) -> bytes:
     for o in a.get("outputs") or []:
         rows.append(
             "<tr>"
-            f'<td class="num"><span class="row-ico">{_mint_mark(title="mined" if o.get("coinbase") else "transfer")}'
+            f'<td class="num"><span class="row-ico">{_mint_mark(title="MHC Mined" if o.get("coinbase") else "Transfer")}'
             f'<a href="/block/{o.get("height")}">{o.get("height")}</a></span></td>'
             f'<td>{_copyable(o.get("txid"), href="/tx/" + str(o.get("txid")))}</td>'
             f'<td class="num">{o.get("vout")}</td>'
             f'<td class="num"><strong class="reward">{_esc(o.get("value_mhc"))}</strong></td>'
             f'<td class="muted nowrap num">{_esc(o.get("age") or "")}</td>'
             f'<td class="num-conf">{_esc(o.get("confirmations"))}</td>'
-            f'<td class="muted">{"mined" if o.get("coinbase") else "transfer"}</td>'
+            f"<td>{_type_pill(bool(o.get('coinbase')))}</td>"
             "</tr>"
         )
     addr = a.get("address")
@@ -1685,7 +1705,7 @@ def _render_address(a: dict[str, Any]) -> bytes:
       <h1><span class="row-ico">{_mint_mark(title="Wallet")} Wallet</span></h1>
       <div class="kv">
         <div>Address</div><div>{_copyable(addr, short=False)}</div>
-        <div>Balance</div><div><strong class="reward">{_esc(a.get("balance_mhc") or "0")}</strong> MHC
+        <div>Balance</div><div><strong class="reward">{_esc(a.get("balance_mhc") or "0")} MHC</strong>
           <span class="muted">({_esc(a.get("utxo_count") or 0)} UTXO)</span></div>
         <div>Received</div><div>{_esc(a.get("total_received_mhc") or "0")} MHC
           <span class="muted"> · mining + incoming (no change)</span></div>

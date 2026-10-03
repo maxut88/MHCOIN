@@ -426,7 +426,7 @@ def block_get(block_hash: str, network: str | None, data_dir: str | None) -> Non
 
 @cli.group()
 def mining() -> None:
-    """Mining (solo PoW)."""
+    """Mining (live P2P on mainnet; offline on localnet/regtest)."""
 
 
 @mining.command("mine")
@@ -434,13 +434,21 @@ def mining() -> None:
 @click.option("--password", default=None)
 @click.option("--data-dir", default=None, type=click.Path())
 @click.option("--address", default=None, help="Reward address (default: wallet default)")
+@click.option(
+    "--connect",
+    multiple=True,
+    help="P2P host:port (repeatable). Default: built-in mainnet seeds.",
+)
+@click.option("--offline", is_flag=True, help="Mine only on local datadir (no P2P broadcast)")
 def mining_mine(
     network: str | None,
     password: str | None,
     data_dir: str | None,
     address: str | None,
+    connect: tuple[str, ...],
+    offline: bool,
 ) -> None:
-    """Mine exactly one block (reward → --address or default wallet)."""
+    """Mine exactly one block on the live network (broadcast to peers)."""
     from mhcoin.mining.miner import SoloMiner
     from mhcoin.wallet.addresses import validate_address
 
@@ -469,6 +477,8 @@ def mining_mine(
         network=paths.network,
         hrp=paths.hrp,
         address=addr,
+        connect=list(connect) if connect else None,
+        offline=offline,
     )
     try:
         miner.ensure_chain()
@@ -487,16 +497,32 @@ def mining_mine(
 @click.option("--network", default=None, help="localnet | testnet | mainnet | regtest")
 @click.option("--data-dir", default=None, type=click.Path(), help="Chain/wallet data directory")
 @click.option("--blocks", default=None, type=int, help="Stop after N found blocks (default: run until Ctrl+C)")
+@click.option(
+    "--connect",
+    multiple=True,
+    help="P2P host:port (repeatable). Default: built-in mainnet seeds.",
+)
+@click.option(
+    "--offline",
+    is_flag=True,
+    help="Local-only mining (no P2P). Not for mainnet competition.",
+)
 def mining_start(
     address: str,
     network: str | None,
     data_dir: str | None,
     blocks: int | None,
+    connect: tuple[str, ...],
+    offline: bool,
 ) -> None:
-    """Continuous solo mining to --address. No extra config needed.
+    """Continuous live mining to --address (sync + broadcast like Desktop).
+
+    On mainnet this connects to seeds, syncs the tip, mines, and announces
+    found blocks to peers so everyone races the same chain.
 
     Example:
       mhcoin mining start --address mhc1...
+      mhcoin mining start --address mhc1... --network mainnet
     """
     from mhcoin.mining.miner import SoloMiner
     from mhcoin.wallet.addresses import validate_address
@@ -519,6 +545,8 @@ def mining_start(
         network=paths.network,
         hrp=paths.hrp,
         address=address,
+        connect=list(connect) if connect else None,
+        offline=offline,
     )
     results = miner.run(max_blocks=blocks)
     if results:
