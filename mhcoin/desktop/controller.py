@@ -11,6 +11,8 @@ import json
 import hashlib
 import logging
 import os
+import subprocess
+import sys
 import threading
 import time
 from collections import deque
@@ -23,10 +25,19 @@ from mhcoin.blockchain.genesis import get_network_genesis
 from mhcoin.blockchain.chain import ChainError
 from mhcoin.config_loader import resolve_data_dir
 from mhcoin.consensus.params import get_network_params
-from mhcoin.desktop.prefs import save_preferred_network
+from mhcoin.desktop.prefs import (
+    clamp_mine_intensity,
+    load_mine_intensity,
+    save_mine_intensity,
+    save_preferred_network,
+)
 from mhcoin.desktop.seeds import default_connect_peers
 from mhcoin.mempool import Mempool
-from mhcoin.mining.abortable_pow import MiningAborted, mine_block_cancellable
+from mhcoin.mining.abortable_pow import (
+    MiningAborted,
+    mine_block_cancellable,
+    mine_block_parallel,
+)
 from mhcoin.mining.miner import format_mine_plain_found
 from mhcoin.mining.block_template import build_block_template
 from mhcoin.node.local_node import LocalNode
@@ -96,6 +107,9 @@ class CoreController:
         self._mine_log: deque[str] = deque(maxlen=500)
         self._mine_log_lock = threading.Lock()
         self._mine_log_last_prog = 0.0
+        self._mine_intensity = load_mine_intensity(100)
+        self._mine_workers = self._workers_for_intensity(self._mine_intensity)
+        self._caffeine_proc = None
 
     @staticmethod
     def _txrow_to_dict(r: TxRow) -> dict:
@@ -1435,6 +1449,7 @@ class CoreController:
 
     @property
     def mining_stats(self) -> dict:
+        cpus = max(1, int(os.cpu_count() or 1))
         return {
             "mining": self._mining,
             "hashrate": self._hashrate,
@@ -1442,7 +1457,51 @@ class CoreController:
             "rewards_sats": self._rewards_sats,
             "rewards_text": f"{format_mhc(self._rewards_sats)} MHC",
             "log": self.mine_log_lines(),
+            "intensity": int(self._mine_intensity),
+            "workers": int(self._mine_workers),
+            "cpus": cpus,
         }
+
+    def set_mine_intensity(self, value: object) -> int:
+        """Set Desktop mining CPU load (10-100%). Applies on next template."""
+        n = save_mine_intensity(value)
+        self._mine_intensity = n
+        self._mine_workers = self._workers_for_intensity(n)
+        if self._mining:
+            self._mine_log_line(
+                f"CPU load -> {n}% · {self._mine_workers}/{max(1, int(os.cpu_count() or 1))} workers"
+            )
+        return n
+
+    @staticmethod
+    def _workers_for_intensity(intensity: int) -> int:
+        cpus = max(1, int(os.cpu_count() or 1))
+        pct = clamp_mine_intensity(intensity)
+        return max(1, int(round(cpus * pct / 100.0)))
+
+    def _start_caffeine(self) -> None:
+        """Keep Mac awake while mining (App Nap / idle sleep). Same app process."""
+        self._stop_caffeine()
+        if sys.platform != "darwin":
+            return
+        try:
+            self._caffeine_proc = subprocess.Popen(
+                ["caffeinate", "-dims", "-w", str(os.getpid())],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+        except Exception:
+            self._caffeine_proc = None
+
+    def _stop_caffeine(self) -> None:
+        proc = getattr(self, "_caffeine_proc", None)
+        self._caffeine_proc = None
+        if proc is None:
+            return
+        try:
+            proc.terminate()
+        except Exception:
+            pass
 
     def _broadcast_miner_status(self, *, force: bool = False) -> None:
         """Advise peers of local mining hashrate (STATUS). Throttled ~10s."""
@@ -1547,10 +1606,17 @@ class CoreController:
             self._tip_height_hint = max(0, tip_h)
         except Exception:
             tip_h = int(getattr(self, "_tip_height_hint", 0) or 0)
+        self._mine_intensity = clamp_mine_intensity(self._mine_intensity)
+        self._mine_workers = self._workers_for_intensity(self._mine_intensity)
+        cpus = max(1, int(os.cpu_count() or 1))
+        self._start_caffeine()
         self._mine_log_line(f"MHCOIN Live Miner · {self.network} · tip #{tip_h}")
         self._mine_log_line(f"reward  {reward_addr}")
         self._mine_log_line(f"data    {self.data_dir}")
         self._mine_log_line("mode    live node (P2P stays online)")
+        self._mine_log_line(
+            f"CPU     {self._mine_intensity}% · {self._mine_workers}/{cpus} workers"
+        )
         self._mine_log_line("────────────────────────────────")
         self._mine_log_line("searching nonce… (Stop to quit)")
         self._status_last_broadcast = 0.0
@@ -1603,7 +1669,14 @@ class CoreController:
                             return tip is not None and tip != parent
 
                         try:
-                            mine_block_cancellable(block, progress=_prog, abort_check=_abort)
+                            workers = self._workers_for_intensity(self._mine_intensity)
+                            self._mine_workers = workers
+                            mine_block_parallel(
+                                block,
+                                workers=workers,
+                                progress=_prog,
+                                abort_check=_abort,
+                            )
                         except MiningAborted:
                             if self._miner_stop.is_set():
                                 break
@@ -1700,6 +1773,7 @@ class CoreController:
             finally:
                 self._mining = False
                 self._hashrate = 0.0
+                self._stop_caffeine()
                 self._broadcast_miner_status(force=True)
                 self._mine_log_line("■ Mining stopped.")
                 # Node stays up — only refresh balance cache + history.

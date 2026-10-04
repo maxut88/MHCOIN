@@ -19,6 +19,10 @@ def _prepare_env() -> None:
     # Release / frozen: mainnet. Dev source runs still default via prefs.
     if getattr(sys, "frozen", False):
         os.environ.setdefault("MHCOIN_NETWORK", "mainnet")
+        # Immutable / gaming distros (Bazzite, Silverblue) rarely ship
+        # WebKitGTK/PyQt for pywebview — skip the noisy probe and use browser UI.
+        if sys.platform.startswith("linux"):
+            os.environ.setdefault("MHCOIN_DESKTOP_BROWSER", "1")
 
 
 def main() -> None:

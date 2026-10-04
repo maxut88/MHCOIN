@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 import os
+import subprocess
 import sys
 import threading
 import webbrowser
@@ -25,6 +26,94 @@ from mhcoin.wallet.wallet import WalletError
 HOST = "127.0.0.1"
 DEFAULT_PORT = 18765
 _ASSETS = Path(__file__).resolve().parent / "assets"
+
+
+def _child_env_without_bundle_libs() -> dict[str, str]:
+    """Env for xdg-open/kde-open: drop PyInstaller _internal from LD_LIBRARY_PATH.
+
+    Bundled libssl.so.3 is often older than the host (e.g. Bazzite/Fedora).
+    Child helpers then crash: OPENSSL_3.2.0 not found (required by libcurl).
+    """
+    env = {k: v for k, v in os.environ.items() if isinstance(v, str)}
+    drop: list[str] = []
+    meipass = getattr(sys, "_MEIPASS", None)
+    if meipass:
+        drop.append(os.path.realpath(meipass))
+    try:
+        exe_parent = Path(sys.executable).resolve().parent
+        drop.append(str(exe_parent / "_internal"))
+        drop.append(str(exe_parent))
+    except Exception:
+        pass
+
+    def _keep(path: str) -> bool:
+        if not path:
+            return False
+        try:
+            rp = os.path.realpath(path)
+        except OSError:
+            rp = path
+        for root in drop:
+            if not root:
+                continue
+            if rp == root or rp.startswith(root + os.sep):
+                return False
+            if "_internal" in Path(rp).parts and "MHCOIN" in rp:
+                return False
+        return True
+
+    for key in ("LD_LIBRARY_PATH", "LD_PRELOAD", "DYLD_LIBRARY_PATH"):
+        val = env.get(key)
+        if not val:
+            continue
+        kept = [p for p in val.split(":") if _keep(p)]
+        if kept:
+            env[key] = ":".join(kept)
+        else:
+            env.pop(key, None)
+    return env
+
+
+def _open_system_browser(url: str) -> bool:
+    """Open URL in the system browser without inheriting bundled OpenSSL."""
+    env = _child_env_without_bundle_libs()
+    if sys.platform.startswith("linux"):
+        for cmd in (
+            ("xdg-open", url),
+            ("gio", "open", url),
+            ("kde-open5", url),
+            ("kde-open", url),
+            ("gnome-open", url),
+        ):
+            try:
+                subprocess.Popen(  # noqa: S603 — fixed launcher + URL
+                    cmd,
+                    env=env,
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                    start_new_session=True,
+                )
+                return True
+            except FileNotFoundError:
+                continue
+            except OSError:
+                continue
+    elif sys.platform == "darwin":
+        try:
+            subprocess.Popen(  # noqa: S603
+                ["open", url],
+                env=env,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                start_new_session=True,
+            )
+            return True
+        except OSError:
+            pass
+    try:
+        return bool(webbrowser.open(url))
+    except Exception:
+        return False
 
 
 def _want_browser_fallback() -> bool:
@@ -421,6 +510,13 @@ HTML = r"""<!DOCTYPE html>
       inset 0 2px 3px rgba(255,255,255,.35);
   }
   .mine-stats { display:grid; grid-template-columns: 1fr 1fr 1fr; gap: 6px; margin-top: 8px; }
+  .mine-load { margin: 12px 0 4px; padding: 12px 14px; border: 1px solid var(--line); border-radius: 12px; background: var(--soft); }
+  .mine-load .load-top { display:flex; justify-content:space-between; align-items:baseline; gap:10px; margin-bottom: 8px; }
+  .mine-load .load-top strong { font-size: .95rem; }
+  .mine-load .load-meta { color: var(--muted); font-size: .78rem; }
+  .mine-load input[type=range] { width: 100%; accent-color: #111418; }
+  .mine-load .load-row { display:flex; gap:8px; align-items:center; margin-top: 8px; flex-wrap: wrap; }
+  .mine-load .load-row button.active { background: #111418; color: #fff; border-color: #111418; }
   .stat { border: 1px solid var(--line); border-radius: 10px; padding: 8px; background: rgba(0,0,0,.22); }
   .stat .k { font-size: 10px; color: var(--muted); text-transform: uppercase; letter-spacing: .05em; }
   .stat .v { font-size: 12px; font-weight: 700; margin-top: 2px; font-family: "JetBrains Mono", monospace; }
@@ -1765,6 +1861,12 @@ async function refreshStatus(){
       if ($("statHash")) $("statHash").textContent = s.hashrate || "—";
       if ($("statBlocks")) $("statBlocks").textContent = String(s.blocks_found ?? 0);
       if ($("statRewards")) $("statRewards").textContent = s.rewards || "0";
+      if ($("mineLoadPct") && s.mine_intensity != null) $("mineLoadPct").textContent = String(s.mine_intensity);
+      if ($("mineWorkers") && s.mine_workers != null) $("mineWorkers").textContent = String(s.mine_workers);
+      if ($("mineCpus") && s.mine_cpus != null) $("mineCpus").textContent = String(s.mine_cpus);
+      if ($("mineLoad") && s.mine_intensity != null && document.activeElement !== $("mineLoad")) {
+        $("mineLoad").value = String(s.mine_intensity);
+      }
       const logEl = $("mineLog");
       if (logEl) setMineLogEl(logEl, s.mine_log || []);
       // Keep a live activity strip on Mining too.
@@ -2022,6 +2124,20 @@ async function render(pre){
           </div>
         </div>
       </div>
+      <div class="mine-load">
+        <div class="load-top">
+          <strong>CPU load</strong>
+          <span class="load-meta"><span id="mineLoadPct">${s.mine_intensity??100}</span>% · <span id="mineWorkers">${s.mine_workers??1}</span>/<span id="mineCpus">${s.mine_cpus??1}</span> workers</span>
+        </div>
+        <input id="mineLoad" type="range" min="10" max="100" step="5" value="${s.mine_intensity??100}"/>
+        <div class="load-row">
+          <button class="sm" type="button" data-load="25">25%</button>
+          <button class="sm" type="button" data-load="50">50%</button>
+          <button class="sm" type="button" data-load="75">75%</button>
+          <button class="sm" type="button" data-load="100" id="mineLoadMax">Max 100%</button>
+        </div>
+        <p class="sub" style="margin:.55rem 0 0">100% uses all CPU cores in this same app (keeps Mac awake while mining).</p>
+      </div>
       <label>Reward address</label>
       <input id="mineAddr" class="mono" value="${s.address||""}"/>
       <div class="row">
@@ -2052,7 +2168,8 @@ async function render(pre){
         const btn = $("mineStart");
         if (btn) btn.disabled = true;
         flash("Starting miner on live node…");
-        await api("mine/start", {address:$("mineAddr").value.trim()});
+        const load = $("mineLoad") ? Number($("mineLoad").value) : (s.mine_intensity||100);
+        await api("mine/start", {address:$("mineAddr").value.trim(), intensity: load});
         flash("Mining started");
         render();
       } catch(e){ flash(e.message, false); }
@@ -2066,6 +2183,32 @@ async function render(pre){
       const addr = ($("mineAddr") && $("mineAddr").value.trim()) || s.address || "";
       await showMineTerminalHelp(addr, s.network || "mainnet");
     };
+    const applyLoadUi = (pct, workers, cpus) => {
+      if ($("mineLoadPct")) $("mineLoadPct").textContent = String(pct);
+      if ($("mineWorkers")) $("mineWorkers").textContent = String(workers);
+      if ($("mineCpus")) $("mineCpus").textContent = String(cpus);
+      if ($("mineLoad") && Number($("mineLoad").value) !== Number(pct)) $("mineLoad").value = String(pct);
+      document.querySelectorAll("[data-load]").forEach(b => {
+        b.classList.toggle("active", Number(b.getAttribute("data-load")) === Number(pct));
+      });
+    };
+    applyLoadUi(s.mine_intensity??100, s.mine_workers??1, s.mine_cpus??1);
+    const setLoad = async (pct) => {
+      try {
+        const r = await api("mine/intensity", {intensity: Number(pct)});
+        applyLoadUi(r.intensity??pct, r.workers??1, r.cpus??(s.mine_cpus||1));
+        flash("CPU load " + (r.intensity??pct) + "%");
+      } catch(e){ flash(e.message, false); }
+    };
+    if ($("mineLoad")) {
+      $("mineLoad").oninput = () => {
+        if ($("mineLoadPct")) $("mineLoadPct").textContent = $("mineLoad").value;
+      };
+      $("mineLoad").onchange = async () => { await setLoad($("mineLoad").value); };
+    }
+    document.querySelectorAll("[data-load]").forEach(b => {
+      b.onclick = async () => { await setLoad(b.getAttribute("data-load")); };
+    });
   } else if (active === "Network") {
     p.innerHTML = `
       <h2>Network</h2>
@@ -2296,6 +2439,9 @@ class DesktopState:
                 light["blocks_found"] = 0
                 light["rewards"] = "0"
                 light["mine_log"] = []
+                light["mine_intensity"] = int(getattr(c, "_mine_intensity", 100) or 100)
+                light["mine_workers"] = int(getattr(c, "_mine_workers", 1) or 1)
+                light["mine_cpus"] = int(os.cpu_count() or 1)
                 light["txs"] = []
                 light["balance"] = "0.00000000 MHC"
                 light["balance_cached"] = False
@@ -2362,6 +2508,9 @@ class DesktopState:
             "blocks_found": stats["blocks_found"],
             "rewards": stats["rewards_text"],
             "mine_log": stats.get("log") or [],
+            "mine_intensity": int(stats.get("intensity") or 100),
+            "mine_workers": int(stats.get("workers") or 1),
+            "mine_cpus": int(stats.get("cpus") or 1),
             "data_dir": str(c.data_dir),
             "wallet_path": str(c.wallet_file_path()),
             "txs": txs,
@@ -2442,12 +2591,23 @@ def make_handler(state: DesktopState):
             # Keep UI responsive: do not hold state.lock across node stop / mining start
             # (those can take seconds; status polling would freeze the whole app).
             if path == "/api/mine/start":
+                if body.get("intensity") is not None:
+                    c.set_mine_intensity(body.get("intensity"))
                 addr = str(body.get("address") or "") or None
                 c.start_mining(addr)
                 return {"ok": True}
             if path == "/api/mine/stop":
                 c.stop_mining()
                 return {"ok": True}
+            if path == "/api/mine/intensity":
+                n = c.set_mine_intensity(body.get("intensity", body.get("value", 100)))
+                st = c.mining_stats
+                return {
+                    "ok": True,
+                    "intensity": n,
+                    "workers": st.get("workers"),
+                    "cpus": st.get("cpus"),
+                }
             if path == "/api/node/start":
                 c.start_node()
                 return {"ok": True, "seeds": c.chain_info().get("seeds") or []}
@@ -2573,14 +2733,17 @@ def run_web_desktop(network: str | None = None, port: int | None = None) -> None
     try:
         ok, detail = _open_native_window(url, state=state)
         if not ok:
-            print(f"Shell: browser / web version — {detail}")
+            print(f"Shell: browser UI — {detail}")
             print(f"Open: {url}")
-            print("Same UI + local API as Mac native window (127.0.0.1 only; not a public site).")
             if not frozen:
+                print("Same UI + local API as native window (127.0.0.1 only).")
                 print("Fix native window:  pip install 'pywebview>=5.0'")
                 print("Then relaunch. Force browser: MHCOIN_DESKTOP_BROWSER=1")
                 print("Dev mode — Press Ctrl+C to stop.")
-            threading.Timer(0.35, lambda: webbrowser.open(url)).start()
+            else:
+                print("Browser UI is normal on Linux without Qt/WebKitGTK.")
+                print("If it did not open, paste the URL above. Ctrl+C stops the app.")
+            threading.Timer(0.35, lambda u=url: _open_system_browser(u)).start()
             try:
                 server_thread.join()
             except KeyboardInterrupt:

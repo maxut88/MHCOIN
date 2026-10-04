@@ -1,4 +1,4 @@
-"""Persist Desktop network preference (separate from consensus)."""
+"""Persist Desktop preferences (separate from consensus)."""
 
 from __future__ import annotations
 
@@ -12,27 +12,61 @@ def prefs_path() -> Path:
     return Path.home() / ".mhcoin" / "desktop_prefs.json"
 
 
-def load_preferred_network() -> str | None:
+def _read_prefs() -> dict:
     path = prefs_path()
     if not path.is_file():
-        return None
+        return {}
     try:
         data = json.loads(path.read_text(encoding="utf-8"))
-        net = str(data.get("network") or "").strip().lower()
-        if net in ("mainnet", "localnet", "testnet", "regtest"):
-            return net
+        return data if isinstance(data, dict) else {}
     except Exception:
-        return None
+        return {}
+
+
+def _write_prefs(data: dict) -> None:
+    path = prefs_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
+
+
+def load_preferred_network() -> str | None:
+    net = str(_read_prefs().get("network") or "").strip().lower()
+    if net in ("mainnet", "localnet", "testnet", "regtest"):
+        return net
     return None
 
 
 def save_preferred_network(network: str) -> None:
-    path = prefs_path()
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(
-        json.dumps({"network": network.strip().lower()}, indent=2) + "\n",
-        encoding="utf-8",
-    )
+    data = _read_prefs()
+    data["network"] = network.strip().lower()
+    _write_prefs(data)
+
+
+def clamp_mine_intensity(value: object, default: int = 100) -> int:
+    """CPU load percent for Desktop mining (10–100)."""
+    try:
+        n = int(value)  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        n = int(default)
+    if n < 10:
+        n = 10
+    if n > 100:
+        n = 100
+    # Keep slider steps friendly
+    return max(10, min(100, int(round(n / 5.0) * 5)))
+
+
+def load_mine_intensity(default: int = 100) -> int:
+    raw = _read_prefs().get("mine_intensity", default)
+    return clamp_mine_intensity(raw, default=default)
+
+
+def save_mine_intensity(value: object) -> int:
+    n = clamp_mine_intensity(value)
+    data = _read_prefs()
+    data["mine_intensity"] = n
+    _write_prefs(data)
+    return n
 
 
 def resolve_launch_network(

@@ -80,6 +80,39 @@ EOF
     elif [[ -f "${ROOT}/mhcoin/desktop/assets/mhcoin-256.png" ]]; then
       cp "${ROOT}/mhcoin/desktop/assets/mhcoin-256.png" "${STAGE}/mhcoin.png"
     fi
+    cat > "${STAGE}/README-LINUX.txt" <<'EOF'
+MHCOIN Core — Linux notes
+=========================
+
+Run from a terminal:
+  ./MHCOIN-Core
+
+UI: http://127.0.0.1:18765/
+
+Native window needs system Qt (PyQt6) or GTK (PyGObject). On immutable
+desktops (Bazzite/Silverblue) those are often missing — the app then
+serves the same UI in your browser. That is supported.
+
+If an older build crashes when opening the browser with:
+  libssl.so.3: version OPENSSL_3.2.0 not found
+do NOT delete OpenSSL from _internal (crypto may need it). Newer builds
+open the browser with a cleaned LD_LIBRARY_PATH. Workaround for old
+tarballs only:
+  mv _internal/libssl.so.3 _internal/libssl.so.3.bak
+  mv _internal/libcrypto.so.3 _internal/libcrypto.so.3.bak
+Then open http://127.0.0.1:18765/ manually if needed.
+
+Stop: Ctrl+C in the terminal (or close the native window).
+EOF
+    cat > "${STAGE}/run-browser.sh" <<'EOF'
+#!/usr/bin/env bash
+# Force browser UI (skip pywebview) — good on Bazzite / immutable Fedora.
+set -euo pipefail
+cd "$(dirname "$0")"
+export MHCOIN_DESKTOP_BROWSER=1
+exec ./MHCOIN-Core "$@"
+EOF
+    chmod +x "${STAGE}/run-browser.sh"
     (
       cd "${DIST}/release"
       tar -czf "${OUT_NAME}-linux-x86_64.tar.gz" "${OUT_NAME}-linux-x86_64"
@@ -127,6 +160,7 @@ EOF
   <key>CFBundleShortVersionString</key><string>${VERSION}</string>
   <key>LSMinimumSystemVersion</key><string>${MACOS_MIN}</string>
   <key>NSHighResolutionCapable</key><true/>
+  <key>NSAppSleepDisabled</key><true/>
 </dict></plist>
 EOF
     else

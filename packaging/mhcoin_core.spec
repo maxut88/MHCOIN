@@ -168,6 +168,11 @@ a = Analysis(
     noarchive=False,
 )
 
+# Keep bundled OpenSSL on Linux — hashlib SHA256 PoW is much faster with it
+# (~300 kH/s vs ~190 without on some hosts). Browser open must scrub
+# LD_LIBRARY_PATH (see webui._open_system_browser) so xdg-open/kde-open
+# do not load this older libssl against system libcurl.
+
 pyz = PYZ(a.pure, a.zipped_data, cipher=block_cipher)
 
 exe = EXE(
@@ -214,9 +219,10 @@ if sys.platform == "darwin":
         info_plist={
             "CFBundleName": "MHCOIN Core",
             "CFBundleDisplayName": "MHCOIN Core",
-            "CFBundleShortVersionString": "0.3.7.3",
+            "CFBundleShortVersionString": "0.4.0.0",
             "CFBundleIconFile": "mhcoin.icns",
             "NSHighResolutionCapable": True,
+            "NSAppSleepDisabled": True,
             "LSMinimumSystemVersion": str(_macos_min),
         },
     )
