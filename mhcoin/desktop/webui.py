@@ -1856,7 +1856,9 @@ async function refreshStatus(){
     // Mining tab: live stats
     if (active === "Mining" && $("mineHero")) {
       $("mineHero").classList.toggle("live", !!s.mining);
-      if ($("mineState")) $("mineState").textContent = s.mining ? "Mining" : "Idle";
+      if ($("mineState")) {
+        $("mineState").textContent = s.mine_stopping ? "Stopping…" : (s.mining ? "Mining" : "Idle");
+      }
       if ($("mineDot")) $("mineDot").className = "dot" + (s.mining ? " on" : "");
       if ($("statHash")) $("statHash").textContent = s.hashrate || "—";
       if ($("statBlocks")) $("statBlocks").textContent = String(s.blocks_found ?? 0);
@@ -2104,7 +2106,7 @@ async function render(pre){
       <div id="mineHero" class="mine-hero ${s.mining?'live':''}">
         <div class="mine-inner">
           <div style="display:flex;justify-content:space-between;align-items:center">
-            <div class="pill"><span id="mineDot" class="dot ${s.mining?'on':''}"></span><span id="mineState">${s.mining?'Mining':'Idle'}</span></div>
+            <div class="pill"><span id="mineDot" class="dot ${s.mining?'on':''}"></span><span id="mineState">${s.mine_stopping?'Stopping…':(s.mining?'Mining':'Idle')}</span></div>
             <div class="status">${s.network} · h${s.height}</div>
           </div>
           <div class="mine-ring-wrap"><div class="mine-ring">
@@ -2130,6 +2132,7 @@ async function render(pre){
           <span class="load-meta"><span id="mineLoadPct">${s.mine_intensity??100}</span>% · <span id="mineWorkers">${s.mine_workers??1}</span>/<span id="mineCpus">${s.mine_cpus??1}</span> workers</span>
         </div>
         <input id="mineLoad" type="range" min="10" max="100" step="5" value="${s.mine_intensity??100}"/>
+        <p class="sub">Expected hashrate ≈ load% of your Mac peak (often ~0.6–0.7 MH/s at 100% on Apple Silicon). 25% should be ~¼ of peak — not the same as 100%.</p>
         <div class="load-row">
           <button class="sm" type="button" data-load="25">25%</button>
           <button class="sm" type="button" data-load="50">50%</button>
@@ -2162,12 +2165,14 @@ async function render(pre){
     $("mineStart").onclick = async () => {
       try {
         if (s.network !== "mainnet") {
-          const ok = await confirmBox("You are on LOCALNET, not Mainnet.\n\nMine the local test chain anyway?");
+          const ok = await confirmBox("You are on LOCALNET, not Mainnet.\\n\\nMine the local test chain anyway?");
           if (!ok) return;
         }
         const btn = $("mineStart");
+        const stopBtn = $("mineStop");
         if (btn) btn.disabled = true;
-        flash("Starting miner on live node…");
+        if (stopBtn) stopBtn.disabled = false;
+        flash("Starting miner…");
         const load = $("mineLoad") ? Number($("mineLoad").value) : (s.mine_intensity||100);
         await api("mine/start", {address:$("mineAddr").value.trim(), intensity: load});
         flash("Mining started");
@@ -2176,8 +2181,15 @@ async function render(pre){
       finally { const btn = $("mineStart"); if (btn) btn.disabled = false; }
     };
     $("mineStop").onclick = async () => {
-      try { await api("mine/stop", {}); flash("Mining stopped"); render(); }
-      catch(e){ flash(e.message, false); }
+      try {
+        const btn = $("mineStop");
+        if (btn) btn.disabled = true;
+        flash("Stopping miner…");
+        await api("mine/stop", {});
+        flash("Stop signal sent");
+        render();
+      } catch(e){ flash(e.message, false); }
+      finally { const btn = $("mineStop"); if (btn) btn.disabled = false; }
     };
     $("mineHelp").onclick = async () => {
       const addr = ($("mineAddr") && $("mineAddr").value.trim()) || s.address || "";
@@ -2435,6 +2447,7 @@ class DesktopState:
             if not unlocked and c._node is None and not getattr(c, "_mining", False):
                 light = self._welcome_payload()
                 light["mining"] = False
+                light["mine_stopping"] = False
                 light["hashrate"] = "-"
                 light["blocks_found"] = 0
                 light["rewards"] = "0"
@@ -2504,6 +2517,7 @@ class DesktopState:
             "wallet_exists": c.wallet_exists(),
             "unlocked": unlocked,
             "mining": stats["mining"],
+            "mine_stopping": bool(stats.get("stopping")),
             "hashrate": f"{hr:,.0f} H/s" if hr else "-",
             "blocks_found": stats["blocks_found"],
             "rewards": stats["rewards_text"],

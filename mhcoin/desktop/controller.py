@@ -83,7 +83,9 @@ class CoreController:
         self._local: LocalNode | None = None
         self._miner_thread: threading.Thread | None = None
         self._miner_stop = threading.Event()
+        self._miner_reconfigure = threading.Event()
         self._mining = False
+        self._mine_stopping = False
         self._blocks_found = 0
         self._rewards_sats = 0
         self._hashrate = 0.0
@@ -1450,8 +1452,11 @@ class CoreController:
     @property
     def mining_stats(self) -> dict:
         cpus = max(1, int(os.cpu_count() or 1))
+        alive = bool(self._miner_thread and self._miner_thread.is_alive())
+        mining = bool(self._mining and alive and not self._miner_stop.is_set())
         return {
-            "mining": self._mining,
+            "mining": mining,
+            "stopping": bool(self._mine_stopping or (self._miner_stop.is_set() and alive)),
             "hashrate": self._hashrate,
             "blocks_found": self._blocks_found,
             "rewards_sats": self._rewards_sats,
@@ -1463,21 +1468,31 @@ class CoreController:
         }
 
     def set_mine_intensity(self, value: object) -> int:
-        """Set Desktop mining CPU load (10-100%). Applies on next template."""
+        """Set Desktop mining CPU load (10-100%). Applies immediately while mining."""
         n = save_mine_intensity(value)
         self._mine_intensity = n
         self._mine_workers = self._workers_for_intensity(n)
-        if self._mining:
+        if self._mining and not self._miner_stop.is_set():
             self._mine_log_line(
                 f"CPU load -> {n}% · {self._mine_workers}/{max(1, int(os.cpu_count() or 1))} workers"
             )
+            # Abort current PoW slice so duty-cycle / worker count apply now.
+            self._miner_reconfigure.set()
         return n
 
     @staticmethod
     def _workers_for_intensity(intensity: int) -> int:
+        """Worker count for intensity.
+
+        Always keep at least one logical CPU free when the machine has 4+
+        cores so the Desktop UI / P2P stay responsive at 100% load.
+        Duty-cycle (intensity %) is the real throttle — worker count alone
+        plateaus on many Macs around 2 threads.
+        """
         cpus = max(1, int(os.cpu_count() or 1))
         pct = clamp_mine_intensity(intensity)
-        return max(1, int(round(cpus * pct / 100.0)))
+        usable = cpus - 1 if cpus >= 4 else cpus
+        return max(1, int(round(usable * pct / 100.0)))
 
     def _start_caffeine(self) -> None:
         """Keep Mac awake while mining (App Nap / idle sleep). Same app process."""
@@ -1569,61 +1584,80 @@ class CoreController:
         )
 
     def start_mining(self, address: str | None = None, on_block: Callable | None = None) -> None:
-        if self._mining:
-            return
+        # Refuse a second miner; if a stop is in flight, wait briefly then retry once.
+        th = self._miner_thread
+        if th is not None and th.is_alive():
+            if not self._miner_stop.is_set():
+                return
+            th.join(timeout=3.0)
+            if th.is_alive():
+                raise RuntimeError("miner still stopping — try Start again in a moment")
         addr = address or self.default_address()
         if not validate_address(addr, hrp=self.hrp):
             raise ValueError("invalid reward address")
         # Mine through the live P2P node (same process owns datadir).
         # Do NOT stop the node — template/accept go via NodeRuntime + relay INV.
         self._resume_node_after_mine = False
-        if self._node is None:
-            self._mine_log_line("Starting P2P node for live mining…")
-            self.start_node(skip_history_wait=True)
-            deadline = time.monotonic() + 15.0
-            while time.monotonic() < deadline:
-                rt = self._node
-                if rt is not None and not getattr(rt, "_stopped", False):
-                    try:
-                        if rt.chain.height >= 0 and getattr(rt, "_running", False):
-                            break
-                    except Exception:
-                        pass
-                time.sleep(0.05)
-            if self._node is None or getattr(self._node, "_stopped", False):
-                raise RuntimeError("P2P node failed to start — cannot mine")
-            if not getattr(self._node, "_running", False):
-                raise RuntimeError("P2P node not running — cannot mine")
-            # Drop LocalNode handle so we never open a second writer on the datadir.
-        with self._io:
-            self._close_local()
-        self._miner_stop.clear()
-        self._mining = True
         reward_addr = addr
-        tip_h = -1
-        try:
-            tip_h = int(self._node.chain.height)
-            self._tip_height_hint = max(0, tip_h)
-        except Exception:
-            tip_h = int(getattr(self, "_tip_height_hint", 0) or 0)
+        self._miner_stop.clear()
+        self._miner_reconfigure.clear()
+        self._mine_stopping = False
+        self._mining = True
         self._mine_intensity = clamp_mine_intensity(self._mine_intensity)
         self._mine_workers = self._workers_for_intensity(self._mine_intensity)
         cpus = max(1, int(os.cpu_count() or 1))
         self._start_caffeine()
-        self._mine_log_line(f"MHCOIN Live Miner · {self.network} · tip #{tip_h}")
+        self._mine_log_line(f"MHCOIN Live Miner · {self.network}")
         self._mine_log_line(f"reward  {reward_addr}")
         self._mine_log_line(f"data    {self.data_dir}")
         self._mine_log_line("mode    live node (P2P stays online)")
         self._mine_log_line(
-            f"CPU     {self._mine_intensity}% · {self._mine_workers}/{cpus} workers"
+            f"CPU     {self._mine_intensity}% · {self._mine_workers}/{cpus} workers "
+            f"(duty-cycle throttle)"
         )
         self._mine_log_line("────────────────────────────────")
-        self._mine_log_line("searching nonce… (Stop to quit)")
         self._status_last_broadcast = 0.0
-        self._broadcast_miner_status(force=True)
 
         def _loop() -> None:
             try:
+                # Start node inside miner thread so /api/mine/start returns instantly.
+                if self._node is None:
+                    self._mine_log_line("Starting P2P node for live mining…")
+                    try:
+                        self.start_node(skip_history_wait=True, allow_while_mining=True)
+                    except Exception as e:
+                        self._mine_log_line(f"ERROR starting node: {e}")
+                        return
+                    deadline = time.monotonic() + 15.0
+                    while time.monotonic() < deadline and not self._miner_stop.is_set():
+                        rt = self._node
+                        if rt is not None and not getattr(rt, "_stopped", False):
+                            try:
+                                if rt.chain.height >= 0 and getattr(rt, "_running", False):
+                                    break
+                            except Exception:
+                                pass
+                        time.sleep(0.05)
+                    if self._miner_stop.is_set():
+                        return
+                    if self._node is None or getattr(self._node, "_stopped", False):
+                        self._mine_log_line("ERROR P2P node failed to start — cannot mine")
+                        return
+                    if not getattr(self._node, "_running", False):
+                        self._mine_log_line("ERROR P2P node not running — cannot mine")
+                        return
+                with self._io:
+                    self._close_local()
+                tip_h = -1
+                try:
+                    tip_h = int(self._node.chain.height)
+                    self._tip_height_hint = max(0, tip_h)
+                except Exception:
+                    tip_h = int(getattr(self, "_tip_height_hint", 0) or 0)
+                self._mine_log_line(f"tip #{tip_h}")
+                self._mine_log_line("searching nonce… (Stop to quit)")
+                self._broadcast_miner_status(force=True)
+
                 while not self._miner_stop.is_set():
                     t0 = time.time()
                     height = -1
@@ -1636,8 +1670,8 @@ class CoreController:
                     try:
 
                         def _prog(nonce: int, _h: bytes, hps: float) -> None:
-                            if self._miner_stop.is_set():
-                                raise KeyboardInterrupt()
+                            if self._miner_stop.is_set() or self._miner_reconfigure.is_set():
+                                return
                             self._hashrate = hps
                             self._broadcast_miner_status()
                             now = time.time()
@@ -1660,7 +1694,7 @@ class CoreController:
                         self._mine_log_line(f"template #{height}  bits=0x{bits:08x}")
 
                         def _abort() -> bool:
-                            if self._miner_stop.is_set():
+                            if self._miner_stop.is_set() or self._miner_reconfigure.is_set():
                                 return True
                             # In-memory tip/epoch only — never touch SQLite here.
                             if int(rt.chain.tip_epoch) != epoch0:
@@ -1669,17 +1703,24 @@ class CoreController:
                             return tip is not None and tip != parent
 
                         try:
-                            workers = self._workers_for_intensity(self._mine_intensity)
+                            self._miner_reconfigure.clear()
+                            intensity = clamp_mine_intensity(self._mine_intensity)
+                            workers = self._workers_for_intensity(intensity)
                             self._mine_workers = workers
+                            duty = max(0.05, min(1.0, float(intensity) / 100.0))
                             mine_block_parallel(
                                 block,
                                 workers=workers,
                                 progress=_prog,
                                 abort_check=_abort,
+                                duty_cycle=duty,
                             )
                         except MiningAborted:
                             if self._miner_stop.is_set():
                                 break
+                            if self._miner_reconfigure.is_set():
+                                self._miner_reconfigure.clear()
+                                continue
                             self._mine_log_line(
                                 f"stale template #{height} — tip moved, rebuilding"
                             )
@@ -1772,7 +1813,9 @@ class CoreController:
                 self._mine_log_line(f"ERROR miner stopped: {e}")
             finally:
                 self._mining = False
+                self._mine_stopping = False
                 self._hashrate = 0.0
+                self._miner_reconfigure.clear()
                 self._stop_caffeine()
                 self._broadcast_miner_status(force=True)
                 self._mine_log_line("■ Mining stopped.")
@@ -1794,15 +1837,18 @@ class CoreController:
 
     def request_stop_mining(self) -> None:
         """Signal miner to stop without waiting (safe on UI / close path)."""
-        self._miner_stop.set()
-        self._mining = False
-
-    def stop_mining(self) -> None:
-        self.request_stop_mining()
         if self._miner_thread and self._miner_thread.is_alive():
-            self._miner_thread.join(timeout=2.0)
-        self._mining = False
-        # Node resume (if paused) happens in miner thread finally.
+            self._mine_stopping = True
+            self._mine_log_line("Stopping miner…")
+        self._miner_stop.set()
+        self._miner_reconfigure.set()
+
+    def stop_mining(self, *, wait: bool = False, join_timeout: float = 3.0) -> None:
+        """Stop miner. Default is non-blocking so Desktop UI stays responsive."""
+        self.request_stop_mining()
+        if wait and self._miner_thread and self._miner_thread.is_alive():
+            self._miner_thread.join(timeout=max(0.2, float(join_timeout)))
+        # UI path must not join: GIL-heavy PoW made a blocking join freeze the app.
 
     # --- optional P2P node --------------------------------------------------
 
@@ -1812,11 +1858,12 @@ class CoreController:
         port: int | None = None,
         connect: list[str] | None = None,
         skip_history_wait: bool = False,
+        allow_while_mining: bool = False,
     ) -> None:
         with self._node_ctrl:
             if self._node is not None:
                 return
-            if self._mining:
+            if self._mining and not allow_while_mining:
                 raise RuntimeError("Stop mining before starting the P2P node")
             params = get_network_params(self.network)
             listen = port or params.default_port
@@ -1921,7 +1968,7 @@ class CoreController:
             self._close_local()
 
     def shutdown(self) -> None:
-        self.stop_mining()
+        self.stop_mining(wait=True, join_timeout=3.0)
         self.stop_node()
         with self._io:
             self._close_local()

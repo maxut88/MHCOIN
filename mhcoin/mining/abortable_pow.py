@@ -6,6 +6,9 @@ Same HASH256 / target check as ``mine_block``, with cheap in-memory
 
 Optional multi-worker search (nonce stride) for Desktop max-CPU mining.
 ``hashlib`` releases the GIL during digest, so threads scale across cores.
+
+``duty_cycle`` (0.05–1.0) time-slices hashing so CPU load % is real even when
+extra workers no longer increase hashrate (common on Apple Silicon).
 """
 
 from __future__ import annotations
@@ -19,13 +22,43 @@ from mhcoin.blockchain.block import Block
 from mhcoin.consensus.difficulty import hash_meets_target
 
 # Nonce steps between abort polls. Cheap in-memory checks only — no SQLite.
-ABORT_CHECK_INTERVAL = 25_000
+# Keep low enough that Stop feels instant (~few ms at typical Desktop rates).
+ABORT_CHECK_INTERVAL = 8_000
 # Match classic Desktop / mine_block progress cadence.
 PROGRESS_INTERVAL = 100_000
 
 
 class MiningAborted(Exception):
     """PoW search cancelled (user stop or canonical tip moved)."""
+
+
+def _clamp_duty(duty_cycle: float) -> float:
+    try:
+        d = float(duty_cycle)
+    except (TypeError, ValueError):
+        d = 1.0
+    if d >= 0.999:
+        return 1.0
+    if d < 0.05:
+        return 0.05
+    return d
+
+
+def _interruptible_sleep(
+    seconds: float,
+    abort_check: Callable[[], bool] | None,
+) -> None:
+    """Sleep in short slices so Stop/reconfigure stays responsive."""
+    if seconds <= 0:
+        return
+    deadline = time.perf_counter() + float(seconds)
+    while True:
+        if abort_check is not None and abort_check():
+            raise MiningAborted("mining aborted")
+        left = deadline - time.perf_counter()
+        if left <= 0:
+            return
+        time.sleep(min(0.05, left))
 
 
 def mine_block_cancellable(
@@ -38,25 +71,36 @@ def mine_block_cancellable(
     start_nonce: int = 0,
     nonce_step: int = 1,
     fix_merkle: bool = True,
+    duty_cycle: float = 1.0,
 ) -> Block:
     """Mine with periodic ``abort_check``; raises ``MiningAborted`` if True.
 
     ``nonce_step`` > 1 assigns a stride lane (worker ``start_nonce`` in
     ``0..step-1``) so multiple threads can search the same template.
+
+    ``duty_cycle`` < 1.0 inserts interruptible sleeps so wall-clock hashrate
+    tracks the requested CPU load percent.
     """
     if abort_every < 1:
         abort_every = 1
     step = 1 if nonce_step < 1 else int(nonce_step)
+    duty = _clamp_duty(duty_cycle)
     if fix_merkle:
         block.set_merkle_root()
     t0 = time.time()
     hashes = 0
+    chunk_t0 = time.perf_counter()
     for nonce in range(int(start_nonce), int(max_nonce) + 1, step):
         if abort_check is not None and (
             hashes == 0 or hashes % abort_every == 0
         ):
             if abort_check():
                 raise MiningAborted("mining aborted")
+            if duty < 1.0 and hashes > 0:
+                worked = time.perf_counter() - chunk_t0
+                if worked > 0:
+                    _interruptible_sleep(worked * (1.0 - duty) / duty, abort_check)
+                chunk_t0 = time.perf_counter()
         block.header.nonce = nonce
         h = block.header.block_hash()
         hashes += 1
@@ -87,9 +131,11 @@ def mine_block_parallel(
     progress: Callable[[int, bytes, float], None] | None = None,
     max_nonce: int = 0xFFFFFFFF,
     fix_merkle: bool = True,
+    duty_cycle: float = 1.0,
 ) -> Block:
     """Mine with ``workers`` threads (nonce stride). Returns winning block copy applied to ``block``."""
     n = max(1, int(workers))
+    duty = _clamp_duty(duty_cycle)
     if fix_merkle:
         block.set_merkle_root()
     if n == 1:
@@ -101,6 +147,7 @@ def mine_block_parallel(
             start_nonce=0,
             nonce_step=1,
             fix_merkle=False,
+            duty_cycle=duty,
         )
 
     stop = threading.Event()
@@ -134,6 +181,7 @@ def mine_block_parallel(
                 start_nonce=wid,
                 nonce_step=n,
                 fix_merkle=False,
+                duty_cycle=duty,
             )
             with found_lock:
                 if not found:

@@ -372,9 +372,14 @@ def test_mining_start_stop_repeated(tmp_path: Path):
     for _ in range(5):
         ctrl.start_mining(address=addr)
         time.sleep(0.15)
-        ctrl.stop_mining()
-        time.sleep(0.05)
+        ctrl.stop_mining(wait=True, join_timeout=5.0)
+        deadline = time.monotonic() + 5.0
+        while time.monotonic() < deadline and (
+            ctrl._mining or (ctrl._miner_thread and ctrl._miner_thread.is_alive())
+        ):
+            time.sleep(0.05)
         assert ctrl._mining is False
+        assert not (ctrl._miner_thread and ctrl._miner_thread.is_alive())
     ctrl.stop_node()
 
 
