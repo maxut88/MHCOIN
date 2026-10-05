@@ -35,7 +35,7 @@ from mhcoin.desktop.seeds import default_connect_peers
 from mhcoin.mempool import Mempool
 from mhcoin.mining.abortable_pow import (
     MiningAborted,
-    mine_block_parallel,
+    mine_block_cancellable,
 )
 from mhcoin.mining.miner import format_mine_plain_found
 from mhcoin.mining.block_template import build_block_template
@@ -1518,27 +1518,14 @@ class CoreController:
 
     @staticmethod
     def _workers_for_intensity(intensity: int) -> int:
-        """Worker count for intensity.
+        """Worker count for intensity (stats / legacy slider).
 
-        Always keep at least one logical CPU free when the machine has 4+
-        cores so the Desktop UI / P2P stay responsive at 100% load.
-        Duty-cycle (intensity %) is the real throttle — worker count alone
-        plateaus on many Macs around 2 threads.
+        Desktop PoW uses the **0.3.7.3** single-lane loop (max stable H/s).
+        Multi-worker inflated CPU load while often lowering hashrate (GIL).
         """
         cpus = max(1, int(os.cpu_count() or 1))
         pct = clamp_mine_intensity(intensity)
-        if sys.platform == "win32":
-            # WebView2 + HTTP need headroom; too many PoW threads make Start/Stop
-            # stick under the GIL even though hashlib releases it during digest.
-            if cpus >= 8:
-                usable = cpus - 2
-            elif cpus >= 4:
-                usable = cpus - 1
-            else:
-                usable = cpus
-            usable = min(usable, 6)
-        else:
-            usable = cpus - 1 if cpus >= 4 else cpus
+        usable = cpus - 1 if cpus >= 4 else cpus
         return max(1, int(round(usable * pct / 100.0)))
 
     def _start_caffeine(self) -> None:
@@ -1653,18 +1640,15 @@ class CoreController:
         self._miner_reconfigure.clear()
         self._mine_stopping = False
         self._mining = True
-        # Always full CPU — slider was removed; ignore stale low intensity prefs.
+        # 0.3.7.3-style: one tight PoW lane (max stable hashrate).
         self._mine_intensity = 100
-        self._mine_workers = self._workers_for_intensity(100)
-        cpus = max(1, int(os.cpu_count() or 1))
+        self._mine_workers = 1
         self._start_caffeine()
         self._mine_log_line(f"MHCOIN Live Miner · {self.network}")
         self._mine_log_line(f"reward  {reward_addr}")
         self._mine_log_line(f"data    {self.data_dir}")
         self._mine_log_line("mode    live node (P2P stays online)")
-        self._mine_log_line(
-            f"CPU     {self._mine_workers}/{cpus} workers (full load)"
-        )
+        self._mine_log_line("CPU     single-lane PoW (0.3.7.3-style)")
         self._mine_log_line("────────────────────────────────")
         self._status_last_broadcast = 0.0
 
@@ -1722,28 +1706,15 @@ class CoreController:
                         def _prog(nonce: int, _h: bytes, hps: float) -> None:
                             if self._miner_stop.is_set():
                                 return
-                            # After a tip rebuild, early averages look artificially
-                            # low — keep the previous reading until the new slice
-                            # has run long enough (stops Mac/Windows “hashrate dip”).
-                            elapsed_slice = max(time.time() - t0, 1e-9)
-                            prev = float(self._hashrate or 0.0)
-                            if (
-                                elapsed_slice < 1.0
-                                and prev > 0
-                                and float(hps) < prev * 0.55
-                            ):
-                                hps_show = prev
-                            else:
-                                hps_show = float(hps)
-                                self._hashrate = hps_show
+                            self._hashrate = hps
                             self._broadcast_miner_status()
                             now = time.time()
                             if now - self._mine_log_last_prog >= 0.5:
                                 self._mine_log_last_prog = now
                                 rate = (
-                                    f"{hps_show/1000:.1f} kH/s"
-                                    if hps_show >= 1000
-                                    else f"{hps_show:,.0f} H/s"
+                                    f"{hps/1000:.1f} kH/s"
+                                    if hps >= 1000
+                                    else f"{hps:,.0f} H/s"
                                 )
                                 self._mine_log_line(
                                     f"· height {height}  nonce {nonce:,}  {rate}"
@@ -1757,7 +1728,7 @@ class CoreController:
                         self._mine_log_line(f"template #{height}  bits=0x{bits:08x}")
 
                         def _abort() -> bool:
-                            if self._miner_stop.is_set() or self._miner_reconfigure.is_set():
+                            if self._miner_stop.is_set():
                                 return True
                             # In-memory tip/epoch only — never touch SQLite here.
                             if int(rt.chain.tip_epoch) != epoch0:
@@ -1766,31 +1737,15 @@ class CoreController:
                             return tip is not None and tip != parent
 
                         try:
-                            # Multi-worker PoW (hashlib releases GIL). Full duty —
-                            # single-lane 0.4.1.2+ capped Mac/Windows ~100–150 H/s.
-                            self._miner_reconfigure.clear()
-                            workers = self._workers_for_intensity(100)
-                            self._mine_workers = workers
-                            # Windows: poll Stop every ~128 hashes (see abortable_pow).
-                            pow_kwargs: dict = {
-                                "workers": workers,
-                                "progress": _prog,
-                                "abort_check": _abort,
-                                "duty_cycle": 1.0,
-                            }
-                            if sys.platform == "win32":
-                                from mhcoin.mining.abortable_pow import (
-                                    ABORT_CHECK_INTERVAL_WIN32,
-                                )
-
-                                pow_kwargs["abort_every"] = ABORT_CHECK_INTERVAL_WIN32
-                            mine_block_parallel(block, **pow_kwargs)
+                            # Same tight single-lane PoW as MHCOIN Core 0.3.7.3.
+                            mine_block_cancellable(
+                                block,
+                                progress=_prog,
+                                abort_check=_abort,
+                            )
                         except MiningAborted:
                             if self._miner_stop.is_set():
                                 break
-                            if self._miner_reconfigure.is_set():
-                                self._miner_reconfigure.clear()
-                                continue
                             self._mine_log_line(
                                 f"stale template #{height} — tip moved, rebuilding"
                             )

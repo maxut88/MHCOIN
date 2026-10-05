@@ -4,11 +4,9 @@ Same HASH256 / target check as ``mine_block``, with cheap in-memory
 ``abort_check`` polls. Does **not** chunk via ``mine_block`` + RuntimeError
 (that cut Mac CLI hashrate ~1.5× vs a tight PoW loop / Desktop).
 
-Optional multi-worker search (nonce stride) for Desktop max-CPU mining.
-``hashlib`` releases the GIL during digest, so threads scale across cores.
-
-``duty_cycle`` (0.05–1.0) time-slices hashing so CPU load % is real even when
-extra workers no longer increase hashrate (common on Apple Silicon).
+Desktop target: match **0.3.7.3** single-lane throughput (proven max + stable).
+Multi-worker search remains available for experiments; GIL thrashing on many
+machines made parallel Desktop mining show high CPU with *lower* H/s.
 """
 
 from __future__ import annotations
@@ -22,13 +20,11 @@ from typing import Callable
 from mhcoin.blockchain.block import Block
 from mhcoin.consensus.difficulty import hash_meets_target
 
-# Nonce steps between abort polls. Cheap in-memory checks only — no SQLite.
-# Keep low enough that Stop feels instant (~few ms at typical Desktop rates).
-ABORT_CHECK_INTERVAL = 8_000
-# Windows Desktop hashrate per thread is often ~100–300 H/s under GIL + WebView2.
-# 8000 hashes ≈ 30–80s before Stop is noticed — Start/Stop appear stuck.
-ABORT_CHECK_INTERVAL_WIN32 = 128
-# Match classic Desktop / mine_block progress cadence.
+# 0.3.7.3 default — rare polls keep the PoW loop tight.
+ABORT_CHECK_INTERVAL = 25_000
+# Windows Desktop: slightly more frequent so Start/Stop stay responsive without
+# the 128-hash tax that cut hashrate in 0.4.1.9.
+ABORT_CHECK_INTERVAL_WIN32 = 2_000
 PROGRESS_INTERVAL = 100_000
 
 
@@ -58,7 +54,6 @@ def _interruptible_sleep(
     seconds: float,
     abort_check: Callable[[], bool] | None,
 ) -> None:
-    """Sleep in short slices so Stop/reconfigure stays responsive."""
     if seconds <= 0:
         return
     deadline = time.perf_counter() + float(seconds)
@@ -85,11 +80,7 @@ def mine_block_cancellable(
 ) -> Block:
     """Mine with periodic ``abort_check``; raises ``MiningAborted`` if True.
 
-    ``nonce_step`` > 1 assigns a stride lane (worker ``start_nonce`` in
-    ``0..step-1``) so multiple threads can search the same template.
-
-    ``duty_cycle`` < 1.0 inserts interruptible sleeps so wall-clock hashrate
-    tracks the requested CPU load percent.
+    Default path (step=1, duty=1) matches the **0.3.7.3** tight single-lane loop.
     """
     if abort_every is None:
         abort_every = _default_abort_every()
@@ -99,13 +90,38 @@ def mine_block_cancellable(
     duty = _clamp_duty(duty_cycle)
     if fix_merkle:
         block.set_merkle_root()
+
+    # —— Fast path: identical structure to 0.3.7.3 (max hashrate) ——
+    if step == 1 and duty >= 1.0:
+        t0 = time.time()
+        for nonce in range(int(start_nonce), int(max_nonce) + 1):
+            if abort_check is not None and (
+                nonce == start_nonce or (nonce - start_nonce) % abort_every == 0
+            ):
+                if abort_check():
+                    raise MiningAborted("mining aborted")
+            block.header.nonce = nonce
+            h = block.header.block_hash()
+            if hash_meets_target(h, block.header.bits):
+                if progress is not None:
+                    elapsed = max(time.time() - t0, 1e-9)
+                    progress(nonce, h, (nonce - start_nonce + 1) / elapsed)
+                return block
+            if (
+                progress is not None
+                and nonce % PROGRESS_INTERVAL == 0
+                and nonce != start_nonce
+            ):
+                elapsed = max(time.time() - t0, 1e-9)
+                progress(nonce, h, (nonce - start_nonce + 1) / elapsed)
+        raise RuntimeError("nonce space exhausted without finding PoW")
+
+    # —— Stride / duty-cycle path (parallel workers or CPU throttle) ——
     t0 = time.time()
     hashes = 0
     chunk_t0 = time.perf_counter()
     for nonce in range(int(start_nonce), int(max_nonce) + 1, step):
-        if abort_check is not None and (
-            hashes == 0 or hashes % abort_every == 0
-        ):
+        if abort_check is not None and (hashes == 0 or hashes % abort_every == 0):
             if abort_check():
                 raise MiningAborted("mining aborted")
             if duty < 1.0 and hashes > 0:
@@ -121,17 +137,9 @@ def mine_block_cancellable(
                 elapsed = max(time.time() - t0, 1e-9)
                 progress(nonce, h, hashes / elapsed)
             return block
-        if progress is not None:
-            # step=1: keep classic nonce cadence (tests / Desktop log).
-            # stride workers: tick on hashes done in this lane.
-            tick = (
-                (nonce != start_nonce and nonce % PROGRESS_INTERVAL == 0)
-                if step == 1
-                else (hashes % PROGRESS_INTERVAL == 0)
-            )
-            if tick:
-                elapsed = max(time.time() - t0, 1e-9)
-                progress(nonce, h, hashes / elapsed)
+        if progress is not None and hashes % PROGRESS_INTERVAL == 0:
+            elapsed = max(time.time() - t0, 1e-9)
+            progress(nonce, h, hashes / elapsed)
     raise RuntimeError("nonce space exhausted without finding PoW")
 
 
@@ -146,7 +154,7 @@ def mine_block_parallel(
     fix_merkle: bool = True,
     duty_cycle: float = 1.0,
 ) -> Block:
-    """Mine with ``workers`` threads (nonce stride). Returns winning block copy applied to ``block``."""
+    """Multi-worker nonce stride (optional). Desktop uses single-lane instead."""
     n = max(1, int(workers))
     duty = _clamp_duty(duty_cycle)
     if abort_every is None:
@@ -180,7 +188,7 @@ def mine_block_parallel(
             if stop.is_set():
                 return True
             if abort_check and abort_check():
-                stop.set()  # wake sibling workers on the next abort poll
+                stop.set()
                 return True
             return False
 
@@ -227,7 +235,6 @@ def mine_block_parallel(
     if found:
         winner = found[0]
         block.header.nonce = int(winner.header.nonce)
-        # Keep other header fields identical; merkle already set on template.
         return block
     if errors:
         raise errors[0]
