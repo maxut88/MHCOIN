@@ -13,7 +13,7 @@ from pathlib import Path
 
 from mhcoin.blockchain.block import Block
 from mhcoin.blockchain.blockstore import BlockFileStore
-from mhcoin.blockchain.chain import STATUS_ACTIVE
+from mhcoin.blockchain.chain import STATUS_ACTIVE, STATUS_SIDE
 
 
 class ReadOnlyChain:
@@ -187,6 +187,37 @@ class ReadOnlyChain:
         if not row:
             return None
         return int(row[0])
+
+    def get_side_chain_entries(self, *, limit: int = 200) -> list[dict]:
+        """Non-active (``STATUS_SIDE``) block_index rows — validated blocks that
+        lost a reorg and are still on disk. Best-effort/read-only: does not
+        touch the live node's in-memory OrphanPool (unknown-parent blocks are
+        never written to chain.sqlite — see mhcoin.blockchain.orphans).
+        """
+        if self._db is None:
+            return []
+        try:
+            rows = self._db.execute(
+                "SELECT block_hash, prev_hash, height, chain_work, bits, timestamp "
+                "FROM block_index WHERE status=? ORDER BY height DESC LIMIT ?",
+                (STATUS_SIDE, int(limit)),
+            ).fetchall()
+        except sqlite3.Error:
+            return []
+        out: list[dict] = []
+        for r in rows:
+            bh, prev, height, chain_work, bits, ts = r
+            out.append(
+                {
+                    "hash": bytes(bh).hex(),
+                    "prev_hash": bytes(prev).hex(),
+                    "height": int(height),
+                    "chain_work": int(chain_work),
+                    "bits": int(bits),
+                    "timestamp": int(ts),
+                }
+            )
+        return out
 
     def close(self) -> None:
         if self._db is not None:

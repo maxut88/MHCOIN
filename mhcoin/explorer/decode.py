@@ -10,7 +10,12 @@ from mhcoin.blockchain.readonly_chain import ReadOnlyChain
 from mhcoin.consensus.chain_work import work_for_bits
 from mhcoin.consensus.difficulty import bits_to_target
 from mhcoin.consensus.block_reward import get_block_subsidy
-from mhcoin.consensus.params import HALVING_INTERVAL, SATOSHI_PER_COIN, TARGET_BLOCK_TIME_SECONDS
+from mhcoin.consensus.params import (
+    HALVING_INTERVAL,
+    MAX_SUPPLY_SATOSHIS,
+    SATOSHI_PER_COIN,
+    TARGET_BLOCK_TIME_SECONDS,
+)
 from mhcoin.constants import INITIAL_BLOCK_SUBSIDY
 from mhcoin.transaction.transaction import Transaction
 from mhcoin.wallet.addresses import address_to_pubkey_hash, pubkey_hash_to_address, validate_address
@@ -107,6 +112,71 @@ def halving_info(tip: int) -> dict[str, Any]:
         "next_subsidy_sats": nxt,
         "next_subsidy_mhc": format_mhc(nxt),
         "initial_subsidy_mhc": format_mhc(INITIAL_BLOCK_SUBSIDY),
+    }
+
+
+def subsidy_schedule(*, max_eras: int = 40) -> list[dict[str, Any]]:
+    """Full block-subsidy halving table (height ranges + reward) from consensus.
+
+    Mirrors ``get_block_subsidy`` (mhcoin.consensus.block_reward): reward halves
+    every ``HALVING_INTERVAL`` blocks until the integer right-shift hits zero
+    (era 33 for a 50 MHC initial subsidy), at which point issuance stops.
+    """
+    rows: list[dict[str, Any]] = []
+    for era in range(max(1, max_eras)):
+        start = era * HALVING_INTERVAL
+        end = start + HALVING_INTERVAL - 1
+        subsidy = get_block_subsidy(start)
+        rows.append(
+            {
+                "era": era,
+                "from_height": start,
+                "to_height": end,
+                "subsidy_sats": subsidy,
+                "subsidy_mhc": format_mhc(subsidy),
+            }
+        )
+        if subsidy == 0:
+            break
+    return rows
+
+
+def supply_info(
+    tip: int,
+    minted_sats: int,
+    *,
+    avg_interval_seconds: int | None = None,
+) -> dict[str, Any]:
+    """Supply/halving dashboard payload: current state + full subsidy schedule."""
+    tip = max(0, int(tip))
+    minted_sats = max(0, int(minted_sats))
+    halv = halving_info(tip)
+    blocks_to_halving = int(halv["blocks_to_halving"])
+    spacing = avg_interval_seconds or TARGET_BLOCK_TIME_SECONDS
+    eta_seconds = blocks_to_halving * spacing if spacing else None
+    pct_mined = (
+        round(100.0 * minted_sats / MAX_SUPPLY_SATOSHIS, 6) if MAX_SUPPLY_SATOSHIS else 0.0
+    )
+    return {
+        "tip_height": tip,
+        "current_subsidy_sats": halv["current_subsidy_sats"],
+        "current_subsidy_mhc": halv["current_subsidy_mhc"],
+        "minted_sats": minted_sats,
+        "minted_mhc": format_mhc(minted_sats),
+        "max_supply_sats": MAX_SUPPLY_SATOSHIS,
+        "max_supply_mhc": format_mhc(MAX_SUPPLY_SATOSHIS),
+        "remaining_sats": max(0, MAX_SUPPLY_SATOSHIS - minted_sats),
+        "remaining_mhc": format_mhc(max(0, MAX_SUPPLY_SATOSHIS - minted_sats)),
+        "minted_pct": pct_mined,
+        "halving_interval": HALVING_INTERVAL,
+        "era": halv["era"],
+        "next_halving_height": halv["next_halving_height"],
+        "blocks_to_halving": blocks_to_halving,
+        "next_subsidy_mhc": halv["next_subsidy_mhc"],
+        "next_halving_eta_seconds": eta_seconds,
+        "next_halving_eta": format_duration(eta_seconds),
+        "eta_basis": "avg block interval" if avg_interval_seconds else "target spacing (10m)",
+        "schedule": subsidy_schedule(),
     }
 
 
@@ -509,6 +579,8 @@ def summarize_tx(
             "coinbase": False,
             "prev_txid": tin.prev_txid.hex(),
             "prev_vout": int(tin.prev_vout),
+            "sequence": int(tin.sequence),
+            "script_sig_hex": tin.script_sig.hex(),
         }
         if prev is not None:
             tout, src_h = prev
@@ -529,6 +601,7 @@ def summarize_tx(
                 "value_sats": int(tout.value),
                 "value_mhc": format_mhc(int(tout.value)),
                 "address": out_address(tout, hrp=hrp),
+                "script_pubkey_hex": tout.script_pubkey.hex(),
             }
         )
 
@@ -564,6 +637,7 @@ def summarize_tx(
         ),
         "version": int(tx.version),
         "locktime": int(tx.locktime),
+        "raw_hex": raw.hex(),
         "size_bytes": size,
         "input_count": len(tx.inputs),
         "output_count": len(tx.outputs),
@@ -1029,6 +1103,206 @@ def recent_transactions(
     return out
 
 
+def qr_svg(data: str, *, border: int = 2) -> str:
+    """Offline QR SVG for wallet addresses (Nayuki qrcodegen, MIT)."""
+    from mhcoin.explorer.qrcodegen import QrCode
+
+    qr = QrCode.encode_text(data, QrCode.Ecc.MEDIUM)
+    n = qr.get_size()
+    dim = n + border * 2
+    parts = [
+        f'<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 {dim} {dim}" '
+        f'role="img" aria-label="QR code">',
+        f'<rect width="{dim}" height="{dim}" fill="#ffffff"/>',
+    ]
+    for y in range(n):
+        for x in range(n):
+            if qr.get_module(x, y):
+                parts.append(
+                    f'<rect x="{x + border}" y="{y + border}" width="1" height="1" fill="#111418"/>'
+                )
+    parts.append("</svg>")
+    return "".join(parts)
+
+
+def _rich_list_chain_scan(
+    chain: ReadOnlyChain, *, hrp: str = DEFAULT_HRP, limit: int = 100
+) -> dict[str, Any]:
+    """Rebuild UTXO balances by scanning the active chain (slow fallback)."""
+    from collections import defaultdict
+
+    owned: dict[tuple[str, int], tuple[str, int]] = {}
+    tip = chain.height
+    for h in range(0, tip + 1):
+        block = chain.get_block_by_height(h)
+        if block is None:
+            continue
+        for tx in block.transactions:
+            txh = txid_hex(tx)
+            if not tx.is_coinbase():
+                for tin in tx.inputs:
+                    owned.pop((tin.prev_txid.hex(), int(tin.prev_vout)), None)
+            for n, tout in enumerate(tx.outputs):
+                addr = out_address(tout, hrp=hrp)
+                if addr:
+                    owned[(txh, n)] = (addr, int(tout.value))
+    balances: dict[str, int] = defaultdict(int)
+    utxo_counts: dict[str, int] = defaultdict(int)
+    for addr, val in owned.values():
+        balances[addr] += val
+        utxo_counts[addr] += 1
+    return _rich_list_rows(balances, utxo_counts, limit=limit, source="chain_scan")
+
+
+def _rich_list_rows(
+    balances: dict[str, int],
+    utxo_counts: dict[str, int],
+    *,
+    limit: int,
+    source: str,
+) -> dict[str, Any]:
+    total_supply = sum(balances.values())
+    rows: list[dict[str, Any]] = []
+    for rank, (addr, sats) in enumerate(
+        sorted(balances.items(), key=lambda x: (-x[1], x[0]))[: max(1, int(limit))],
+        start=1,
+    ):
+        rows.append(
+            {
+                "rank": rank,
+                "address": addr,
+                "balance_sats": sats,
+                "balance_mhc": format_mhc(sats),
+                "utxo_count": utxo_counts.get(addr, 0),
+                "share_pct": round(100.0 * sats / total_supply, 4) if total_supply else 0.0,
+            }
+        )
+    return {
+        "addresses": rows,
+        "count": len(rows),
+        "total_utxos": sum(utxo_counts.values()),
+        "total_supply_sats": total_supply,
+        "total_supply_mhc": format_mhc(total_supply),
+        "source": source,
+        "limit": limit,
+    }
+
+
+def rich_list(
+    data_dir,
+    *,
+    chain: ReadOnlyChain | None = None,
+    hrp: str = DEFAULT_HRP,
+    limit: int = 100,
+) -> dict[str, Any]:
+    """Top addresses by on-chain UTXO balance (chainstate preferred)."""
+    from collections import defaultdict
+    from pathlib import Path
+
+    from mhcoin.utxo import UTXOSet
+
+    limit = max(1, min(int(limit), 500))
+    cs = Path(data_dir) / "chainstate"
+    if cs.is_dir():
+        try:
+            utxo = UTXOSet(cs)
+            balances: dict[str, int] = defaultdict(int)
+            utxo_counts: dict[str, int] = defaultdict(int)
+            for entry in utxo.all_entries():
+                addr = out_address(entry.output, hrp=hrp)
+                if not addr:
+                    continue
+                val = int(entry.output.value)
+                balances[addr] += val
+                utxo_counts[addr] += 1
+            if balances:
+                return _rich_list_rows(
+                    dict(balances), dict(utxo_counts), limit=limit, source="chainstate"
+                )
+        except Exception:
+            pass
+    if chain is not None:
+        return _rich_list_chain_scan(chain, hrp=hrp, limit=limit)
+    return {
+        "addresses": [],
+        "count": 0,
+        "total_utxos": 0,
+        "total_supply_sats": 0,
+        "total_supply_mhc": format_mhc(0),
+        "source": "unavailable",
+        "limit": limit,
+    }
+
+
+def orphan_blocks(
+    chain: ReadOnlyChain, *, hrp: str = DEFAULT_HRP, limit: int = 100
+) -> dict[str, Any]:
+    """Best-effort fork/orphan view.
+
+    Gap this does NOT cover: the node's ``OrphanPool`` (mhcoin.blockchain.orphans)
+    holds blocks whose *parent is unknown yet* — it is a small in-memory, bounded
+    cache (``MAX_ORPHAN_BLOCKS``) that is never written to ``chain.sqlite`` and is
+    lost on restart. There is no on-disk record of those once they expire or the
+    node restarts, so a read-only explorer process cannot reconstruct them after
+    the fact without a protocol/storage change upstream.
+
+    What IS persisted and shown here: every block that was fully *validated* and
+    connected to the tree but then lost a reorg — stored in ``block_index`` with
+    ``status=STATUS_SIDE`` (see ``mhcoin.blockchain.chain``). These are genuine
+    stale/non-canonical blocks ("fork tips") with real proof-of-work behind them,
+    which is the useful, honest signal for an explorer: how often (and how deep)
+    the chain has forked.
+    """
+    now = int(time.time())
+    tip = chain.height
+    genesis = chain.get_block_by_height(0)
+    genesis_bits = int(genesis.header.bits) if genesis else None
+    entries = chain.get_side_chain_entries(limit=limit)
+
+    # A side block that is nobody's prev_hash is a dead-end fork tip (not since
+    # superseded by another stored side block at height+1). Mark those distinctly.
+    prevs = {e["prev_hash"] for e in entries}
+
+    rows: list[dict[str, Any]] = []
+    for e in entries:
+        h = e["height"]
+        active = chain.get_block_by_height(h)
+        active_hash = active.block_hash().hex() if active else None
+        diff = difficulty_from_bits(e["bits"], genesis_bits=genesis_bits)
+        ts = e["timestamp"]
+        rows.append(
+            {
+                "height": h,
+                "hash": e["hash"],
+                "prev_hash": e["prev_hash"],
+                "active_hash_at_height": active_hash,
+                "replaced_by_active": bool(active_hash) and active_hash != e["hash"],
+                "chain_work": e["chain_work"],
+                "bits": diff["bits"],
+                "difficulty_display": diff["difficulty_display"],
+                "timestamp": ts,
+                "time_utc": format_utc(ts),
+                "age": format_age(ts, now=now),
+                "blocks_behind_tip": max(0, tip - h) if tip >= 0 else None,
+                "is_fork_tip": e["hash"] not in prevs,
+            }
+        )
+    rows.sort(key=lambda r: (-r["height"], -r["chain_work"]))
+    return {
+        "tip_height": tip,
+        "count": len(rows),
+        "fork_tip_count": sum(1 for r in rows if r["is_fork_tip"]),
+        "blocks": rows,
+        "source": "block_index (status=SIDE)",
+        "gap_note": (
+            "Unknown-parent orphans live only in the node's in-memory OrphanPool "
+            "(bounded, not persisted) and cannot be listed after the fact. This "
+            "page lists validated side-chain blocks that lost a reorg instead — "
+            "the durable, on-disk signal of forking activity."
+        ),
+    }
+
+
 def chain_stats(chain: ReadOnlyChain, *, hrp: str = DEFAULT_HRP) -> dict[str, Any]:
     tip = chain.height
     tip_hash = chain.tip_hash.hex() if chain.tip_hash else None
@@ -1051,11 +1325,12 @@ def chain_stats(chain: ReadOnlyChain, *, hrp: str = DEFAULT_HRP) -> dict[str, An
         if prev_ts is not None and h > 0:
             intervals.append(ts - prev_ts)
         prev_ts = ts
+        # Issued supply = sum of consensus subsidies (not coinbase outputs:
+        # those include fees and made remaining look like 20965149.99995999).
+        minted_sats += int(get_block_subsidy(h))
         for tx in block.transactions:
             total_tx += 1
-            if tx.is_coinbase():
-                minted_sats += sum(int(o.value) for o in tx.outputs)
-            else:
+            if not tx.is_coinbase():
                 transfer_tx += 1
 
     recent_iv = [x for x in intervals[-30:] if 0 < x < 86_400]

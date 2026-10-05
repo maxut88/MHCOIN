@@ -388,6 +388,44 @@ class CoreController:
         self._refresh_balance_cache(created.address)
         return created.address
 
+    # --- address book (local labels, never broadcast) -----------------------
+
+    def address_book(self) -> dict[str, str]:
+        from mhcoin.desktop.address_book import load_address_book
+
+        return load_address_book(self.data_dir)
+
+    def set_address_label(self, address: str, label: str) -> dict[str, str]:
+        from mhcoin.desktop.address_book import set_label
+
+        addr = (address or "").strip()
+        if not validate_address(addr, hrp=self.hrp):
+            raise WalletError("invalid address")
+        return set_label(self.data_dir, addr, label)
+
+    def remove_address_label(self, address: str) -> dict[str, str]:
+        from mhcoin.desktop.address_book import remove_label
+
+        return remove_label(self.data_dir, address)
+
+    # --- receive QR (mhcoin: URI, offline SVG) -------------------------------
+
+    def receive_qr(self, address: str | None = None, amount_mhc: str | None = None) -> dict:
+        """SVG QR for ``mhcoin:<address>[?amount=]`` (BIP21-style, offline).
+
+        Reuses the explorer's vendored qrcodegen — no extra dependency. The
+        explorer page itself still encodes a plain address, so Desktop (and
+        the explorer) both stay scannable by any plain MHC address reader.
+        """
+        from mhcoin.desktop.uri import build_payment_uri
+        from mhcoin.explorer.decode import qr_svg
+
+        addr = (address or "").strip() or self.default_address()
+        if not validate_address(addr, hrp=self.hrp):
+            raise WalletError("invalid address")
+        uri = build_payment_uri(addr, amount_mhc)
+        return {"address": addr, "uri": uri, "svg": qr_svg(uri)}
+
     def _invalidate_balance_cache(self) -> None:
         self._balance_cache_sats = 0
         self._balance_cache_valid = False
@@ -489,9 +527,21 @@ class CoreController:
                     "public_key_fp": hashlib.sha256(bytes.fromhex(rec.public_key_hex)).hexdigest()[
                         :16
                     ],
+                    "watch_only": bool(getattr(rec, "watch_only", False)),
                 }
             )
         return rows
+
+    def active_watch_only(self) -> bool:
+        """True when the active wallet has no private key (xpub-imported)."""
+        try:
+            addr = self.default_address()
+        except WalletError:
+            return False
+        for w in self.list_wallets():
+            if w.get("address") == addr:
+                return bool(w.get("watch_only"))
+        return False
 
     def list_receive_addresses(self) -> list[dict]:
         return Wallet(self.paths).list_receive_addresses()
@@ -701,6 +751,16 @@ class CoreController:
         return f"{format_mhc(self._balance_cache_sats)} MHC"
 
     def send(self, to_address: str, amount_mhc: str, password: str, fee_mhc: str | None = None) -> str:
+        # Accept a plain address OR a BIP21-style "mhcoin:<addr>?amount=" URI
+        # (Desktop's own Receive QR emits the URI form; explorer QR is plain —
+        # pasted/scanned values from either must work here).
+        from mhcoin.desktop.uri import parse_payment_uri
+
+        parsed = parse_payment_uri(to_address)
+        if parsed.get("address"):
+            to_address = parsed["address"]
+        if not (amount_mhc or "").strip() and parsed.get("amount"):
+            amount_mhc = str(parsed["amount"])
         self.ensure_chain()
         with self._io:
             fee = parse_amount_mhc(fee_mhc) if fee_mhc else None

@@ -32,6 +32,7 @@ STATIC_FILES = {
 
 # Home/stats TTL — home tabs poll often; avoid full-chain rescans every hit.
 _HOME_CACHE_TTL_SEC = 3.0
+_RICH_CACHE_TTL_SEC = 30.0
 # Per-client limits only for expensive scans (not HTML / tip poll / static).
 _RATE_LIMIT_WINDOW_SEC = 60.0
 _RATE_LIMIT_ADDRESS = 60  # /address/* chain scans
@@ -57,9 +58,11 @@ def _logo_html(*, size_class: str = "") -> str:
 
 
 def _mint_mark(*, title: str = "MHC Mined") -> str:
-    """Tiny MHCOIN coin mark for mined / minted rows."""
+    """Tiny MHCOIN coin mark for mined / minted rows (animated in Live Blocks)."""
     return (
         f'<span class="mint" title="{_esc(title)}">'
+        f'<span class="mint-ring"></span>'
+        f'<span class="mint-ring2"></span>'
         f'<span class="mint-coin">{_LOGO_SVG_M}</span>'
         f"</span>"
     )
@@ -94,7 +97,17 @@ def _page(title: str, body: str, *, tip: int | None = None, hero: bool = False) 
 <head>
 <meta charset="utf-8"/>
 <meta name="viewport" content="width=device-width, initial-scale=1"/>
-<meta name="theme-color" content="#ffffff"/>
+<meta name="theme-color" content="#ffffff" id="metaThemeColor"/>
+<script>
+(function(){{
+  // Blocking (pre-paint) theme init — avoids a light/dark flash on load.
+  try {{
+    var saved = localStorage.getItem('mhcoin-theme');
+    var dark = saved ? saved === 'dark' : (window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches);
+    if (dark) document.documentElement.setAttribute('data-theme', 'dark');
+  }} catch (e) {{}}
+}})();
+</script>
 <meta name="description" content="MHCOIN block explorer — live mainnet tip, blocks, transactions, and addresses."/>
 <meta name="robots" content="index,follow"/>
 <meta property="og:title" content="{_esc(title)} — MHCOIN Explorer"/>
@@ -113,19 +126,30 @@ def _page(title: str, body: str, *, tip: int | None = None, hero: bool = False) 
   :root {{
     --bg: #f4f5f7; --panel: #ffffff; --text: #111418; --muted: #6b7280;
     --link: #111418; --line: #e5e7eb; --soft: #f9fafb;
+    --header-bg: rgba(255,255,255,.94); --hover-bg: #ffffff; --invert: #000000;
+    --val: #374151; --tbl-link: #111418;
     --sans: "DM Sans", system-ui, sans-serif;
     --mono: "JetBrains Mono", ui-monospace, Menlo, Consolas, monospace;
   }}
+  [data-theme="dark"] {{
+    --bg: #0b0d10; --panel: #15181d; --text: #e7eaee; --muted: #9aa3af;
+    --link: #e7eaee; --line: #262b33; --soft: #1b1f26;
+    --header-bg: rgba(11,13,16,.92); --hover-bg: #1e222a; --invert: #ffffff;
+    --val: #c7ccd4; --tbl-link: #e7eaee;
+  }}
   * {{ box-sizing: border-box; }}
+  html {{ background: var(--bg); color-scheme: light; }}
+  [data-theme="dark"] html, html[data-theme="dark"] {{ color-scheme: dark; }}
   body {{
     margin: 0; font-family: var(--sans); color: var(--text); line-height: 1.5;
     background: var(--bg); min-height: 100vh;
+    transition: background-color .15s ease, color .15s ease;
   }}
   a {{ color: var(--link); text-decoration: none; }}
-  a:hover {{ color: #000; text-decoration: underline; }}
+  a:hover {{ color: var(--invert); text-decoration: underline; }}
   header.top {{
     position: sticky; top: 0; z-index: 20;
-    background: rgba(255,255,255,.94);
+    background: var(--header-bg);
     backdrop-filter: blur(12px); -webkit-backdrop-filter: blur(12px);
     border-bottom: 1px solid var(--line);
     padding: 1rem 1.5rem .9rem; width: 100%;
@@ -201,35 +225,209 @@ def _page(title: str, body: str, *, tip: int | None = None, hero: bool = False) 
     font: inherit; outline: none;
   }}
   form.search input:focus {{
-    border-color: #9ca3af; background: #fff; box-shadow: 0 0 0 3px rgba(17,20,24,.06);
+    border-color: #9ca3af; background: var(--hover-bg); box-shadow: 0 0 0 3px rgba(17,20,24,.06);
   }}
   form.search button {{
     padding: .65rem 1.05rem; border-radius: 10px; border: 0;
-    background: var(--text); color: #fff; font-weight: 700; cursor: pointer; font: inherit;
+    background: var(--text); color: var(--bg); font-weight: 700; cursor: pointer; font: inherit;
   }}
-  form.search button:hover {{ background: #000; }}
+  form.search button:hover {{ background: var(--invert); color: var(--bg); }}
+  .theme-toggle {{
+    flex: 0 0 auto; width: 2.55rem; height: 2.55rem; padding: 0; border-radius: 999px;
+    border: 1px solid var(--line); background: transparent; cursor: pointer;
+    display: grid; place-items: center; position: relative; overflow: visible;
+    transition: transform .25s ease, border-color .2s ease, box-shadow .25s ease;
+  }}
+  .theme-toggle:hover {{ transform: scale(1.08); border-color: #2dd4a0; }}
+  .theme-toggle:active {{ transform: scale(.94) rotate(-18deg); }}
+  .theme-toggle:focus-visible {{ outline: 2px solid #2dd4a0; outline-offset: 2px; }}
+  .theme-coin {{
+    --tc-size: 1.85rem; width: var(--tc-size); height: var(--tc-size);
+    position: relative; display: grid; place-items: center; border-radius: 50%;
+  }}
+  .theme-coin .tc-ring, .theme-coin .tc-ring2 {{
+    position: absolute; inset: -3px; border-radius: 50%;
+    border: 1.5px solid transparent; pointer-events: none;
+  }}
+  .theme-coin .tc-core {{
+    width: 100%; height: 100%; border-radius: 50%;
+    display: grid; place-items: center; position: relative; overflow: hidden;
+    z-index: 1;
+  }}
+  .theme-coin .tc-core svg {{
+    width: 58%; height: 58%; display: block; position: relative; z-index: 2;
+    filter: drop-shadow(0 1px 0 rgba(0,40,25,.3));
+  }}
+  .theme-coin .tc-core::after {{
+    content: ""; position: absolute; inset: -45% -25%; z-index: 1;
+    background: linear-gradient(115deg, transparent 30%, rgba(255,255,255,.55), transparent 70%);
+  }}
+  /* Day = sunny PoW — bright mint, fast hash rings, warm glow */
+  html:not([data-theme="dark"]) .theme-coin .tc-core {{
+    background:
+      radial-gradient(circle at 32% 28%, rgba(255,255,255,.55), transparent 42%),
+      linear-gradient(145deg, #7dffc8 0%, #2dd4a0 42%, #0f7a55 100%);
+    box-shadow:
+      0 0 0 1px rgba(45,212,160,.4),
+      0 0 16px rgba(250,204,21,.35),
+      0 0 10px rgba(45,212,160,.35),
+      inset 0 -2px 3px rgba(0,40,25,.3), inset 0 2px 2px rgba(255,255,255,.4);
+    animation: tc-day-throb 1.8s ease-in-out infinite;
+  }}
+  html:not([data-theme="dark"]) .theme-coin .tc-core::after {{
+    animation: tc-day-sheen 1.6s ease-in-out infinite;
+  }}
+  html:not([data-theme="dark"]) .theme-coin .tc-ring {{
+    border-top-color: #f59e0b; border-right-color: rgba(245,158,11,.35);
+    animation: tc-mine-spin 1.1s linear infinite;
+  }}
+  html:not([data-theme="dark"]) .theme-coin .tc-ring2 {{
+    inset: 0; border-bottom-color: #2dd4a0; border-left-color: rgba(45,212,160,.25);
+    animation: tc-mine-spin 1.7s linear infinite reverse;
+  }}
+  html:not([data-theme="dark"]) .theme-toggle:hover {{
+    box-shadow: 0 0 14px rgba(245,158,11,.35);
+  }}
+  /* Night = deep mine — cooler coin, slow nonce search rings, cyan tick */
+  [data-theme="dark"] .theme-coin .tc-core {{
+    background:
+      radial-gradient(circle at 30% 26%, rgba(165,243,252,.35), transparent 40%),
+      linear-gradient(145deg, #1a9b72 0%, #0d5c44 48%, #06261a 100%);
+    box-shadow:
+      0 0 0 1px rgba(34,211,238,.35),
+      0 0 18px rgba(34,211,238,.28),
+      0 0 8px rgba(45,212,160,.2),
+      inset 0 -2px 4px rgba(0,0,0,.55), inset 0 2px 2px rgba(165,243,252,.15);
+    animation: tc-night-pulse 2.8s ease-in-out infinite;
+  }}
+  [data-theme="dark"] .theme-coin .tc-core::after {{
+    background: linear-gradient(115deg, transparent 28%, rgba(165,243,252,.4), transparent 72%);
+    animation: tc-night-sheen 3.4s ease-in-out infinite;
+  }}
+  [data-theme="dark"] .theme-coin .tc-ring {{
+    border-top-color: #22d3ee; border-right-color: rgba(34,211,238,.3);
+    animation: tc-mine-spin 2.4s linear infinite;
+  }}
+  [data-theme="dark"] .theme-coin .tc-ring2 {{
+    inset: -1px; border-bottom-color: #a78bfa; border-left-color: rgba(167,139,250,.25);
+    animation: tc-mine-spin 3.6s linear infinite reverse;
+  }}
+  [data-theme="dark"] .theme-toggle:hover {{
+    box-shadow: 0 0 16px rgba(34,211,238,.4);
+    border-color: #22d3ee;
+  }}
+  .theme-toggle.tc-found .theme-coin {{
+    animation: tc-block-found .7s cubic-bezier(.2,.8,.2,1);
+  }}
+  .theme-toggle.tc-found::before {{
+    content: ""; position: absolute; inset: -6px; border-radius: 50%;
+    border: 2px solid #2dd4a0; opacity: 0;
+    animation: tc-hash-burst .7s ease-out;
+    pointer-events: none;
+  }}
+  @keyframes tc-mine-spin {{ to {{ transform: rotate(360deg); }} }}
+  @keyframes tc-day-throb {{
+    0%,100% {{ transform: scale(1); }}
+    50% {{ transform: scale(1.06); }}
+  }}
+  @keyframes tc-day-sheen {{
+    0%,100% {{ transform: translateX(-35%) rotate(14deg); opacity: .4; }}
+    50% {{ transform: translateX(35%) rotate(14deg); opacity: .85; }}
+  }}
+  @keyframes tc-night-pulse {{
+    0%,100% {{ transform: scale(1); filter: brightness(1); }}
+    50% {{ transform: scale(1.04); filter: brightness(1.12); }}
+  }}
+  @keyframes tc-night-sheen {{
+    0%,100% {{ transform: translateX(-40%) rotate(10deg); opacity: .25; }}
+    50% {{ transform: translateX(40%) rotate(10deg); opacity: .65; }}
+  }}
+  @keyframes tc-block-found {{
+    0% {{ transform: rotateY(0) scale(1); }}
+    35% {{ transform: rotateY(180deg) scale(1.18); }}
+    70% {{ transform: rotateY(320deg) scale(1.05); }}
+    100% {{ transform: rotateY(360deg) scale(1); }}
+  }}
+  @keyframes tc-hash-burst {{
+    0% {{ transform: scale(.6); opacity: .9; }}
+    100% {{ transform: scale(1.8); opacity: 0; }}
+  }}
+  @media (prefers-reduced-motion: reduce) {{
+    .theme-coin .tc-ring, .theme-coin .tc-ring2, .theme-coin .tc-core,
+    .theme-coin .tc-core::after, .theme-toggle.tc-found .theme-coin,
+    .theme-toggle.tc-found::before {{ animation: none !important; }}
+  }}
+  .search-row {{ display: flex; gap: .5rem; align-items: center; }}
   main {{ width: 100%; margin: 0; padding: 1rem 1.5rem 2.75rem; }}
   .shell {{ width: 100%; }}
   .kpi {{
     display: grid; grid-template-columns: repeat(8, minmax(0, 1fr));
-    gap: .75rem; margin: 0 0 1rem;
+    gap: .5rem; margin: 0 0 .9rem;
   }}
   @media (max-width: 1280px) {{ .kpi {{ grid-template-columns: repeat(4, minmax(0, 1fr)); }} }}
   @media (max-width: 720px) {{ .kpi {{ grid-template-columns: repeat(2, minmax(0, 1fr)); }} }}
   .kpi .stat {{
-    background: var(--panel); border: 1px solid var(--line); border-radius: 12px;
-    padding: .85rem .95rem; min-height: 6.25rem;
+    --accent: #64748b;
+    --accent-soft: rgba(100, 116, 139, .08);
+    position: relative;
+    background: var(--panel);
+    border: 1px solid var(--line);
+    border-radius: 7px;
+    padding: .4rem .55rem .38rem .65rem;
+    min-height: 0;
     display: flex; flex-direction: column; min-width: 0;
+    overflow: hidden;
+    box-shadow: 0 1px 0 rgba(17, 20, 24, .03);
+    transition: border-color .15s ease, box-shadow .15s ease;
   }}
-  .kpi .lbl {{ color: var(--muted); font-size: .7rem; font-weight: 700; text-transform: uppercase; letter-spacing: .05em; line-height: 1.2; }}
+  .kpi .stat::before {{
+    content: ""; position: absolute; left: 0; top: 0; bottom: 0; width: 3px;
+    background: var(--accent);
+  }}
+  .kpi .stat::after {{
+    content: ""; position: absolute; inset: 0; pointer-events: none;
+    background: linear-gradient(135deg, var(--accent-soft), transparent 55%);
+  }}
+  .kpi .stat:hover {{
+    border-color: color-mix(in srgb, var(--accent) 35%, var(--line));
+    box-shadow: 0 4px 14px rgba(17, 20, 24, .05);
+  }}
+  [data-theme="dark"] .kpi .stat {{
+    box-shadow: 0 1px 0 rgba(0,0,0,.25);
+  }}
+  [data-theme="dark"] .kpi .stat:hover {{
+    box-shadow: 0 6px 18px rgba(0,0,0,.28);
+  }}
+  .kpi .stat.k-height {{ --accent: #0ea5e9; --accent-soft: rgba(14,165,233,.10); }}
+  .kpi .stat.k-hash {{ --accent: #16a34a; --accent-soft: rgba(22,163,74,.10); }}
+  .kpi .stat.k-diff {{ --accent: #d97706; --accent-soft: rgba(217,119,6,.10); }}
+  .kpi .stat.k-eta {{ --accent: #2563eb; --accent-soft: rgba(37,99,235,.10); }}
+  .kpi .stat.k-peers {{ --accent: #7c3aed; --accent-soft: rgba(124,58,237,.10); }}
+  .kpi .stat.k-blocks {{ --accent: #475569; --accent-soft: rgba(71,85,105,.10); }}
+  .kpi .stat.k-txs {{ --accent: #4f46e5; --accent-soft: rgba(79,70,229,.10); }}
+  .kpi .stat.k-mint {{ --accent: #059669; --accent-soft: rgba(5,150,105,.11); }}
+  .kpi .stat.k-supply {{ --accent: #0f766e; --accent-soft: rgba(15,118,110,.10); }}
+  .kpi .stat.k-halving {{ --accent: #b45309; --accent-soft: rgba(180,83,9,.10); }}
+  .kpi .lbl {{
+    position: relative; z-index: 1;
+    color: var(--muted); font-size: .54rem; font-weight: 720;
+    text-transform: uppercase; letter-spacing: .06em; line-height: 1.15;
+  }}
   .kpi .val {{
-    font-size: 1.2rem; font-weight: 780; margin-top: .2rem; letter-spacing: -.02em;
-    line-height: 1.25; min-height: 1.5rem;
+    position: relative; z-index: 1;
+    font-family: var(--mono); font-size: .92rem; font-weight: 700;
+    margin-top: .12rem; letter-spacing: -.03em;
+    line-height: 1.12; min-height: 0; color: var(--text);
+    font-variant-numeric: tabular-nums;
   }}
   .kpi .hint {{
-    color: var(--muted); font-size: .75rem; margin-top: .15rem;
-    line-height: 1.3; min-height: 2.6em; /* reserve 2 lines — stops shrink after paint */
+    position: relative; z-index: 1;
+    color: var(--muted); font-size: .6rem; margin-top: .2rem;
+    line-height: 1.25; min-height: 0;
+    border-top: 1px solid var(--line); padding-top: .2rem;
   }}
+  .kpi .hint.overdue, .kpi .hint.warn {{ color: #b45309; }}
+  [data-theme="dark"] .kpi .hint.overdue, [data-theme="dark"] .kpi .hint.warn {{ color: #fbbf24; }}
   .blocks-row {{
     display: grid; grid-template-columns: minmax(0, 1.7fr) minmax(300px, .95fr);
     gap: .75rem; align-items: start; margin: 0 0 1rem;
@@ -289,7 +487,7 @@ def _page(title: str, body: str, *, tip: int | None = None, hero: bool = False) 
   }}
   .blocks-row .term .found {{
     padding-top: .4rem;
-    border-top: 1px solid #e5e7eb;
+    border-top: 1px solid var(--line);
   }}
   .blocks-row .term .found:first-child {{
     padding-top: 0;
@@ -377,17 +575,94 @@ def _page(title: str, body: str, *, tip: int | None = None, hero: bool = False) 
 
   .row-ico {{ display: inline-flex; align-items: center; gap: .45rem; }}
   .mint {{
-    --mint: 18px; width: var(--mint); height: var(--mint);
-    display: inline-grid; place-items: center; flex-shrink: 0; vertical-align: middle;
+    --mint: 16px; width: var(--mint); height: var(--mint);
+    aspect-ratio: 1 / 1;
+    display: inline-flex; align-items: center; justify-content: center;
+    flex: 0 0 var(--mint); flex-shrink: 0; vertical-align: middle;
+    position: relative; border-radius: 50%;
+  }}
+  .mint-ring, .mint-ring2 {{
+    display: none; /* rings looked square in Live Blocks; glow via box-shadow instead */
   }}
   .mint-coin {{
-    width: 100%; height: 100%; border-radius: 50%;
+    width: 100%; height: 100%;
+    border-radius: 50%;
+    clip-path: circle(50%);
     background: linear-gradient(145deg, #5dffc0 0%, #2dd4a0 42%, #0f7a55 100%);
     box-shadow: 0 0 0 1px rgba(15,118,110,.25);
-    display: grid; place-items: center;
+    display: grid; place-items: center; position: relative; z-index: 1;
+    overflow: hidden;
     animation: throb 2.6s ease-in-out infinite;
   }}
-  .mint-coin svg {{ width: 58%; height: 58%; display: block; }}
+  .mint-coin::after {{
+    content: ""; position: absolute; inset: -40% -20%; z-index: 0;
+    background: linear-gradient(115deg, transparent 30%, rgba(255,255,255,.45), transparent 70%);
+    animation: sheen 3.2s ease-in-out infinite;
+  }}
+  .mint-coin svg {{ width: 58%; height: 58%; display: block; position: relative; z-index: 1; }}
+  /* Live Blocks — perfect circle, day/night mining glow (no square rings) */
+  .term-feed .mint {{ --mint: 15px; margin-right: .15rem; }}
+  .term-feed .found .title .row-ico {{ gap: .4rem; align-items: center; }}
+  html:not([data-theme="dark"]) .term-feed .mint-coin {{
+    background:
+      radial-gradient(circle at 32% 28%, rgba(255,255,255,.55), transparent 42%),
+      linear-gradient(145deg, #7dffc8 0%, #2dd4a0 45%, #0f7a55 100%);
+    box-shadow:
+      0 0 0 1px rgba(45,212,160,.45),
+      0 0 0 0 rgba(250,204,21,.0);
+    animation: lb-day-glow 1.8s ease-in-out infinite;
+  }}
+  html:not([data-theme="dark"]) .term-feed .mint-coin::after {{
+    animation: lb-day-sheen 1.6s ease-in-out infinite;
+  }}
+  [data-theme="dark"] .term-feed .mint-coin {{
+    background:
+      radial-gradient(circle at 30% 26%, rgba(165,243,252,.35), transparent 42%),
+      linear-gradient(145deg, #1a9b72 0%, #0d5c44 48%, #06261a 100%);
+    box-shadow:
+      0 0 0 1px rgba(34,211,238,.4),
+      0 0 0 0 rgba(34,211,238,.0);
+    animation: lb-night-glow 2.5s ease-in-out infinite;
+  }}
+  [data-theme="dark"] .term-feed .mint-coin::after {{
+    background: linear-gradient(115deg, transparent 28%, rgba(165,243,252,.4), transparent 72%);
+    animation: lb-night-sheen 3.2s ease-in-out infinite;
+  }}
+  .term-feed .found:nth-child(2) .mint-coin {{ animation-delay: .15s; }}
+  .term-feed .found:nth-child(3) .mint-coin {{ animation-delay: .3s; }}
+  .term-feed .found:nth-child(4) .mint-coin {{ animation-delay: .45s; }}
+  .term-feed .found:nth-child(5) .mint-coin {{ animation-delay: .6s; }}
+  @keyframes lb-day-glow {{
+    0%,100% {{
+      transform: scale(1);
+      box-shadow: 0 0 0 1px rgba(45,212,160,.45), 0 0 4px rgba(250,204,21,.25);
+    }}
+    50% {{
+      transform: scale(1.06);
+      box-shadow: 0 0 0 1px rgba(45,212,160,.55), 0 0 9px rgba(250,204,21,.45);
+    }}
+  }}
+  @keyframes lb-day-sheen {{
+    0%,100% {{ transform: translateX(-35%) rotate(12deg); opacity: .35; }}
+    50% {{ transform: translateX(35%) rotate(12deg); opacity: .85; }}
+  }}
+  @keyframes lb-night-glow {{
+    0%,100% {{
+      transform: scale(1);
+      box-shadow: 0 0 0 1px rgba(34,211,238,.4), 0 0 5px rgba(34,211,238,.25);
+    }}
+    50% {{
+      transform: scale(1.06);
+      box-shadow: 0 0 0 1px rgba(34,211,238,.55), 0 0 11px rgba(34,211,238,.45);
+    }}
+  }}
+  @keyframes lb-night-sheen {{
+    0%,100% {{ transform: translateX(-40%) rotate(10deg); opacity: .22; }}
+    50% {{ transform: translateX(40%) rotate(10deg); opacity: .65; }}
+  }}
+  @media (prefers-reduced-motion: reduce) {{
+    .term-feed .mint-coin, .term-feed .mint-coin::after {{ animation: none !important; }}
+  }}
   .pill {{
     display: inline-flex; align-items: center; padding: .16rem .55rem; border-radius: 999px;
     font-size: .72rem; font-weight: 800; color: #fff; white-space: nowrap;
@@ -402,11 +677,11 @@ def _page(title: str, body: str, *, tip: int | None = None, hero: bool = False) 
   }}
   .alert strong {{ color: #78350f; }}
   .term {{
-    background: #ffffff; color: #111418; border: 1px solid var(--line); border-radius: 14px;
+    background: var(--panel); color: var(--text); border: 1px solid var(--line); border-radius: 14px;
     padding: 1rem 1.1rem; margin: 0 0 1rem; font-family: var(--mono); font-size: .86rem;
   }}
   .term-head {{ display: flex; flex-wrap: wrap; gap: .75rem; align-items: baseline; justify-content: space-between; margin-bottom: .75rem; }}
-  .term-head h1 {{ margin: 0; color: #111418; font-family: var(--sans); font-size: 1.05rem; }}
+  .term-head h1 {{ margin: 0; color: var(--text); font-family: var(--sans); font-size: 1.05rem; }}
   .term-live {{ color: #16a34a; font-weight: 700; font-size: .78rem; letter-spacing: .04em; }}
   .term-live::before {{
     content: ""; display: inline-block; width: .55rem; height: .55rem; border-radius: 50%;
@@ -419,7 +694,7 @@ def _page(title: str, body: str, *, tip: int | None = None, hero: bool = False) 
     100% {{ box-shadow: 0 0 0 0 rgba(34,197,94,0); }}
   }}
   .term-feed {{ display: flex; flex-direction: column; gap: .15rem; }}
-  .found {{ border-top: 1px solid #e5e7eb; padding-top: .65rem; }}
+  .found {{ border-top: 1px solid var(--line); padding-top: .65rem; }}
   .found:first-child {{ border-top: 0; padding-top: 0; }}
   .found .title {{ color: #16a34a; font-weight: 800; }}
   .found .k {{ color: #9ca3af; }}
@@ -434,7 +709,7 @@ def _page(title: str, body: str, *, tip: int | None = None, hero: bool = False) 
   /* Terminal-style accents (light panel, same roles as Desktop mine log). */
   .found .h, .found .h a {{ color: #0891b2; font-weight: 700; text-decoration: none; }}
   .found .h a:hover {{ text-decoration: underline; }}
-  .found .val {{ color: #374151; }}
+  .found .val {{ color: var(--val); }}
   .found .v-time {{ color: #0891b2; }}
   .found .v-size {{ color: #6b7280; }}
   .found .v-diff {{ color: #a21caf; }}
@@ -443,11 +718,11 @@ def _page(title: str, body: str, *, tip: int | None = None, hero: bool = False) 
   .found .cyan, .found .cyan a {{ color: #0891b2; text-decoration: none; }}
   .found .cyan a:hover {{ text-decoration: underline; }}
   .found a {{ color: inherit; }}
-  .found .rule {{ color: #d1d5db; margin-top: .35rem; }}
-  table a, table a.mono, .row-ico a {{ color: #111418; }}
-  table a:hover, table a.mono:hover, .row-ico a:hover {{ color: #000; }}
-  .kpi .val a {{ color: #111418; }}
-  .kpi .val a:hover {{ color: #000; }}
+  .found .rule {{ color: var(--line); margin-top: .35rem; }}
+  table a, table a.mono, .row-ico a {{ color: var(--tbl-link); }}
+  table a:hover, table a.mono:hover, .row-ico a:hover {{ color: var(--invert); }}
+  .kpi .val a {{ color: var(--tbl-link); }}
+  .kpi .val a:hover {{ color: var(--invert); }}
   .mono {{ font-family: var(--mono); font-size: .72rem; word-break: break-all; }}
   .nowrap {{ white-space: nowrap; }}
   th.num, td.num {{ text-align: center; white-space: nowrap; }}
@@ -473,9 +748,9 @@ def _page(title: str, body: str, *, tip: int | None = None, hero: bool = False) 
     padding: .35rem .75rem; border-radius: 8px; border: 1px solid var(--line);
     background: var(--soft); font-weight: 650; font-size: .88rem; color: var(--text); text-decoration: none;
   }}
-  .pager a:hover {{ background: #fff; border-color: #c5c9d0; text-decoration: none; }}
+  .pager a:hover {{ background: var(--hover-bg); border-color: #9ca3af; text-decoration: none; }}
   .badge {{
-    display: inline-block; padding: .18rem .5rem; border-radius: 999px; background: #111418; color: #fff;
+    display: inline-block; padding: .18rem .5rem; border-radius: 999px; background: var(--text); color: var(--bg);
     font-size: .75rem; font-weight: 700; vertical-align: middle;
   }}
   .badge.warn {{ background: #fef3c7; color: #92400e; }}
@@ -487,6 +762,19 @@ def _page(title: str, body: str, *, tip: int | None = None, hero: bool = False) 
     header.top {{ padding: .85rem 1rem; }}
     main {{ padding: 1rem; }}
     .logo {{ --logo-size: 44px; }}
+    header nav {{ gap: .3rem .7rem; }}
+    .blocks-row .term {{ height: 22rem; min-height: 22rem; max-height: 22rem; }}
+  }}
+  @media (max-width: 520px) {{
+    .kpi {{ grid-template-columns: 1fr 1fr; }}
+    .header-inner {{ flex-direction: column; align-items: stretch; }}
+    .search-row {{ width: 100%; }}
+    form.search {{ width: auto; flex: 1 1 auto; }}
+    .kv {{ grid-template-columns: minmax(96px, 40%) 1fr; }}
+    .card {{ padding: .85rem .9rem; }}
+  }}
+  @media (max-width: 380px) {{
+    .kpi {{ grid-template-columns: 1fr; }}
   }}
 
   .copy-wrap {{ display: inline-flex; align-items: center; gap: .35rem; max-width: 100%; }}
@@ -494,12 +782,43 @@ def _page(title: str, body: str, *, tip: int | None = None, hero: bool = False) 
     border: 1px solid var(--line); background: var(--soft); color: var(--muted);
     border-radius: 6px; padding: .05rem .35rem; cursor: pointer; font-size: .7rem; line-height: 1.2;
   }}
-  .copy-btn:hover {{ color: var(--text); background: #fff; }}
+  .copy-btn:hover {{ color: var(--text); background: var(--hover-bg); }}
   .copy-btn.ok {{ color: #16a34a; border-color: #86efac; }}
-  .spark {{ display: block; width: 100%; max-width: 260px; height: 48px; }}
+  .spark {{ display: block; width: 100%; max-width: 320px; height: 48px; color: var(--text); }}
+  [data-theme="dark"] .spark {{ color: #e7eaee; }}
   .meta-row {{ display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: .75rem; margin: 0 0 1rem; }}
   .mini-stat .val {{ font-size: 1.05rem; }}
   table .mono {{ font-size: .72rem; }}
+  .hex-pre {{
+    margin: 0; padding: .85rem 1rem; border-radius: 10px; border: 1px solid var(--line);
+    background: var(--soft); font-family: var(--mono); font-size: .68rem; line-height: 1.45;
+    white-space: pre-wrap; word-break: break-all; max-height: 28rem; overflow: auto;
+  }}
+  .subtabs {{ display: flex; flex-wrap: wrap; gap: .45rem; margin: 0 0 .75rem; }}
+  .subtab {{
+    border: 1px solid var(--line); background: var(--soft); color: var(--muted);
+    border-radius: 8px; padding: .35rem .75rem; font-weight: 650; font-size: .85rem; cursor: pointer;
+  }}
+  .subtab.on {{ background: var(--text); color: var(--bg); border-color: var(--text); }}
+  .qr-row {{ display: flex; flex-wrap: wrap; gap: 1.25rem; align-items: flex-start; margin-top: 1rem; }}
+  .qr-box {{
+    flex: 0 0 auto; padding: .65rem; border: 1px solid var(--line); border-radius: 12px; background: #fff;
+  }}
+  .qr-box svg {{ display: block; width: 148px; height: 148px; }}
+  .link-grid {{
+    display: grid; grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)); gap: .65rem; margin: 0;
+  }}
+  .link-grid a {{
+    display: block; padding: .65rem .85rem; border-radius: 10px; border: 1px solid var(--line);
+    background: var(--soft); font-weight: 650; text-decoration: none;
+  }}
+  .link-grid a:hover {{ background: var(--hover-bg); border-color: #9ca3af; text-decoration: none; }}
+  [data-theme="dark"] .alert {{
+    background: #2a2208; border-color: #78350f; color: #fcd34d;
+  }}
+  [data-theme="dark"] .alert strong {{ color: #fde68a; }}
+  [data-theme="dark"] .badge.warn {{ background: #4a3c0a; color: #fcd34d; }}
+  /* QR codes stay on a fixed white tile (scanner contrast) regardless of theme. */
 </style>
 </head>
 <body>
@@ -513,17 +832,31 @@ def _page(title: str, body: str, *, tip: int | None = None, hero: bool = False) 
         <div class="meta" id="hdrMeta">Live mainnet · read-only{_esc(tip_bit)}</div>
         <nav>
           <a href="/">Home</a>
-          <a href="/blocks">All blocks</a>
-          <a href="/transactions">All transactions</a>
+          <a href="/blocks">Blocks</a>
+          <a href="/transactions">Transactions</a>
+          <a href="/richlist">Rich list</a>
+          <a href="/stats">Stats</a>
+          <a href="/charts">Charts</a>
+          <a href="/mempool">Mempool</a>
+          <a href="/supply">Supply</a>
+          <a href="/orphans">Orphans</a>
           <a href="/block/0">Genesis</a>
-          <a href="/block/1">Block #1</a>
         </nav>
       </div>
     </div>
-    <form class="search" method="get" action="/search">
-      <input name="q" placeholder="height · block / txid · mhc1…" autocomplete="off"/>
-      <button type="submit">Search</button>
-    </form>
+    <div class="search-row">
+      <form class="search" method="get" action="/search">
+        <input name="q" placeholder="height · block / txid · mhc1…" autocomplete="off"/>
+        <button type="submit">Search</button>
+      </form>
+      <button type="button" id="themeToggle" class="theme-toggle" aria-label="Toggle day / night" title="Toggle day / night (PoW coin)" aria-pressed="false">
+        <span class="theme-coin" aria-hidden="true">
+          <span class="tc-ring"></span>
+          <span class="tc-ring2"></span>
+          <span class="tc-core"><svg viewBox="0 0 32 32" fill="none" xmlns="http://www.w3.org/2000/svg" aria-hidden="true"><path d="M6 24V8h4.2l5.8 10.4L21.8 8H26v16h-3.4V13.2L17.2 24h-2.4L9.4 13.2V24H6z" fill="#06261a"/></svg></span>
+        </span>
+      </button>
+    </div>
   </div>
 </header>
 <main>
@@ -533,6 +866,37 @@ def _page(title: str, body: str, *, tip: int | None = None, hero: bool = False) 
 
 <script>
 (function(){{
+  // Light/dark toggle — persisted in localStorage, defaults to system preference.
+  var THEME_KEY = 'mhcoin-theme';
+  var root = document.documentElement;
+  var toggleBtn = document.getElementById('themeToggle');
+  var metaColor = document.getElementById('metaThemeColor');
+  function currentTheme() {{
+    return root.getAttribute('data-theme') === 'dark' ? 'dark' : 'light';
+  }}
+  function applyTheme(theme) {{
+    if (theme === 'dark') root.setAttribute('data-theme', 'dark');
+    else root.removeAttribute('data-theme');
+    if (toggleBtn) {{
+      var night = theme === 'dark';
+      toggleBtn.setAttribute('aria-pressed', night ? 'true' : 'false');
+      toggleBtn.setAttribute('title', night ? 'Night mine · switch to day' : 'Day mine · switch to night');
+      toggleBtn.setAttribute('aria-label', night ? 'Switch to day theme' : 'Switch to night theme');
+    }}
+    if (metaColor) metaColor.setAttribute('content', theme === 'dark' ? '#0b0d10' : '#ffffff');
+  }}
+  applyTheme(currentTheme());
+  if (toggleBtn) {{
+    toggleBtn.addEventListener('click', function () {{
+      var next = currentTheme() === 'dark' ? 'light' : 'dark';
+      toggleBtn.classList.remove('tc-found');
+      void toggleBtn.offsetWidth;
+      toggleBtn.classList.add('tc-found');
+      setTimeout(function() {{ toggleBtn.classList.remove('tc-found'); }}, 750);
+      applyTheme(next);
+      try {{ localStorage.setItem(THEME_KEY, next); }} catch (e) {{}}
+    }});
+  }}
   function flash(btn, mark) {{
     btn.classList.add('ok');
     btn.textContent = mark;
@@ -639,6 +1003,9 @@ class ExplorerApp:
         self._home_cache: dict[str, Any] | None = None
         self._home_cache_at: float = 0.0
         self._home_lock = threading.Lock()
+        self._rich_cache: dict[str, Any] | None = None
+        self._rich_cache_at: float = 0.0
+        self._rich_lock = threading.Lock()
         self._rate: dict[str, deque[float]] = defaultdict(deque)
         self._rate_lock = threading.Lock()
 
@@ -861,6 +1228,59 @@ class ExplorerApp:
         finally:
             c.close()
 
+    def richlist(self, *, limit: int = 100, force: bool = False) -> dict[str, Any]:
+        now = time.time()
+        with self._rich_lock:
+            if (
+                not force
+                and self._rich_cache is not None
+                and (now - self._rich_cache_at) < _RICH_CACHE_TTL_SEC
+            ):
+                return self._rich_cache
+        c = self.chain()
+        try:
+            data = D.rich_list(self.data_dir, chain=c, hrp=self.hrp, limit=limit)
+        finally:
+            c.close()
+        with self._rich_lock:
+            self._rich_cache = data
+            self._rich_cache_at = time.time()
+        return data
+
+    def stats(self) -> dict[str, Any]:
+        return self.home()
+
+    def charts(self) -> dict[str, Any]:
+        home = self.home()
+        return {
+            "tip_height": home.get("tip_height"),
+            "charts": home.get("charts") or {},
+            "halving": home.get("halving") or {},
+            "avg_block_interval_seconds": home.get("avg_block_interval_seconds"),
+            "network_hashrate": home.get("network_hashrate"),
+            "network_hashrate_window": home.get("network_hashrate_window"),
+            "network_hashrate_short": home.get("network_hashrate_short"),
+            "target_block_time_seconds": home.get("target_block_time_seconds"),
+        }
+
+    def mempool(self) -> dict[str, Any]:
+        return D.load_mempool(self.data_dir, hrp=self.hrp)
+
+    def supply(self) -> dict[str, Any]:
+        home = self.home()
+        return D.supply_info(
+            home.get("tip_height") or 0,
+            home.get("minted_sats") or 0,
+            avg_interval_seconds=home.get("avg_block_interval_seconds"),
+        )
+
+    def orphans(self, *, limit: int = 100) -> dict[str, Any]:
+        c = self.chain()
+        try:
+            return D.orphan_blocks(c, hrp=self.hrp, limit=limit)
+        finally:
+            c.close()
+
 
 def _pager(page: int, total_pages: int, base: str = "/blocks") -> str:
     prev_l = (
@@ -915,7 +1335,7 @@ def _copyable(text: str | None, *, short: bool = True, href: str | None = None, 
     )
 
 
-def _sparkline(values: list, *, width: int = 220, height: int = 48, stroke: str = "#111418") -> str:
+def _sparkline(values: list, *, width: int = 220, height: int = 48, stroke: str = "currentColor") -> str:
     if not values:
         return '<span class="muted">—</span>'
     nums = [float(v) for v in values if v is not None]
@@ -1200,9 +1620,7 @@ def _render_home(data: dict[str, Any]) -> bytes:
             + (f" · recent {hr_short}" if hr_short else "")
         )
     halv = data.get("halving") or {}
-    charts = data.get("charts") or {}
-    spark_iv = _sparkline(charts.get("intervals") or [])
-    spark_hr = _sparkline(charts.get("hashrate_hps") or [], stroke="#16a34a")
+    mp = data.get("mempool") or {}
     eta_hint = data.get("next_block_hint") or "—"
     overdue = bool(data.get("next_block_overdue"))
     eta_cls = "err" if overdue else "muted"
@@ -1212,82 +1630,45 @@ def _render_home(data: dict[str, Any]) -> bytes:
         total_hps=reported_hps,
         total_hashrate=reported_hr,
     )
-    miners = data.get("top_miners") or []
-    miner_rows = []
-    for m in miners[:8]:
-        miner_rows.append(
-            "<tr>"
-            f'<td>{_copyable(m.get("address"), href="/address/" + str(m.get("address")))}</td>'
-            f'<td class="num">{_esc(m.get("blocks"))}</td>'
-            f'<td class="num">{_esc(m.get("share_pct"))}%</td>'
-            f'<td class="num"><strong class="reward">{_esc(m.get("reward_mhc"))}</strong></td>'
-            "</tr>"
-        )
-    miners_html = (
-        '<div class="table-wrap"><table><tr><th>Miner</th><th class="num">Blocks</th>'
-        '<th class="num">Share</th><th class="num">Rewards</th></tr>'
-        + "".join(miner_rows)
-        + "</table></div>"
-        if miner_rows
-        else '<p class="muted">No miners yet.</p>'
-    )
-    mp = data.get("mempool") or {}
-    mp_rows = []
-    for tx in mp.get("transactions") or []:
-        tid = tx.get("txid") or "?"
-        mp_rows.append(
-            "<tr>"
-            f"<td>{_copyable(tid, href='/tx/' + str(tid))}</td>"
-            f'<td class="num">{_esc(tx.get("size_bytes") or "—")}</td>'
-            f'<td class="num">{_esc(tx.get("amount_mhc") or tx.get("output_value_mhc") or tx.get("fee_mhc") or "—")}</td>'
-            "</tr>"
-        )
-    mempool_html = (
-        '<div class="table-wrap"><table><tr><th>Txid</th><th class="num">Size</th><th class="num">Amount</th></tr>'
-        + "".join(mp_rows)
-        + "</table></div>"
-        if mp_rows
-        else '<p class="muted">Mempool empty — no unconfirmed transactions.</p>'
-    )
     body = f"""
     <div class="shell" id="explorerHome" data-tip="{_esc(data.get("tip_height"))}">
       <div class="kpi">
-        <div class="stat">
+        <div class="stat k-height">
           <div class="lbl">Block height</div>
           <div class="val" id="kpiHeight"><a href="/block/{data.get("tip_height")}">{data.get("tip_height")}</a></div>
           <div class="hint" id="kpiAge">{_esc(data.get("tip_age") or "—")} ago</div>
         </div>
-        <div class="stat">
+        <div class="stat k-hash">
           <div class="lbl" id="kpiHashLbl">{_esc(hr_lbl)}</div>
           <div class="val" id="kpiHashrate">{_esc(hr)}</div>
           <div class="hint" id="kpiHashHint">{_esc(hr_hint)}</div>
         </div>
-        <div class="stat">
+        <div class="stat k-diff">
           <div class="lbl">Difficulty</div>
           <div class="val" id="kpiDiff">{_esc(data.get("tip_difficulty_display") or "—")}</div>
           <div class="hint" id="kpiBits">bits {_esc(data.get("tip_bits") or "—")}</div>
         </div>
-        <div class="stat">
+        <div class="stat k-eta">
           <div class="lbl">Next block</div>
           <div class="val" id="kpiEta">{_esc(data.get("next_block_eta") if not overdue else "overdue")}</div>
           <div class="hint {eta_cls}" id="kpiEtaHint">{_esc(eta_hint)}</div>
         </div>
-        <div class="stat">
+        <div class="stat k-peers">
           <div class="lbl">Peers</div>
           <div class="val" id="kpiPeers">{_esc(peers_s)}</div>
           <div class="hint" id="kpiSync">{_esc(node.get("sync_state") or "—")}</div>
         </div>
-        <div class="stat">
+        <div class="stat k-blocks">
           <div class="lbl">Total blocks</div>
           <div class="val" id="kpiTotal"><a href="/blocks">{data.get("total_blocks")}</a></div>
           <div class="hint" id="kpiTotalHint">&nbsp;</div>
         </div>
-        <div class="stat">
+        <div class="stat k-txs">
           <div class="lbl">Transactions</div>
           <div class="val" id="kpiTxs">{data.get("total_transactions")}</div>
           <div class="hint" id="kpiXfer">{data.get("transfer_transactions")} transfers</div>
         </div>
-        <div class="stat">
+        <div class="stat k-mint">
           <div class="lbl">Minted supply</div>
           <div class="val" id="kpiMint">{_esc(data.get("minted_mhc"))}</div>
           <div class="hint">subsidy {_esc(halv.get("current_subsidy_mhc") or "50")} MHC</div>
@@ -1342,46 +1723,21 @@ def _render_home(data: dict[str, Any]) -> bytes:
         )}</div>
       </section>
 
-      <div class="meta-row">
-        <section class="card mini-stat">
-          <div class="card-head"><h1>Block intervals</h1><span class="muted">last 30</span></div>
-          {spark_iv}
-          <p class="muted" style="margin:.5rem 0 0">avg {_esc(avg_s)} · target 10m</p>
-        </section>
-        <section class="card mini-stat">
-          <div class="card-head"><h1>Observed hashrate</h1><span class="muted">per block</span></div>
-          {spark_hr}
-          <p class="muted" style="margin:.5rem 0 0">recent {_esc(hr_short or "—")} · window {_esc(hr_win or "—")}</p>
-        </section>
-        <section class="card mini-stat">
-          <div class="card-head"><h1>Halving</h1><span class="muted">era {_esc(halv.get("era"))}</span></div>
-          <div class="val">{_esc(halv.get("blocks_to_halving"))} blocks</div>
-          <p class="muted" style="margin:.5rem 0 0">
-            next #{_esc(halv.get("next_halving_height"))} · subsidy
-            {_esc(halv.get("current_subsidy_mhc"))} → {_esc(halv.get("next_subsidy_mhc"))} MHC
-          </p>
-        </section>
-        <section class="card mini-stat">
-          <div class="card-head"><h1>Target</h1><span class="muted">{_esc(data.get("tip_bits") or "")}</span></div>
-          <div class="mono" style="font-size:.75rem;word-break:break-all">{_esc(data.get("tip_target_short") or "—")}</div>
-          <p class="muted" style="margin:.5rem 0 0">difficulty {_esc(data.get("tip_difficulty_display") or "—")}× genesis</p>
-        </section>
-      </div>
-
       <section class="card">
         <div class="card-head">
-          <h1>Top miners</h1>
-          <span class="muted" style="font-size:.85rem">last 100 blocks</span>
+          <h1>Network dashboards</h1>
+          <span class="muted" style="font-size:.85rem">detailed views</span>
         </div>
-        {miners_html}
-      </section>
-
-      <section class="card">
-        <div class="card-head">
-          <h1>Mempool</h1>
-          <span class="muted" style="font-size:.85rem">{_esc(mp.get("count") or 0)} unconfirmed</span>
+        <div class="link-grid">
+          <a href="/stats">Stats &amp; miners</a>
+          <a href="/charts">Charts</a>
+          <a href="/mempool">Mempool ({_esc(mp.get("count") or 0)})</a>
+          <a href="/richlist">Rich list</a>
         </div>
-        {mempool_html}
+        <p class="muted" style="margin:.85rem 0 0;font-size:.85rem">
+          Avg interval {_esc(avg_s)} · halving in {_esc(halv.get("blocks_to_halving"))} blocks ·
+          <a href="/charts">view charts →</a>
+        </p>
       </section>
     </div>
     <script>
@@ -1394,7 +1750,9 @@ def _render_home(data: dict[str, Any]) -> bytes:
       }}
 
       function mintMark(title) {{
-        return '<span class="mint" title="' + esc(title || '') + '"><span class="mint-coin">' +
+        return '<span class="mint" title="' + esc(title || '') + '">' +
+          '<span class="mint-ring"></span><span class="mint-ring2"></span>' +
+          '<span class="mint-coin">' +
           '<svg viewBox="0 0 32 32" fill="none" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">' +
           '<path d="M6 24V8h4.2l5.8 10.4L21.8 8H26v16h-3.4V13.2L17.2 24h-2.4L9.4 13.2V24H6z" fill="#06261a"/>' +
           '</svg></span></span>';
@@ -1961,6 +2319,20 @@ def _render_tx(t: dict[str, Any]) -> bytes:
 """
     tip = _inferred_tip(height, conf)
     amt_lbl = "Reward" if coinbase else "Sent to recipient"
+    raw_hex = t.get("raw_hex") or ""
+    decode_obj = {
+        "txid": t.get("txid"),
+        "version": t.get("version"),
+        "locktime": t.get("locktime"),
+        "size_bytes": t.get("size_bytes"),
+        "coinbase": coinbase,
+        "inputs": t.get("inputs"),
+        "outputs": t.get("outputs"),
+        "input_value_mhc": t.get("input_value_mhc"),
+        "output_value_mhc": t.get("output_value_mhc"),
+        "fee_mhc": t.get("fee_mhc"),
+    }
+    decode_pre = _esc(json.dumps(decode_obj, indent=2, sort_keys=True, default=str))
     body = f"""
     <div class="shell">
     <div class="card">
@@ -1997,7 +2369,37 @@ def _render_tx(t: dict[str, Any]) -> bytes:
       <h1>To</h1>
       <ul class="plain">{"".join(outs) or "<li class='muted'>—</li>"}</ul>
     </div>
+    <div class="card">
+      <div class="card-head">
+        <h1>Raw &amp; decoded</h1>
+        <span class="muted">{_esc(t.get("size_bytes"))} bytes</span>
+      </div>
+      <div class="subtabs" role="tablist">
+        <button type="button" class="subtab on" data-tx-tab="raw">Raw hex</button>
+        <button type="button" class="subtab" data-tx-tab="decode">Decoded</button>
+      </div>
+      <pre class="hex-pre" id="txPanelRaw">{_esc(raw_hex or "—")}</pre>
+      <pre class="hex-pre" id="txPanelDecode" hidden>{decode_pre}</pre>
     </div>
+    </div>
+    <script>
+    (function(){{
+      var tabs = document.querySelectorAll('[data-tx-tab]');
+      var raw = document.getElementById('txPanelRaw');
+      var dec = document.getElementById('txPanelDecode');
+      tabs.forEach(function(btn) {{
+        btn.addEventListener('click', function() {{
+          var mode = btn.getAttribute('data-tx-tab');
+          tabs.forEach(function(b) {{ b.classList.toggle('on', b === btn); }});
+          if (mode === 'decode') {{
+            raw.hidden = true; dec.hidden = false;
+          }} else {{
+            raw.hidden = false; dec.hidden = true;
+          }}
+        }});
+      }});
+    }})();
+    </script>
     """
     return _page("Transaction", body, tip=tip)
 
@@ -2019,11 +2421,14 @@ def _render_address(a: dict[str, Any]) -> bytes:
         )
     addr = a.get("address")
     tip = a.get("tip_height")
+    qr_svg = D.qr_svg(str(addr)) if addr else ""
     body = f"""
     <div class="shell">
     <div class="card">
       <h1><span class="row-ico">{_mint_mark(title="Wallet")} Wallet</span></h1>
-      <div class="kv">
+      <div class="qr-row">
+        <div class="qr-box">{qr_svg}</div>
+        <div class="kv" style="flex:1;min-width:220px">
         <div>Address</div><div>{_copyable(addr, short=False)}</div>
         <div>Balance</div><div><strong class="reward">{_esc(a.get("balance_mhc") or "0")} MHC</strong>
           <span class="muted">({_esc(a.get("utxo_count") or 0)} UTXO)</span></div>
@@ -2033,6 +2438,7 @@ def _render_address(a: dict[str, Any]) -> bytes:
           <span class="muted"> · payments only</span></div>
         <div>Network fees</div><div>{_esc(a.get("total_fees_mhc") or "0")} MHC</div>
         <div>Outputs</div><div>{_esc(a.get("received_count"))}{_esc(" (truncated)" if a.get("truncated") else "")}</div>
+        </div>
       </div>
       <p class="muted" style="margin:.75rem 0 0;font-size:.85rem">
         Balance ≈ Received − Sent − Fees.
@@ -2054,6 +2460,372 @@ def _render_address(a: dict[str, Any]) -> bytes:
     """
     return _page("Address", body, tip=tip)
 
+
+def _render_richlist(data: dict[str, Any]) -> bytes:
+    rows = []
+    for r in data.get("addresses") or []:
+        addr = r.get("address")
+        rows.append(
+            "<tr>"
+            f'<td class="num">{_esc(r.get("rank"))}</td>'
+            f'<td>{_copyable(addr, href="/address/" + str(addr), short=False)}</td>'
+            f'<td class="num"><strong class="reward">{_esc(r.get("balance_mhc"))}</strong></td>'
+            f'<td class="num">{_esc(r.get("utxo_count"))}</td>'
+            f'<td class="num">{_esc(r.get("share_pct"))}%</td>'
+            "</tr>"
+        )
+    body = f"""
+    <div class="shell">
+      <div class="card">
+        <div class="card-head">
+          <h1>Rich list</h1>
+          <span class="muted">top {_esc(data.get("limit"))} by UTXO balance · {_esc(data.get("source"))}</span>
+        </div>
+        <p class="muted" style="margin:0 0 .75rem;font-size:.85rem">
+          Circulating in UTXO set: <strong>{_esc(data.get("total_supply_mhc"))} MHC</strong>
+          · {_esc(data.get("total_utxos"))} UTXOs
+        </p>
+        <div class="table-wrap"><table class="data-table">
+          <tr><th class="num">#</th><th>Address</th><th class="num">Balance</th><th class="num">UTXOs</th><th class="num">Share</th></tr>
+          {"".join(rows) or '<tr><td colspan="5" class="muted">No balances</td></tr>'}
+        </table></div>
+      </div>
+    </div>
+    """
+    return _page("Rich list", body)
+
+
+def _render_stats(data: dict[str, Any]) -> bytes:
+    avg = data.get("avg_block_interval_seconds")
+    avg_s = _fmt_interval(avg) if avg is not None else "—"
+    halv = data.get("halving") or {}
+    node = data.get("node") or {}
+    miners = data.get("top_miners") or []
+    miner_rows = []
+    for m in miners:
+        miner_rows.append(
+            "<tr>"
+            f'<td>{_copyable(m.get("address"), href="/address/" + str(m.get("address")))}</td>'
+            f'<td class="num">{_esc(m.get("blocks"))}</td>'
+            f'<td class="num">{_esc(m.get("share_pct"))}%</td>'
+            f'<td class="num"><strong class="reward">{_esc(m.get("reward_mhc"))}</strong></td>'
+            "</tr>"
+        )
+    peers_panel = _peers_panel(
+        node.get("peers") or [],
+        peer_count=node.get("peer_count"),
+        total_hps=node.get("reported_hashrate_hps"),
+        total_hashrate=node.get("reported_hashrate"),
+    )
+    body = f"""
+    <div class="shell">
+      <div class="kpi">
+        <div class="stat k-height"><div class="lbl">Height</div><div class="val">{_esc(data.get("tip_height"))}</div></div>
+        <div class="stat k-blocks"><div class="lbl">Blocks</div><div class="val">{_esc(data.get("total_blocks"))}</div></div>
+        <div class="stat k-txs"><div class="lbl">Transactions</div><div class="val">{_esc(data.get("total_transactions"))}</div></div>
+        <div class="stat k-hash"><div class="lbl">Transfers</div><div class="val">{_esc(data.get("transfer_transactions"))}</div></div>
+        <div class="stat k-mint"><div class="lbl">Minted</div><div class="val">{_esc(data.get("minted_mhc"))}</div></div>
+        <div class="stat k-diff"><div class="lbl">Difficulty</div><div class="val">{_esc(data.get("tip_difficulty_display"))}</div></div>
+        <div class="stat k-eta"><div class="lbl">Avg interval</div><div class="val">{_esc(avg_s)}</div></div>
+        <div class="stat k-peers"><div class="lbl">Peers</div><div class="val">{_esc(node.get("peer_count") if node.get("peer_count") is not None else "—")}</div></div>
+      </div>
+      <section class="card">
+        <div class="card-head"><h1>Halving</h1><span class="muted">era {_esc(halv.get("era"))}</span></div>
+        <div class="kv">
+          <div>Current subsidy</div><div>{_esc(halv.get("current_subsidy_mhc"))} MHC</div>
+          <div>Next halving</div><div>block #{_esc(halv.get("next_halving_height"))} · {_esc(halv.get("blocks_to_halving"))} blocks</div>
+          <div>Next subsidy</div><div>{_esc(halv.get("next_subsidy_mhc"))} MHC</div>
+          <div>Target</div><div class="mono">{_esc(data.get("tip_target_short") or data.get("tip_target") or "—")}</div>
+        </div>
+      </section>
+      <section class="card">
+        <div class="card-head"><h1>Top miners</h1><span class="muted">last 100 blocks</span></div>
+        <div class="table-wrap"><table class="data-table">
+          <tr><th>Miner</th><th class="num">Blocks</th><th class="num">Share</th><th class="num">Rewards</th></tr>
+          {"".join(miner_rows) or '<tr><td colspan="4" class="muted">No miners yet.</td></tr>'}
+        </table></div>
+      </section>
+      {peers_panel}
+    </div>
+    """
+    return _page("Network stats", body, tip=data.get("tip_height"))
+
+
+def _render_charts(data: dict[str, Any]) -> bytes:
+    charts = data.get("charts") or {}
+    halv = data.get("halving") or {}
+    avg = data.get("avg_block_interval_seconds")
+    avg_s = _fmt_interval(avg) if avg is not None else "—"
+    spark_iv = _sparkline(charts.get("intervals") or [], width=320, height=72)
+    spark_hr = _sparkline(charts.get("hashrate_hps") or [], width=320, height=72, stroke="#16a34a")
+    body = f"""
+    <div class="shell">
+      <div class="meta-row">
+        <section class="card mini-stat">
+          <div class="card-head"><h1>Block intervals</h1><span class="muted">last { _esc(charts.get("window") or 30) }</span></div>
+          {spark_iv}
+          <p class="muted" style="margin:.5rem 0 0">avg {_esc(avg_s)} · target {_esc(data.get("target_block_time_seconds") or 600)}s</p>
+        </section>
+        <section class="card mini-stat">
+          <div class="card-head"><h1>Observed hashrate</h1><span class="muted">per block</span></div>
+          {spark_hr}
+          <p class="muted" style="margin:.5rem 0 0">
+            recent {_esc(data.get("network_hashrate_short") or "—")} ·
+            window {_esc(data.get("network_hashrate_window") or "—")}
+          </p>
+        </section>
+        <section class="card mini-stat">
+          <div class="card-head"><h1>Implied hashrate</h1><span class="muted">@ tip bits</span></div>
+          <div class="val">{_esc(data.get("network_hashrate") or "—")}</div>
+          <p class="muted" style="margin:.5rem 0 0">10m target spacing</p>
+        </section>
+        <section class="card mini-stat">
+          <div class="card-head"><h1>Halving</h1><span class="muted">era {_esc(halv.get("era"))}</span></div>
+          <div class="val">{_esc(halv.get("blocks_to_halving"))} blocks</div>
+          <p class="muted" style="margin:.5rem 0 0">next #{_esc(halv.get("next_halving_height"))}</p>
+        </section>
+      </div>
+      <p class="muted" style="font-size:.85rem"><a href="/api/charts">JSON</a> · heights in series: {len(charts.get("heights") or [])}</p>
+    </div>
+    """
+    return _page("Charts", body, tip=data.get("tip_height"))
+
+
+def _mempool_row_html(tx: dict[str, Any]) -> str:
+    tid = tx.get("txid") or "?"
+    return (
+        "<tr>"
+        f'<td class="hash-col">{_copyable(tid, href="/tx/" + str(tid), short=False)}</td>'
+        f'<td class="num">{_esc(tx.get("size_bytes") or "—")}</td>'
+        f'<td class="num">{_esc(tx.get("input_count") or "—")}</td>'
+        f'<td class="num">{_esc(tx.get("output_count") or "—")}</td>'
+        f'<td class="num">{_esc(tx.get("amount_mhc") or tx.get("output_value_mhc") or tx.get("fee_mhc") or "—")}</td>'
+        f'<td>{_type_pill(bool(tx.get("coinbase")))}</td>'
+        "</tr>"
+    )
+
+
+def _mempool_table_html(txs: list[dict[str, Any]]) -> str:
+    rows = "".join(_mempool_row_html(tx) for tx in txs)
+    empty_row = '<tr><td colspan="6" class="muted">Mempool empty</td></tr>'
+    body_rows = rows or empty_row
+    return (
+        '<div class="table-wrap"><table class="data-table">'
+        '<tr><th class="hash-col">Txid</th><th class="num">Size</th><th class="num">In</th>'
+        '<th class="num">Out</th><th class="num">Amount</th><th>Type</th></tr>'
+        f"{body_rows}"
+        "</table></div>"
+    )
+
+
+def _render_mempool(data: dict[str, Any]) -> bytes:
+    txs = data.get("transactions") or []
+    init_key = "|".join(str(tx.get("txid") or "") for tx in txs)
+    body = f"""
+    <div class="shell">
+      <div class="card">
+        <div class="card-head">
+          <h1>Mempool</h1>
+          <span class="muted" id="mempoolCount">{_esc(data.get("count") or 0)} unconfirmed · node snapshot</span>
+        </div>
+        <p class="muted" style="margin:0 0 .75rem;font-size:.85rem">
+          Read from <span class="mono">{_esc(data.get("path") or "mempool.json")}</span>
+          · <a href="/api/mempool">JSON</a>
+          · <span class="term-live" id="mempoolLive" style="font-size:.7rem">live</span>
+        </p>
+        <div id="mempoolWrap" data-key="{_esc(init_key)}">{_mempool_table_html(txs)}</div>
+      </div>
+    </div>
+    <script>
+    (function () {{
+      // Mempool auto-refresh — polls /api/mempool, diffs by txid set so an
+      // unchanged (e.g. still-empty) mempool never re-renders / layout-shifts.
+      function esc(s) {{
+        return String(s == null ? '' : s)
+          .replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+      }}
+      function shortHash(h) {{
+        h = String(h || '');
+        if (h.length <= 21) return h;
+        return h.slice(0, 10) + '\u2026' + h.slice(-10);
+      }}
+      function copyable(text, href) {{
+        if (!text) return '<span class="muted">\u2014</span>';
+        return '<span class="copy-wrap"><a class="mono" href="' + href + '" title="' + esc(text) + '">' +
+          esc(shortHash(text)) + '</a><button type="button" class="copy-btn" data-copy="' + esc(text) +
+          '" title="Copy">\u23d8</button></span>';
+      }}
+      function typePill(cb) {{
+        return cb ? '<span class="pill minted">MHC Mined</span>' : '<span class="pill xfer">Transfer</span>';
+      }}
+      function renderRows(txs) {{
+        if (!txs || !txs.length) return '<tr><td colspan="6" class="muted">Mempool empty</td></tr>';
+        return txs.map(function (tx) {{
+          var amt = tx.amount_mhc || tx.output_value_mhc || tx.fee_mhc || '\u2014';
+          return '<tr>' +
+            '<td class="hash-col">' + copyable(tx.txid, '/tx/' + encodeURIComponent(tx.txid || '')) + '</td>' +
+            '<td class="num">' + esc(tx.size_bytes || '\u2014') + '</td>' +
+            '<td class="num">' + esc(tx.input_count || '\u2014') + '</td>' +
+            '<td class="num">' + esc(tx.output_count || '\u2014') + '</td>' +
+            '<td class="num">' + esc(amt) + '</td>' +
+            '<td>' + typePill(!!tx.coinbase) + '</td>' +
+            '</tr>';
+        }}).join('');
+      }}
+      async function tick() {{
+        try {{
+          var r = await fetch('/api/mempool?_=' + Date.now(), {{ cache: 'no-store' }});
+          if (!r.ok) return;
+          var d = await r.json();
+          var txs = d.transactions || [];
+          var key = txs.map(function (t) {{ return t.txid || ''; }}).join('|');
+          var wrap = document.getElementById('mempoolWrap');
+          if (wrap && wrap.dataset.key !== key) {{
+            wrap.dataset.key = key;
+            wrap.innerHTML = '<div class="table-wrap"><table class="data-table">' +
+              '<tr><th class="hash-col">Txid</th><th class="num">Size</th><th class="num">In</th>' +
+              '<th class="num">Out</th><th class="num">Amount</th><th>Type</th></tr>' +
+              renderRows(txs) + '</table></div>';
+          }}
+          var cnt = document.getElementById('mempoolCount');
+          if (cnt) {{
+            var txt = (d.count || 0) + ' unconfirmed \u00b7 node snapshot';
+            if (cnt.textContent !== txt) cnt.textContent = txt;
+          }}
+        }} catch (e) {{}}
+      }}
+      setInterval(tick, 4000);
+      setTimeout(tick, 4000);
+    }})();
+    </script>
+    """
+    return _page("Mempool", body)
+
+
+def _render_supply(data: dict[str, Any]) -> bytes:
+    schedule = data.get("schedule") or []
+    tip = int(data.get("tip_height") or 0)
+    rows = []
+    for row in schedule:
+        era = row.get("era")
+        from_h = row.get("from_height")
+        to_h = row.get("to_height")
+        reached = tip >= from_h
+        passed = tip > to_h
+        status = (
+            '<span class="pill xfer">current</span>'
+            if reached and not passed
+            else ('<span class="badge">done</span>' if passed else '<span class="muted">upcoming</span>')
+        )
+        rows.append(
+            "<tr>"
+            f'<td class="num">{_esc(era)}</td>'
+            f'<td class="num">#{_esc(from_h)}</td>'
+            f'<td class="num">#{_esc(to_h)}</td>'
+            f'<td class="num"><strong class="reward">{_esc(row.get("subsidy_mhc"))} MHC</strong></td>'
+            f"<td>{status}</td>"
+            "</tr>"
+        )
+    body = f"""
+    <div class="shell">
+      <div class="kpi">
+        <div class="stat k-height">
+          <div class="lbl">Tip height</div>
+          <div class="val"><a href="/block/{_esc(tip)}">#{_esc(tip)}</a></div>
+        </div>
+        <div class="stat k-mint">
+          <div class="lbl">Current block reward</div>
+          <div class="val">{_esc(data.get("current_subsidy_mhc"))} MHC</div>
+        </div>
+        <div class="stat k-supply">
+          <div class="lbl">Minted (subsidy)</div>
+          <div class="val">{_esc(data.get("minted_mhc"))} MHC</div>
+          <div class="hint">{_esc(data.get("minted_pct"))}% of hard cap</div>
+        </div>
+        <div class="stat k-blocks">
+          <div class="lbl">Hard cap</div>
+          <div class="val">21,000,000 MHC</div>
+          <div class="hint">{_esc(data.get("remaining_mhc"))} MHC still to mine</div>
+        </div>
+        <div class="stat k-halving">
+          <div class="lbl">Next halving</div>
+          <div class="val"><a href="/block/{_esc(data.get("next_halving_height"))}">#{_esc(data.get("next_halving_height"))}</a></div>
+          <div class="hint">{_esc(data.get("blocks_to_halving"))} blocks to go</div>
+        </div>
+        <div class="stat k-eta">
+          <div class="lbl">Est. halving ETA</div>
+          <div class="val">{_esc(data.get("next_halving_eta"))}</div>
+          <div class="hint">{_esc(data.get("eta_basis"))}</div>
+        </div>
+      </div>
+      <section class="card">
+        <div class="card-head">
+          <h1>Subsidy schedule</h1>
+          <span class="muted">era {_esc(data.get("era"))} of {_esc(len(schedule) - 1 if schedule else 0)} · {_esc(data.get("halving_interval"))} blocks/era</span>
+        </div>
+        <p class="muted" style="margin:0 0 .75rem;font-size:.85rem">
+          Reward halves every {_esc(data.get("halving_interval"))} blocks (integer right-shift of the
+          initial subsidy) until it rounds to zero — defined in
+          <span class="mono">mhcoin.consensus.block_reward.get_block_subsidy</span>.
+          · <a href="/api/supply">JSON</a>
+        </p>
+        <div class="table-wrap"><table class="data-table">
+          <tr><th class="num">Era</th><th class="num">From height</th><th class="num">To height</th><th class="num">Reward</th><th>Status</th></tr>
+          {"".join(rows) or '<tr><td colspan="5" class="muted">No schedule.</td></tr>'}
+        </table></div>
+      </section>
+    </div>
+    """
+    return _page("Supply", body, tip=data.get("tip_height"))
+
+
+def _render_orphans(data: dict[str, Any]) -> bytes:
+    rows = []
+    for b in data.get("blocks") or []:
+        active_h = b.get("active_hash_at_height")
+        active_html = (
+            _copyable(active_h, href="/block/" + str(active_h))
+            if active_h
+            else '<span class="muted">—</span>'
+        )
+        tip_badge = (
+            '<span class="pill xfer">fork tip</span>'
+            if b.get("is_fork_tip")
+            else '<span class="muted">superseded</span>'
+        )
+        rows.append(
+            "<tr>"
+            f'<td class="num">#{_esc(b.get("height"))}</td>'
+            f'<td class="hash-col">{_copyable(b.get("hash"), short=False)}</td>'
+            f"<td>{active_html}</td>"
+            f'<td class="num">{_esc(b.get("difficulty_display"))}</td>'
+            f'<td class="muted nowrap">{_esc(b.get("age") or "—")}</td>'
+            f'<td class="muted nowrap">{_esc(b.get("time_utc") or "—")}</td>'
+            f"<td>{tip_badge}</td>"
+            "</tr>"
+        )
+    body = f"""
+    <div class="shell">
+      <div class="card">
+        <div class="card-head">
+          <h1>Orphans &amp; reorgs</h1>
+          <span class="muted">{_esc(data.get("count") or 0)} side-chain block(s) on disk · {_esc(data.get("fork_tip_count") or 0)} fork tip(s)</span>
+        </div>
+        <p class="muted" style="margin:0 0 .75rem;font-size:.85rem">
+          {_esc(data.get("gap_note") or "")}
+          · <a href="/api/orphans">JSON</a>
+        </p>
+        <div class="table-wrap"><table class="data-table">
+          <tr>
+            <th class="num">Height</th><th class="hash-col">Side-chain hash</th><th>Active hash (won)</th>
+            <th class="num">Difficulty</th><th>Age</th><th>Time (UTC)</th><th>Branch</th>
+          </tr>
+          {"".join(rows) or '<tr><td colspan="7" class="muted">No stored side-chain blocks — this node has not seen a reorg (yet).</td></tr>'}
+        </table></div>
+      </div>
+    </div>
+    """
+    return _page("Orphans", body, tip=data.get("tip_height"))
 
 
 def make_handler(app: ExplorerApp):
@@ -2175,7 +2947,18 @@ def make_handler(app: ExplorerApp):
                         tip = app.tip_status().get("tip_height")
                     except Exception:
                         tip = None
-                    urls = ["/", "/blocks", "/transactions", "/block/0"]
+                    urls = [
+                        "/",
+                        "/blocks",
+                        "/transactions",
+                        "/richlist",
+                        "/stats",
+                        "/charts",
+                        "/mempool",
+                        "/supply",
+                        "/orphans",
+                        "/block/0",
+                    ]
                     if isinstance(tip, int) and tip >= 0:
                         urls.append(f"/block/{tip}")
                     items = "".join(
@@ -2261,6 +3044,113 @@ def make_handler(app: ExplorerApp):
                         self._json(200, data)
                     else:
                         self._html(200, _render_tx(data))
+                    return
+
+                if key in ("/richlist", "/richlist/"):
+                    limit = 100
+                    try:
+                        limit = int((qs.get("limit") or ["100"])[0])
+                    except ValueError:
+                        limit = 100
+                    if want_json and not app.allow_request(
+                        self._client(), bucket="api-home", limit=_RATE_LIMIT_API_HOME
+                    ):
+                        self._error(
+                            429,
+                            "Rate limit exceeded. Try again shortly.",
+                            want_json=True,
+                        )
+                        return
+                    data = app.richlist(limit=limit)
+                    if want_json:
+                        self._json(200, data)
+                    else:
+                        self._html(200, _render_richlist(data))
+                    return
+
+                if key in ("/stats", "/stats/"):
+                    if want_json and not app.allow_request(
+                        self._client(), bucket="api-home", limit=_RATE_LIMIT_API_HOME
+                    ):
+                        self._error(
+                            429,
+                            "Rate limit exceeded. Try again shortly.",
+                            want_json=True,
+                        )
+                        return
+                    data = app.stats()
+                    if want_json:
+                        self._json(200, data)
+                    else:
+                        self._html(200, _render_stats(data))
+                    return
+
+                if key in ("/charts", "/charts/"):
+                    if want_json and not app.allow_request(
+                        self._client(), bucket="api-home", limit=_RATE_LIMIT_API_HOME
+                    ):
+                        self._error(
+                            429,
+                            "Rate limit exceeded. Try again shortly.",
+                            want_json=True,
+                        )
+                        return
+                    data = app.charts()
+                    if want_json:
+                        self._json(200, data)
+                    else:
+                        self._html(200, _render_charts(data))
+                    return
+
+                if key in ("/mempool", "/mempool/"):
+                    if want_json and not app.allow_request(
+                        self._client(), bucket="api-home", limit=_RATE_LIMIT_API_HOME
+                    ):
+                        self._error(
+                            429,
+                            "Rate limit exceeded. Try again shortly.",
+                            want_json=True,
+                        )
+                        return
+                    data = app.mempool()
+                    if want_json:
+                        self._json(200, data)
+                    else:
+                        self._html(200, _render_mempool(data))
+                    return
+
+                if key in ("/supply", "/supply/", "/halving", "/halving/"):
+                    if want_json and not app.allow_request(
+                        self._client(), bucket="api-home", limit=_RATE_LIMIT_API_HOME
+                    ):
+                        self._error(
+                            429,
+                            "Rate limit exceeded. Try again shortly.",
+                            want_json=True,
+                        )
+                        return
+                    data = app.supply()
+                    if want_json:
+                        self._json(200, data)
+                    else:
+                        self._html(200, _render_supply(data))
+                    return
+
+                if key in ("/orphans", "/orphans/", "/reorgs", "/reorgs/"):
+                    if want_json and not app.allow_request(
+                        self._client(), bucket="api-home", limit=_RATE_LIMIT_API_HOME
+                    ):
+                        self._error(
+                            429,
+                            "Rate limit exceeded. Try again shortly.",
+                            want_json=True,
+                        )
+                        return
+                    data = app.orphans()
+                    if want_json:
+                        self._json(200, data)
+                    else:
+                        self._html(200, _render_orphans(data))
                     return
 
                 if key.startswith("/address/"):

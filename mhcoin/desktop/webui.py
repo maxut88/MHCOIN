@@ -437,6 +437,29 @@ HTML = r"""<!DOCTYPE html>
   }
   .dot { width:6px; height:6px; border-radius:50%; background: var(--muted); }
   .dot.on { background: var(--ok); box-shadow: 0 0 0 3px rgba(45,212,160,.15); animation: pulse 1.6s ease-in-out infinite; }
+  .badge-watch {
+    display:inline-flex; align-items:center; padding: 1px 7px; border-radius: 999px;
+    font-size: 10px; font-weight: 700; letter-spacing: .03em; text-transform: uppercase;
+    background: rgba(251,191,36,.14); color: #fbbf24; border: 1px solid rgba(251,191,36,.3);
+    vertical-align: middle; margin-left: 6px;
+  }
+  .filter-row { display:flex; flex-wrap:wrap; gap:5px; margin: 6px 0 10px; }
+  .filter-row .tab { padding: 4px 10px; }
+  .addr-hint { color: var(--accent); font-size: 11px; margin: -6px 0 8px; min-height: 14px; }
+  .addr-hint.none { color: var(--muted); }
+  .ab-row {
+    display:flex; align-items:center; gap:8px; padding: 7px 8px; border: 1px solid var(--line);
+    border-radius: 8px; margin: 0 0 6px; background: rgba(0,0,0,.18);
+  }
+  .ab-row .ab-label { font-weight: 650; font-size: 12px; flex-shrink:0; }
+  .ab-row .ab-addr { font-family: "JetBrains Mono", monospace; font-size: 10.5px; color: var(--muted);
+    flex:1; min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+  .qr-wrap { margin: 8px 0; padding: 10px; background:#fff; border-radius: 10px; max-width: 220px; }
+  .qr-wrap svg { width: 100%; height: auto; display:block; }
+  .qr-wrap.hidden { display:none !important; }
+  .fee-presets { display:flex; gap:6px; margin: -2px 0 10px; }
+  .fee-presets button { flex:1; }
+  .fee-presets button.active { background: rgba(45,212,160,.16); color: var(--accent); border-color: rgba(45,212,160,.35); }
   .act { border: 1px solid var(--line); border-radius: 8px; padding: 6px 8px; margin: 0 0 4px; background: rgba(0,0,0,.18); }
   .act-top { display:flex; justify-content:space-between; align-items:flex-start; gap:8px; }
   .act-title { font-weight: 650; font-size: 12px; margin: 0; }
@@ -990,6 +1013,148 @@ const tabs = ["Overview","History","Receive","Send","Mining","Network","Settings
 let active = "Overview";
 let unlocked = false;
 
+// --- Address book (local labels, address -> name) --------------------------
+let addressBook = {};
+async function loadAddressBook(){
+  try {
+    const j = await api("address-book");
+    addressBook = j.labels || {};
+  } catch(e) { /* best-effort — History/Send still work without labels */ }
+  return addressBook;
+}
+function addrLabel(addr){
+  return addressBook[String(addr||"")] || "";
+}
+/** "Alice · mhc1qf3…9x2" when a label is known; otherwise the full address
+ *  unchanged (History previously always showed the full address — only
+ *  labeled entries get the shortened "name · short-addr" treatment). */
+function addrWithLabel(addr){
+  const a = String(addr||"");
+  const lab = addrLabel(a);
+  return lab ? (lab + " · " + shortAddr(a)) : a;
+}
+
+// --- History filter (All / Mined / Sent / Received / Unconfirmed) ----------
+const HIST_FILTER_KEY = "mhcoin_desktop_history_filter";
+const HIST_FILTERS = ["All","Mined","Sent","Received","Unconfirmed"];
+function getHistFilter(){
+  try { return localStorage.getItem(HIST_FILTER_KEY) || "All"; } catch(e){ return "All"; }
+}
+function setHistFilter(name){
+  try { localStorage.setItem(HIST_FILTER_KEY, name); } catch(e){}
+}
+function matchesHistFilter(t, name){
+  if (!name || name === "All") return true;
+  if (name === "Unconfirmed") return t.height == null || t.height === "";
+  const type = txTypeOf(t);
+  if (name === "Mined") return type === "mined";
+  if (name === "Sent") return type === "sent";
+  if (name === "Received") return type === "received";
+  return true;
+}
+function histFilterRowHtml(idPrefix){
+  const current = getHistFilter();
+  return `<div class="filter-row" id="${idPrefix}FilterRow">` +
+    HIST_FILTERS.map(name =>
+      `<button type="button" class="tab ${name===current?'active':''}" data-filter="${name}">${name}</button>`
+    ).join("") +
+    `</div>`;
+}
+function bindHistFilterRow(idPrefix, onChange){
+  const row = $(idPrefix + "FilterRow");
+  if (!row) return;
+  row.querySelectorAll("[data-filter]").forEach(btn => {
+    btn.onclick = () => {
+      setHistFilter(btn.getAttribute("data-filter"));
+      [...row.children].forEach(x => x.classList.toggle("active", x === btn));
+      onChange();
+    };
+  });
+}
+
+// --- mhcoin: payment URI (BIP21-style) --------------------------------------
+// Desktop's own Receive QR/copy-link emits "mhcoin:<address>?amount=<mhc>";
+// explorer QR is a plain address — Send must accept both when pasted/scanned.
+function buildMhcoinUri(address, amountMhc){
+  const a = String(address||"").trim();
+  if (!a) return "";
+  let uri = "mhcoin:" + a;
+  const amt = String(amountMhc||"").trim();
+  if (amt) uri += "?amount=" + encodeURIComponent(amt);
+  return uri;
+}
+function parseMhcoinUri(text){
+  const s = String(text||"").trim();
+  if (!s) return {address:null, amount:null};
+  const low = s.toLowerCase();
+  if (low.startsWith("mhcoin:")) {
+    let rest = s.slice("mhcoin:".length);
+    if (rest.startsWith("//")) rest = rest.slice(2);
+    let addr = rest, amount = null;
+    const qi = rest.indexOf("?");
+    if (qi >= 0) {
+      addr = rest.slice(0, qi);
+      // Tiny hand-rolled query parser (avoid depending on URLSearchParams).
+      rest.slice(qi+1).split("&").forEach(kv => {
+        const [k, v] = kv.split("=");
+        if (decodeURIComponent(k||"") === "amount") {
+          try { amount = decodeURIComponent(v||""); } catch(e){ amount = v||""; }
+        }
+      });
+    }
+    return {address: addr.trim() || null, amount};
+  }
+  return {address: s, amount: null};
+}
+
+// --- Notifications (block found / own tx confirmed) -------------------------
+// Best-effort: in-app flash always fires; the browser Notification API is used
+// only if present + permitted (desktop webviews may not support/allow it).
+// Dedup via Sets so a tx/block is only ever announced once per app session.
+let _notifyAsked = false;
+let _notifiedTxIds = new Set();
+let _seenConfirmedBaseline = false;
+let _lastBlocksFound = 0;
+function ensureNotifyPermission(){
+  if (_notifyAsked) return;
+  _notifyAsked = true;
+  try {
+    if ("Notification" in window && Notification.permission === "default") {
+      Notification.requestPermission().catch(()=>{});
+    }
+  } catch(e){ /* no Notification API in this webview — flash() still works */ }
+}
+function notify(title, body){
+  flash(body ? (title + " — " + body) : title, true);
+  try {
+    if ("Notification" in window && Notification.permission === "granted") {
+      new Notification(title, body ? {body} : undefined);
+    }
+  } catch(e){ /* never let a notification failure break the UI */ }
+}
+function trackNotifications(s){
+  // Block found (mining) — compare session counter.
+  const found = Number(s.blocks_found||0);
+  if (found > _lastBlocksFound) {
+    notify("Block found!", `+${s.rewards||""} this session · ${found} block(s)`);
+  }
+  _lastBlocksFound = found;
+  // Own tx confirmed — first poll just seeds the baseline (no spam on load).
+  const confirmed = (s.txs||[]).filter(t => t.txid && t.height != null && t.height !== "");
+  if (!_seenConfirmedBaseline) {
+    confirmed.forEach(t => _notifiedTxIds.add(t.txid));
+    _seenConfirmedBaseline = true;
+    return;
+  }
+  confirmed.forEach(t => {
+    if (_notifiedTxIds.has(t.txid)) return;
+    _notifiedTxIds.add(t.txid);
+    const type = txTypeOf(t);
+    if (type === "sent") notify("Transaction confirmed", `Sent ${t.amount_mhc||""} MHC`);
+    else if (type === "received") notify("Transaction confirmed", `Received ${t.amount_mhc||""} MHC`);
+  });
+}
+
 function $(id){ return document.getElementById(id); }
 function flash(text, ok=true){
   const el = $("flash");
@@ -1477,7 +1642,7 @@ function prettyFrom(list, type){
   return list.map(a => {
     const raw = String(a||"");
     if (/^coinbase$/i.test(raw)) return "Block Reward";
-    return raw;
+    return addrWithLabel(raw);
   }).join(", ");
 }
 function txTypeOf(t){
@@ -1666,6 +1831,8 @@ async function bootAndEnter(){
   unlocked = true;
   $("welcome").classList.add("hidden");
   $("app").classList.remove("hidden");
+  ensureNotifyPermission();
+  loadAddressBook();
   const tb = $("tabs");
   tb.innerHTML = "";
   tabs.forEach(name => {
@@ -1731,7 +1898,7 @@ function historyCard(t, i){
   const fromList = (t.from && t.from.length) ? t.from : [];
   const toList = (t.to && t.to.length) ? t.to : [];
   const fromPretty = prettyFrom(fromList, type);
-  const toPretty = toList.length ? toList.join(", ") : "—";
+  const toPretty = toList.length ? toList.map(addrWithLabel).join(", ") : "—";
   const isBlockReward = type === "mined" || /block reward/i.test(fromPretty);
   const fee = t.fee_mhc != null ? (t.fee_mhc + " MHC") : "—";
   const fromLabel = "From";
@@ -1915,6 +2082,7 @@ async function refreshStatus(){
     if (s.chain_error) {
       flash(s.chain_error, false);
     }
+    trackNotifications(s);
     patchSyncBox("ov", s);
     patchSyncBox("net", s);
     // Mining tab: live stats
@@ -2028,7 +2196,7 @@ async function render(pre){
   if (active === "Overview") {
     const switcher = (s.wallets||[]).length > 1
       ? `<div class="row" style="margin:8px 0 16px">${(s.wallets||[]).map(w =>
-          `<button class="tab ${w.address===s.address?'active':''}" data-wid="${w.wallet_id}">${w.address===s.address?'ACTIVE · ':''}${w.address.slice(0,14)}…</button>`
+          `<button class="tab ${w.address===s.address?'active':''}" data-wid="${w.wallet_id}">${w.address===s.address?'ACTIVE · ':''}${w.address.slice(0,14)}…${w.watch_only?' <span class=\"badge-watch\">Watch</span>':''}</button>`
         ).join("")}</div>`
       : "";
     p.innerHTML = `
@@ -2036,8 +2204,9 @@ async function render(pre){
       ${syncProgressHtml(s, "ov")}
       ${s.mining?'<p class="msg ok" style="display:block">Miner is live in the background.</p>':''}
       ${s.network!=="mainnet"?'<p class="msg err" style="display:block">You are on <b>localnet</b> — not public MHCOIN Mainnet.</p>':''}
-      <label style="margin-top:10px">Active wallet</label>
+      <label style="margin-top:10px">Active wallet${s.watch_only?' <span class="badge-watch">Watch-only</span>':''}</label>
       <div class="mono" style="font-size:11.5px;word-break:break-all;margin:4px 0 8px">${s.address||"—"}</div>
+      ${s.watch_only?'<p class="sub">Watch-only — tracks balance/history from an xpub. Cannot send (no private key). Mining to this address still works.</p>':''}
       ${switcher}
       <label>Balance</label>
       <div class="bal">${s.balance}</div>
@@ -2074,6 +2243,7 @@ async function render(pre){
       <h2>History</h2>
       <p class="sub">All mining rewards + transfers · TXID · From / To · time · fee</p>
       <p class="mono" style="font-size:11px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${esc(s.address||"")}">${s.address||""}</p>
+      ${histFilterRowHtml("hist")}
       <div id="histBox" class="act-list" style="max-height:68vh;overflow:auto"><p class="sub">Loading…</p></div>
       <div class="row"><button class="sm" id="histReload">Reload</button></div>`;
     const fill = async () => {
@@ -2082,12 +2252,15 @@ async function render(pre){
         if (!box.dataset.fp) box.innerHTML = "<p class='sub'>Loading wallet history in background…</p>";
         const j = await api("history");
         if (j.building) setTimeout(fill, 1200);
-        const list = j.txs || [];
-        const fp = list.map(t => (t.txid||"")+":"+(t.kind||"")).join("|") + (j.building?":b":":d");
+        const filterName = getHistFilter();
+        const list = (j.txs || []).filter(t => matchesHistFilter(t, filterName));
+        const fp = filterName + "|" + list.map(t => (t.txid||"")+":"+(t.kind||"")).join("|") + (j.building?":b":":d");
         if (box.dataset.fp === fp) return;
         box.dataset.fp = fp;
         if (!list.length) {
-          box.innerHTML = "<p class='sub'>"+(j.building?"Scanning blocks…":"No activity for this wallet yet.")+"</p>";
+          const why = j.building ? "Scanning blocks…" :
+            (filterName !== "All" ? `No ${filterName.toLowerCase()} activity yet.` : "No activity for this wallet yet.");
+          box.innerHTML = "<p class='sub'>"+why+"</p>";
           return;
         }
         const note = j.building
@@ -2099,34 +2272,41 @@ async function render(pre){
         box.innerHTML = "<p class='sub'>Failed to load history: "+(e.message||e)+"</p>";
       }
     };
+    bindHistFilterRow("hist", () => { $("histBox").dataset.fp=""; fill(); });
     $("histReload").onclick = () => { $("histBox").dataset.fp=""; fill(); };
     fill();
   } else if (active === "Receive") {
     const addrs = (s.receive_addrs || []).length ? s.receive_addrs : [{
-      address: s.address||"", wallet_id: "", path: "", index: 0, is_default: true, label: "default"
+      address: s.address||"", wallet_id: "", path: "", index: 0, is_default: true, label: "default",
+      watch_only: !!s.watch_only,
     }];
     const listHtml = addrs.map((a,i) => {
       const path = a.path || (a.index!=null ? ("m/84'/0'/0'/0/"+a.index) : "");
       const mark = a.is_default || a.address===s.address ? " · active" : "";
       const lab = a.label || ("receive #"+(a.index!=null?a.index:i));
+      const watchBadge = a.watch_only ? ' <span class="badge-watch">Watch-only</span>' : "";
       return `<div class="card" style="padding:12px;margin-bottom:10px">
-        <div class="sub">${esc(lab)}${mark}${path?(" · "+esc(path)):""}</div>
+        <div class="sub">${esc(lab)}${mark}${path?(" · "+esc(path)):""}${watchBadge}</div>
         <textarea id="recvAddr${i}" rows="2" readonly class="mono" style="user-select:text;-webkit-user-select:text;cursor:text">${esc(a.address||"")}</textarea>
         <div class="row">
-          <button class="primary copyRecv" data-addr="${esc(a.address||"")}">Copy</button>
+          <button class="primary copyRecv" data-addr="${esc(a.address||"")}">Copy address</button>
+          <button class="copyLink" data-addr="${esc(a.address||"")}">Copy payment link</button>
+          <button class="toggleQr" data-idx="${i}" data-addr="${esc(a.address||"")}">Show QR</button>
           ${a.address===s.address ? "" : `<button class="useRecv" data-wid="${esc(a.wallet_id||"")}" data-addr="${esc(a.address||"")}">Use</button>`}
         </div>
+        <div class="qr-wrap hidden" id="qrBox${i}"></div>
       </div>`;
     }).join("");
     p.innerHTML = `
       <h2>Receive MHCOIN</h2>
       <p class="sub">Share an address to receive MHC. HD wallets can create more receive addresses (same seed).</p>
+      <p class="sub">"Copy payment link" shares a <span class="mono">mhcoin:</span> URI (address + optional amount) — scanning a plain address (e.g. from the explorer) also works.</p>
       ${listHtml || `<textarea id="addr" rows="3" readonly class="mono">${s.address||""}</textarea>
       <div class="row"><button class="primary" id="copyBtn">Copy Address</button></div>`}
       <div class="row">
-        <button class="primary" id="newRecv" ${s.unlocked?"":"disabled"}>${s.unlocked?"New address":"Unlock to create address"}</button>
+        <button class="primary" id="newRecv" ${s.unlocked && !s.watch_only ?"":"disabled"}>${s.watch_only ? "Watch-only — cannot derive new addresses" : (s.unlocked?"New address":"Unlock to create address")}</button>
       </div>
-      <p class="sub">New address uses the next path <span class="mono">m/84'/0'/0'/0/n</span>. Imported single-key wallets cannot derive more.</p>
+      <p class="sub">New address uses the next path <span class="mono">m/84'/0'/0'/0/n</span>. Imported single-key / watch-only wallets cannot derive more.</p>
       <h3>Received</h3>
       <p class="sub">Incoming transfers + block rewards for the <b>active</b> address</p>
       <div id="recvList" class="act-list" style="max-height:36vh;overflow:auto"><p class="sub">Loading…</p></div>
@@ -2136,6 +2316,31 @@ async function render(pre){
         const a = btn.getAttribute("data-addr") || "";
         try { await navigator.clipboard.writeText(a); flash("Address copied"); }
         catch(e){ flash("Copy failed", false); }
+      };
+    });
+    document.querySelectorAll(".copyLink").forEach(btn => {
+      btn.onclick = async () => {
+        const a = btn.getAttribute("data-addr") || "";
+        const uri = buildMhcoinUri(a);
+        try { await navigator.clipboard.writeText(uri); flash("Payment link copied"); }
+        catch(e){ flash("Copy failed", false); }
+      };
+    });
+    document.querySelectorAll(".toggleQr").forEach(btn => {
+      btn.onclick = async () => {
+        const idx = btn.getAttribute("data-idx");
+        const addr = btn.getAttribute("data-addr") || "";
+        const box = $("qrBox"+idx);
+        if (!box) return;
+        if (!box.classList.contains("hidden")) { box.classList.add("hidden"); return; }
+        if (!box.dataset.loaded) {
+          try {
+            const j = await api("qr?addr="+encodeURIComponent(addr));
+            box.innerHTML = j.svg || "";
+            box.dataset.loaded = "1";
+          } catch(e) { box.innerHTML = "<p class='sub'>QR failed: "+(e.message||e)+"</p>"; }
+        }
+        box.classList.remove("hidden");
       };
     });
     document.querySelectorAll(".useRecv").forEach(btn => {
@@ -2176,18 +2381,66 @@ async function render(pre){
       ? `<p class="sub">Last TXID</p><textarea id="lastTx" rows="4" readonly class="mono">${s.last_txid}</textarea>
          <div class="row"><button id="copyTx">Copy TXID</button></div>`
       : `<p class="sub">After Send the full TXID will appear here.</p>`;
+    const abOptions = Object.keys(addressBook).map(a =>
+      `<option value="${esc(a)}" label="${esc(addressBook[a])}"></option>`
+    ).join("");
+    if (s.watch_only) {
+      p.innerHTML = `
+        <h2>Send MHCOIN</h2>
+        <p class="msg err" style="display:block">Watch-only wallet active <span class="badge-watch">Watch</span> — no private key, so this wallet cannot sign a send. Switch to a spendable wallet (Settings → Wallets) to send.</p>`;
+      return;
+    }
     p.innerHTML = `
       <h2>Send MHCOIN</h2>
       <p class="sub">To move MHC to your other wallet: open that wallet → Receive → copy address → switch back here and paste it.</p>
-      <label>Address</label><input id="to" placeholder="mhc1..."/>
+      <p class="sub">Pasting a <span class="mono">mhcoin:</span> payment link also fills Amount automatically. A plain address works too.</p>
+      <label>Address</label>
+      <input id="to" placeholder="mhc1... or mhcoin:mhc1...?amount=1.0" list="addrBookOptions"/>
+      <datalist id="addrBookOptions">${abOptions}</datalist>
+      <p class="addr-hint none" id="toHint"></p>
       <label>Amount (MHC)</label><input id="amt" placeholder="1.0"/>
       <label>Fee (MHC)</label><input id="fee" value="0.00001000"/>
+      <!-- Fee presets are simple multipliers of the wallet's default relay fee
+           (0.00001000 MHC): Slow = 1x, Normal = 2x, Fast = 5x. The field above
+           stays editable for a fully custom/advanced fee. -->
+      <div class="fee-presets">
+        <button type="button" class="feePreset active" data-mult="1">Slow</button>
+        <button type="button" class="feePreset" data-mult="2">Normal</button>
+        <button type="button" class="feePreset" data-mult="5">Fast</button>
+      </div>
       <div class="row"><button class="primary" id="sendBtn">Send</button></div>
       ${last}
       <h3>Sent</h3>
       <p class="sub">Outgoing transfers with full TX details</p>
       <div id="sentList" class="act-list" style="max-height:36vh;overflow:auto"><p class="sub">Loading…</p></div>
       <div class="row"><button class="sm" id="sentReload">Reload</button></div>`;
+    const FEE_BASE_MHC = 0.00001; // matches mhcoin.constants.DEFAULT_FEE_SATOSHIS (1000 sats)
+    document.querySelectorAll(".feePreset").forEach(btn => {
+      btn.onclick = () => {
+        const mult = Number(btn.getAttribute("data-mult")) || 1;
+        $("fee").value = (FEE_BASE_MHC * mult).toFixed(8);
+        document.querySelectorAll(".feePreset").forEach(b => b.classList.toggle("active", b===btn));
+      };
+    });
+    const updateToHint = () => {
+      const raw = $("to").value.trim();
+      const parsed = parseMhcoinUri(raw);
+      const addr = parsed.address || raw;
+      const lab = addrLabel(addr);
+      const hint = $("toHint");
+      if (lab) { hint.textContent = "📒 " + lab; hint.classList.remove("none"); }
+      else if (addr) { hint.textContent = "Unknown address — Settings → Address Book to save a label."; hint.classList.add("none"); }
+      else { hint.textContent = ""; hint.classList.add("none"); }
+    };
+    $("to").addEventListener("input", updateToHint);
+    $("to").addEventListener("paste", () => setTimeout(() => {
+      const parsed = parseMhcoinUri($("to").value.trim());
+      if (parsed.address) {
+        $("to").value = parsed.address;
+        if (parsed.amount && !$("amt").value.trim()) $("amt").value = parsed.amount;
+      }
+      updateToHint();
+    }, 0));
     if ($("copyTx")) {
       $("copyTx").onclick = async () => {
         try { await navigator.clipboard.writeText(s.last_txid||""); flash("TXID copied"); }
@@ -2198,7 +2451,10 @@ async function render(pre){
       try {
         const password = await ask("Wallet password:");
         if (!password) return;
-        const j = await api("send", {to:$("to").value.trim(), amount:$("amt").value.trim(), fee:$("fee").value.trim(), password});
+        const parsed = parseMhcoinUri($("to").value.trim());
+        const toAddr = parsed.address || $("to").value.trim();
+        const amount = $("amt").value.trim() || parsed.amount || "";
+        const j = await api("send", {to:toAddr, amount, fee:$("fee").value.trim(), password});
         await txSentBox(j.txid);
         flash("Sent OK");
         render();
@@ -2237,8 +2493,9 @@ async function render(pre){
           </div>
         </div>
       </div>
-      <label>Reward address</label>
+      <label>Reward address${s.watch_only?' <span class="badge-watch">Watch-only</span>':''}</label>
       <input id="mineAddr" class="mono" value="${s.address||""}"/>
+      ${s.watch_only?'<p class="sub">Watch-only is fine here — mining only needs an address to pay the reward to, not a private key.</p>':''}
       <div class="row">
         <button class="primary" id="mineStart">Start mining</button>
         <button class="sm" id="mineStop">Stop</button>
@@ -2319,7 +2576,7 @@ async function render(pre){
   } else if (active === "Settings") {
     const wl = (s.wallets||[]).map((w, i) =>
       `<div class="card" style="padding:12px;margin-bottom:10px">
-        <div class="sub">${w.address===s.address?"ACTIVE wallet":"Wallet "+(i+1)} · ${w.label||""}</div>
+        <div class="sub">${w.address===s.address?"ACTIVE wallet":"Wallet "+(i+1)} · ${w.label||""}${w.watch_only?' <span class="badge-watch">Watch-only</span>':''}</div>
         <textarea id="waddr${i}" rows="2" readonly class="mono" style="user-select:text;-webkit-user-select:text;cursor:text">${w.address}</textarea>
         <div class="row">
           <button class="primary copyW" data-addr="${w.address}">Copy</button>
@@ -2342,6 +2599,10 @@ async function render(pre){
       <h3>Wallets in this datadir</h3>
       <p class="sub">Select text or tap Copy. Shared chain; Overview balance is the whole HD account (receive + change).</p>
       ${wl}
+      <h3>Address Book</h3>
+      <p class="sub">Local labels for addresses you send to or receive from — saved in this data folder only, never shared.</p>
+      <div id="addrBookList"><p class="sub">Loading…</p></div>
+      <div class="row"><button class="sm" id="addrBookAdd">Add label</button></div>
       <h3>Backup</h3>
       <p class="sub">Backup = encrypted <span class="mono">wallet.json</span> + your password (password is never stored in the file).</p>
       <label>Wallet file</label>
@@ -2403,6 +2664,61 @@ async function render(pre){
       const el = $("waddr"+i);
       if (el) el.onclick = () => el.select();
     });
+    const renderAddrBookList = () => {
+      const box = $("addrBookList");
+      if (!box) return;
+      const entries = Object.entries(addressBook);
+      if (!entries.length) {
+        box.innerHTML = "<p class='sub'>No saved labels yet.</p>";
+        return;
+      }
+      box.innerHTML = entries.map(([addr, label]) => `
+        <div class="ab-row">
+          <span class="ab-label">${esc(label)}</span>
+          <span class="ab-addr" title="${esc(addr)}">${esc(addr)}</span>
+          <button type="button" class="sm abEdit" data-addr="${esc(addr)}">Edit</button>
+          <button type="button" class="sm abRemove" data-addr="${esc(addr)}">Remove</button>
+        </div>`).join("");
+      box.querySelectorAll(".abEdit").forEach(btn => {
+        btn.onclick = async () => {
+          const addr = btn.getAttribute("data-addr") || "";
+          const newLabel = await ask("Label for " + shortAddr(addr) + ":");
+          if (newLabel == null) return;
+          try {
+            const j = await api("address-book/set", {address: addr, label: newLabel});
+            addressBook = j.labels || addressBook;
+            renderAddrBookList();
+            flash("Label saved");
+          } catch(e){ flash(e.message, false); }
+        };
+      });
+      box.querySelectorAll(".abRemove").forEach(btn => {
+        btn.onclick = async () => {
+          const addr = btn.getAttribute("data-addr") || "";
+          const ok = await confirmBox("Remove label for " + shortAddr(addr) + "?");
+          if (!ok) return;
+          try {
+            const j = await api("address-book/remove", {address: addr});
+            addressBook = j.labels || addressBook;
+            renderAddrBookList();
+            flash("Label removed");
+          } catch(e){ flash(e.message, false); }
+        };
+      });
+    };
+    loadAddressBook().then(renderAddrBookList);
+    if ($("addrBookAdd")) $("addrBookAdd").onclick = async () => {
+      try {
+        const addr = await ask("Address to label (mhc1...):");
+        if (!addr) return;
+        const label = await ask("Label for " + shortAddr(addr.trim()) + ":");
+        if (!label) return;
+        const j = await api("address-book/set", {address: addr.trim(), label});
+        addressBook = j.labels || addressBook;
+        renderAddrBookList();
+        flash("Label saved");
+      } catch(e){ flash(e.message, false); }
+    };
     $("ref").onclick = () => render();
     document.querySelectorAll(".selW").forEach(btn => {
       btn.onclick = async () => {
@@ -2606,6 +2922,7 @@ class DesktopState:
                 light["sync_target"] = 0
                 light["sync_pending"] = 0
                 light["sync_percent"] = None
+                light["watch_only"] = c.active_watch_only()
                 return light
         info = c.chain_info()
         stats = c.mining_stats
@@ -2655,6 +2972,7 @@ class DesktopState:
                 and int(getattr(c, "_balance_cache_height", -1)) >= 0
             ),
             "address": addr,
+            "watch_only": c.active_watch_only() if addr else False,
             "wallet_exists": c.wallet_exists(),
             "unlocked": unlocked,
             "mining": stats["mining"],
@@ -2727,6 +3045,23 @@ def make_handler(state: DesktopState):
                         return
                     _json(self, 500, {"ok": False, "error": str(e)})
                 return
+            if path == "/api/address-book":
+                try:
+                    _json(self, 200, {"ok": True, "labels": state.ctrl.address_book()})
+                except Exception as e:  # noqa: BLE001
+                    _json(self, 500, {"ok": False, "error": str(e)})
+                return
+            if path == "/api/qr":
+                qs = parse_qs(urlparse(self.path).query)
+                addr = (qs.get("addr") or [""])[0]
+                amount = (qs.get("amount") or [None])[0]
+                try:
+                    payload = state.ctrl.receive_qr(addr, amount)
+                    payload["ok"] = True
+                    _json(self, 200, payload)
+                except Exception as e:  # noqa: BLE001
+                    _json(self, 400, {"ok": False, "error": str(e)})
+                return
             _json(self, 404, {"ok": False, "error": "not found"})
 
         def do_POST(self) -> None:  # noqa: N802
@@ -2773,6 +3108,14 @@ def make_handler(state: DesktopState):
             if path == "/api/node/stop":
                 c.stop_node(rebuild_history=True, join_timeout=3.0)
                 return {"ok": True}
+            if path == "/api/address-book/set":
+                labels = c.set_address_label(
+                    str(body.get("address") or ""), str(body.get("label") or "")
+                )
+                return {"ok": True, "labels": labels}
+            if path == "/api/address-book/remove":
+                labels = c.remove_address_label(str(body.get("address") or ""))
+                return {"ok": True, "labels": labels}
             with state.lock:
                 if path == "/api/wallet/create":
                     created = c.create_hd_wallet(str(body.get("password") or ""))

@@ -85,3 +85,33 @@ def test_desktop_multi_receive_keeps_unlock(tmp_path: Path, monkeypatch):
     assert ctrl._password == "multi-pass"
     assert ctrl.default_address() == root
     ctrl.shutdown()
+
+
+def test_desktop_watch_only_flagged_and_cannot_send(tmp_path: Path, monkeypatch):
+    monkeypatch.setenv("MHCOIN_NETWORK", "localnet")
+    owner = CoreController(network="localnet", data_dir=tmp_path / "owner")
+    created = owner.create_hd_wallet("owner-pass")
+    xpub = owner.export_xpub("owner-pass")
+    owner.shutdown()
+
+    watcher = CoreController(network="localnet", data_dir=tmp_path / "watcher")
+    addr = watcher.import_xpub(xpub, label="cold wallet")
+    assert addr == created["address"]
+    assert watcher.active_watch_only() is True
+    assert any(
+        w["address"] == addr and w["watch_only"] for w in watcher.list_wallets()
+    )
+    try:
+        watcher.send(created["address"], "1", "any-password")
+    except Exception as e:
+        assert "watch-only" in str(e).lower()
+    else:  # pragma: no cover
+        raise AssertionError("watch-only send should have raised")
+    watcher.shutdown()
+
+    # A normal spendable wallet is never flagged watch-only.
+    spendable = CoreController(network="localnet", data_dir=tmp_path / "spendable")
+    spendable.create_hd_wallet("spend-pass")
+    assert spendable.active_watch_only() is False
+    assert all(not w["watch_only"] for w in spendable.list_wallets())
+    spendable.shutdown()
