@@ -17,8 +17,9 @@ def test_ux_vasya_sends_10_mhc_to_petro(tmp_path: Path, monkeypatch):
 
     r = runner.invoke(cli, ["wallet", "create", "--label", "vasya"])
     assert r.exit_code == 0, r.output
-    assert "Wallet created." in r.output
+    assert "Wallet created" in r.output
     assert "Address: mhc1" in r.output
+    assert "RECOVERY SEED" in r.output
 
     r = runner.invoke(cli, ["wallet", "address"])
     assert r.exit_code == 0
