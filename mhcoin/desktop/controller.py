@@ -323,19 +323,56 @@ class CoreController:
         }
 
     def create_wallet(self, password: str) -> str:
+        """Create HD wallet; returns address (mnemonic via create_hd_wallet)."""
+        return self.create_hd_wallet(password)["address"]
+
+    def create_hd_wallet(self, password: str) -> dict[str, str]:
+        """Create BIP39 HD wallet. Returns address + mnemonic (show once)."""
         if not password:
             raise WalletError("password required")
-        # New wallet must not keep mining to the previous address / session totals.
         if self._mining:
             self.stop_mining()
         existing = len(Wallet(self.paths).list_wallets())
         label = f"Wallet {existing + 1}"
         w = Wallet(self.paths, password=password)
-        addr = w.create(label=label, password=password, make_default=True)
+        created = w.create(label=label, password=password, make_default=True)
         self._password = password
         self._reset_session_wallet_stats()
         self.ensure_chain()
-        return addr
+        return {
+            "address": created.address,
+            "mnemonic": created.mnemonic or "",
+            "wallet_id": created.wallet_id,
+        }
+
+    def restore_wallet(self, password: str, mnemonic: str) -> str:
+        """Restore HD wallet from BIP39 words; returns address."""
+        if not password:
+            raise WalletError("password required")
+        if not (mnemonic or "").strip():
+            raise WalletError("mnemonic required")
+        if self._mining:
+            self.stop_mining()
+        existing = len(Wallet(self.paths).list_wallets())
+        label = f"Restored {existing + 1}"
+        w = Wallet(self.paths, password=password)
+        created = w.restore_from_mnemonic(
+            mnemonic,
+            password=password,
+            label=label,
+            make_default=True,
+        )
+        self._password = password
+        self._reset_session_wallet_stats()
+        self.ensure_chain()
+        return created.address
+
+    def export_seed(self, password: str | None = None) -> str:
+        """Reveal stored BIP39 mnemonic for the active wallet."""
+        pwd = password or self._password
+        if not pwd:
+            raise WalletError("password required")
+        return Wallet(self.paths, password=pwd).export_mnemonic(password=pwd)
 
     def _invalidate_balance_cache(self) -> None:
         self._balance_cache_sats = 0

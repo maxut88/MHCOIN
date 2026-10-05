@@ -69,7 +69,7 @@ def test_addr_rejects_bad_host():
 
 
 def test_addrdb_persist_restart(tmp_path: Path):
-    path = tmp_path / "peers.sqlite"
+    path = tmp_path / "peers.dat"
     db = AddrDB(path)
     assert db.add("10.1.2.3", 18444, source="manual")
     assert db.count() == 1
@@ -83,7 +83,7 @@ def test_addrdb_persist_restart(tmp_path: Path):
 
 
 def test_addrdb_evicts_when_full(tmp_path: Path):
-    db = AddrDB(tmp_path / "peers.sqlite", max_entries=5)
+    db = AddrDB(tmp_path / "peers.dat", max_entries=5)
     for i in range(8):
         db.add(f"10.0.0.{i}", 18444, source="gossip")
         time.sleep(0.01)

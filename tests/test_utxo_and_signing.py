@@ -13,7 +13,7 @@ from mhcoin.utxo import OutPoint, UTXOError, UTXOSet
 def _funded_utxo(tmp_path: Path):
     kp = generate_keypair()
     pkh = hash160(kp.public_key_compressed)
-    utxo = UTXOSet(tmp_path / "utxo.sqlite")
+    utxo = UTXOSet(tmp_path / "chainstate")
     coinbase = Transaction(
         inputs=[TxIn.coinbase(0)],
         outputs=[TxOut.p2pkh(5_000_000_000, pkh)],

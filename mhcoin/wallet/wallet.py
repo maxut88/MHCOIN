@@ -1,4 +1,9 @@
-"""MHCOIN wallet: create keys, addresses, encrypted persistence, send."""
+"""MHCOIN wallet: create keys, addresses, encrypted persistence, send.
+
+Bitcoin-style recovery:
+- BIP39 mnemonic (12/24 words) + BIP32 path ``m/84'/0'/0'/0/0``
+- Import raw hex or WIF private key
+"""
 
 from __future__ import annotations
 
@@ -12,7 +17,13 @@ from mhcoin.crypto.hashing import hash160
 from mhcoin.crypto.keys import KeyPair, private_key_to_public_key
 from mhcoin.utxo import UTXOSet
 from mhcoin.wallet.addresses import address_to_pubkey_hash, pubkey_to_address, validate_address
-from mhcoin.wallet.key_generation import create_new_keypair
+from mhcoin.wallet.bip39 import (
+    generate_mnemonic,
+    mnemonic_to_seed,
+    normalize_mnemonic,
+    validate_mnemonic,
+)
+from mhcoin.wallet.hd import DEFAULT_DERIVATION_PATH, derive_private_key
 from mhcoin.wallet.send import SendResult, build_send_tx, parse_amount_mhc
 from mhcoin.wallet.storage import (
     DEFAULT_SCRYPT_N,
@@ -26,10 +37,22 @@ from mhcoin.wallet.storage import (
     load_wallet_file,
     save_wallet_file,
 )
+from mhcoin.wallet.wif import encode_wif, parse_private_key
 
 
 class WalletError(Exception):
     pass
+
+
+@dataclass(frozen=True)
+class WalletCreateResult:
+    """Result of creating / restoring / importing a wallet key."""
+
+    address: str
+    wallet_id: str
+    mnemonic: str | None = None
+    derivation_path: str | None = None
+    wif: str | None = None
 
 
 @dataclass
@@ -44,7 +67,8 @@ class WalletPaths:
 
     @property
     def utxo_path(self) -> Path:
-        return self.data_dir / "utxo.sqlite"
+        # LevelDB chainstate dir (legacy utxo.sqlite is migrated by UTXOSet).
+        return self.data_dir / "chainstate"
 
 
 class Wallet:
@@ -59,29 +83,171 @@ class Wallet:
         label: str = "default",
         password: str | None = None,
         make_default: bool = True,
-    ) -> str:
-        """Create a new keypair record in wallet.json.
+        strength: int = 128,
+    ) -> WalletCreateResult:
+        """Create a new HD wallet from a BIP39 mnemonic (Bitcoin-style).
 
-        make_default=True (GUI "Create New Wallet"): switch active wallet to the
-        new record so balance/history/send bind to the new keys — not the previous
-        wallet's UTXOs.
+        Writes encrypted private key (+ encrypted mnemonic) into wallet.json.
+        Returns the mnemonic **once** — store it offline; it is the recovery seed.
         """
         pwd = password or self._password
         if not pwd:
             raise WalletError("wallet password required for encrypted storage")
-        kp, address = create_new_keypair(hrp=self.paths.hrp)
+        try:
+            mnemonic = generate_mnemonic(strength=strength)
+            seed = mnemonic_to_seed(mnemonic)
+            priv = derive_private_key(seed, DEFAULT_DERIVATION_PATH)
+        except ValueError as e:
+            raise WalletError(str(e)) from e
+        return self._persist_key(
+            private_key=priv,
+            password=pwd,
+            label=label,
+            make_default=make_default,
+            mnemonic=mnemonic,
+            derivation_path=DEFAULT_DERIVATION_PATH,
+        )
+
+    def restore_from_mnemonic(
+        self,
+        mnemonic: str,
+        *,
+        password: str | None = None,
+        label: str = "restored",
+        make_default: bool = True,
+        passphrase: str = "",
+        path: str = DEFAULT_DERIVATION_PATH,
+    ) -> WalletCreateResult:
+        """Restore wallet from BIP39 words (optional BIP39 passphrase)."""
+        pwd = password or self._password
+        if not pwd:
+            raise WalletError("wallet password required for encrypted storage")
+        words = normalize_mnemonic(mnemonic)
+        if not validate_mnemonic(words):
+            raise WalletError("invalid BIP39 mnemonic (bad words or checksum)")
+        try:
+            seed = mnemonic_to_seed(words, passphrase=passphrase)
+            priv = derive_private_key(seed, path)
+        except ValueError as e:
+            raise WalletError(str(e)) from e
+        return self._persist_key(
+            private_key=priv,
+            password=pwd,
+            label=label,
+            make_default=make_default,
+            mnemonic=words,
+            derivation_path=path,
+        )
+
+    def import_private_key(
+        self,
+        key_text: str,
+        *,
+        password: str | None = None,
+        label: str = "imported",
+        make_default: bool = True,
+    ) -> WalletCreateResult:
+        """Import a hex or WIF private key (Bitcoin-compatible WIF)."""
+        pwd = password or self._password
+        if not pwd:
+            raise WalletError("wallet password required for encrypted storage")
+        try:
+            priv = parse_private_key(key_text)
+        except ValueError as e:
+            raise WalletError(str(e)) from e
+        return self._persist_key(
+            private_key=priv,
+            password=pwd,
+            label=label,
+            make_default=make_default,
+            mnemonic=None,
+            derivation_path=None,
+        )
+
+    def export_wif(self, *, password: str | None = None, wallet_id: str | None = None) -> str:
+        """Export the active (or specified) key as compressed WIF."""
+        pwd = password or self._password
+        if not pwd:
+            raise WalletError("password required to export key")
+        if wallet_id:
+            kp = self.unlock_key(wallet_id, pwd)
+        else:
+            kp = self.unlock_default(pwd)
+        return encode_wif(kp.private_key, compressed=True)
+
+    def export_mnemonic(self, *, password: str | None = None, wallet_id: str | None = None) -> str:
+        """Decrypt stored BIP39 mnemonic (only if wallet was created/restored from seed)."""
+        pwd = password or self._password
+        if not pwd:
+            raise WalletError("password required to export mnemonic")
+        wf = load_wallet_file(self.paths.wallet_file)
+        if not wf or not wf.wallets:
+            raise WalletError("no wallet found")
+        if wallet_id:
+            rec = next((w for w in wf.wallets if w.wallet_id == wallet_id), None)
+        else:
+            rec = self._default_record()
+        if rec is None:
+            raise WalletError("unknown wallet id")
+        if not rec.encrypted_mnemonic:
+            raise WalletError("this wallet has no stored mnemonic (imported key only)")
+        kdf = wf.kdf
+        try:
+            raw = decrypt_private_key(
+                rec.encrypted_mnemonic,
+                pwd,
+                n=int(kdf["n"]),
+                r=int(kdf["r"]),
+                p=int(kdf["p"]),
+            )
+        except Exception as e:
+            raise WalletError("wrong password or corrupt wallet") from e
+        words = raw.decode("utf-8")
+        if not validate_mnemonic(words):
+            raise WalletError("stored mnemonic is corrupt")
+        return normalize_mnemonic(words)
+
+    def _persist_key(
+        self,
+        *,
+        private_key: bytes,
+        password: str,
+        label: str,
+        make_default: bool,
+        mnemonic: str | None,
+        derivation_path: str | None,
+    ) -> WalletCreateResult:
+        pub = private_key_to_public_key(private_key, compressed=True)
+        address = pubkey_to_address(pub, hrp=self.paths.hrp)
+        # Reject duplicate addresses in the same wallet file.
+        existing = load_wallet_file(self.paths.wallet_file)
+        if existing:
+            for w in existing.wallets:
+                if w.address == address or w.public_key_hex == pub.hex():
+                    raise WalletError(f"key already in wallet ({address})")
         wallet_id = uuid.uuid4().hex[:16]
         n, r, p = DEFAULT_SCRYPT_N, DEFAULT_SCRYPT_R, DEFAULT_SCRYPT_P
-        enc, _ = encrypt_private_key(kp.private_key, pwd, n=n, r=r, p=p)
+        enc, _ = encrypt_private_key(private_key, password, n=n, r=r, p=p)
+        enc_mnemonic = None
+        if mnemonic:
+            enc_mnemonic, _ = encrypt_private_key(
+                normalize_mnemonic(mnemonic).encode("utf-8"),
+                password,
+                n=n,
+                r=r,
+                p=p,
+            )
         record = WalletRecord(
             wallet_id=wallet_id,
             label=label,
             address=address,
-            public_key_hex=kp.public_key_compressed.hex(),
+            public_key_hex=pub.hex(),
             encrypted_private_key=enc,
             created_at=datetime.now(timezone.utc).isoformat(),
+            derivation_path=derivation_path,
+            encrypted_mnemonic=enc_mnemonic,
         )
-        wf = load_wallet_file(self.paths.wallet_file)
+        wf = existing
         if wf is None:
             wf = WalletFile(
                 version=1,
@@ -96,13 +262,18 @@ class Wallet:
             if make_default or not wf.default_wallet_id:
                 wf.default_wallet_id = wallet_id
         save_wallet_file(self.paths.wallet_file, wf)
-        self._password = pwd
+        self._password = password
         if make_default:
-            # Drop other unlocked keys so send cannot silently use a prior key.
-            self._unlocked_keys = {wallet_id: kp.private_key}
+            self._unlocked_keys = {wallet_id: private_key}
         else:
-            self._unlocked_keys[wallet_id] = kp.private_key
-        return address
+            self._unlocked_keys[wallet_id] = private_key
+        return WalletCreateResult(
+            address=address,
+            wallet_id=wallet_id,
+            mnemonic=normalize_mnemonic(mnemonic) if mnemonic else None,
+            derivation_path=derivation_path,
+            wif=encode_wif(private_key, compressed=True),
+        )
 
     def set_default_wallet_id(self, wallet_id: str) -> None:
         wf = load_wallet_file(self.paths.wallet_file)
@@ -234,9 +405,11 @@ class Wallet:
         if not validate_address(addr, hrp=self.paths.hrp):
             raise WalletError("invalid address")
         pkh = address_to_pubkey_hash(addr, hrp=self.paths.hrp)
-        if not self.paths.utxo_path.is_file():
+        cs = self.paths.utxo_path
+        legacy = cs.with_name("utxo.sqlite")
+        if not (cs.is_dir() or legacy.is_file()):
             return 0, 0
-        utxo = UTXOSet(self.paths.utxo_path)
+        utxo = UTXOSet(cs)
         try:
             confirmed = utxo.balance_for_pubkey_hash(pkh)
         finally:
@@ -266,9 +439,11 @@ class Wallet:
         own_utxo = utxo
         close = False
         if own_utxo is None:
-            if not self.paths.utxo_path.is_file():
+            cs = self.paths.utxo_path
+            legacy = cs.with_name("utxo.sqlite")
+            if not (cs.is_dir() or legacy.is_file()):
                 raise WalletError("no chain UTXO yet — mine some MHC first")
-            own_utxo = UTXOSet(self.paths.utxo_path)
+            own_utxo = UTXOSet(cs)
             close = True
         try:
             return build_send_tx(

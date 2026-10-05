@@ -101,7 +101,7 @@ def test_coinbase_owned_only_by_payout_wallet(isolated: Path):
 
         paths = WalletPaths(data_dir=isolated, network="localnet", hrp="mhc")
         w = Wallet(paths)
-        addr_b = w.create(password="pass-b", make_default=True)
+        addr_b = w.create(password="pass-b", make_default=True).address
         pkh_b = address_to_pubkey_hash(addr_b, hrp="mhc")
         assert node.chain.utxo.balance_for_pubkey_hash(pkh_b) == 0
         assert node.chain.utxo.balance_for_pubkey_hash(pkh_a) == 3 * REWARD
@@ -196,7 +196,7 @@ def test_send_a_to_b(isolated: Path):
     # Create B without making it default so A can still send
     addr_b = Wallet(ctrl.paths, password="pass-b").create(
         password="pass-b", make_default=False, label="b"
-    )
+    ).address
     assert ctrl.default_address() == addr_a
     txid = ctrl.send(addr_b, "10", "pass-a")
     assert len(txid) == 64
@@ -217,7 +217,7 @@ def test_b_receives_after_confirmation(isolated: Path):
     ctrl = _ctrl(isolated)
     addr_b = Wallet(ctrl.paths, password="pass-b").create(
         password="pass-b", make_default=False, label="b"
-    )
+    ).address
     ctrl.send(addr_b, "10", "pass-a")
     ctrl.shutdown()
     _mine(isolated, addr_a, 1)
@@ -241,7 +241,7 @@ def test_b_can_spend_received_output(isolated: Path):
     ctrl = _ctrl(isolated)
     addr_b = Wallet(ctrl.paths, password="pass-b").create(
         password="pass-b", make_default=False, label="b"
-    )
+    ).address
     ctrl.send(addr_b, "10", "pass-a")
     ctrl.shutdown()
     _mine(isolated, addr_a, 1)
@@ -268,7 +268,7 @@ def test_change_returns_to_correct_wallet(isolated: Path):
     ctrl = _ctrl(isolated)
     addr_b = Wallet(ctrl.paths, password="pass-b").create(
         password="pass-b", make_default=False, label="b"
-    )
+    ).address
     # A sends 10 from 50 coinbase → change back to A
     with ctrl._io:
         node = ctrl._get_local()

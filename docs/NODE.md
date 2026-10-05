@@ -34,5 +34,5 @@ mhcoin blockchain forks --data-dir ~/.mhcoin/localnet/node3
 - Banned hosts cannot connect until ban expiry.
 - Misbehavior scores **persist across reconnect** (Stage 8).
 
-See [DISCOVERY.md](DISCOVERY.md), [SECURITY_AUDIT.md](SECURITY_AUDIT.md),
+See [DISCOVERY.md](DISCOVERY.md), [STORAGE.md](STORAGE.md), [SECURITY_AUDIT.md](SECURITY_AUDIT.md),
 [REORG.md](REORG.md), [NETWORK_PROTOCOL.md](NETWORK_PROTOCOL.md).

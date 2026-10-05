@@ -28,7 +28,7 @@ Common ancestor:  B
 
 | Concept | Meaning |
 |---------|---------|
-| Block storage | All known valid blocks (active + side) in `block_index` |
+| Block storage | Index in `block_index`; raw bytes in `blocks/blk*.dat` |
 | Active chain | Genesis → tip selected by cumulative work |
 | Active UTXO | UTXO set for the active chain only |
 | Chain work | `parent_work + work_for_bits(block.bits)` (integer) |
@@ -119,9 +119,11 @@ When a parent arrives, dependent orphans are retried.
 
 ## Persistence / restart
 
-Schema v2: `block_index`, `block_undo`, tip meta. Legacy height-keyed `blocks`
-tables are migrated. On UTXO/tip mismatch at startup, UTXO is rebuilt from the
-active chain.
+Schema v3: `block_index` (with `file_id` / `data_pos` / `data_len`),
+`block_undo`, tip meta, and flat `blocks/blk*.dat`. Legacy height-keyed
+`blocks` tables and sqlite-embedded `raw` blobs are migrated on open.
+On UTXO/tip mismatch at startup, UTXO is rebuilt from the active chain.
+UTXO lives in LevelDB ``chainstate/`` (legacy ``utxo.sqlite`` is migrated).
 
 ## CLI
 

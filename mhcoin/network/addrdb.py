@@ -1,15 +1,23 @@
-"""Persistent address book for peer discovery (Bitcoin peers.dat analogue)."""
+"""Persistent address book for peer discovery (Bitcoin peers.dat analogue).
+
+Stores peers in ``peers.dat`` (versioned JSON). On first open, migrates a legacy
+``peers.sqlite`` in the same directory if present.
+"""
 
 from __future__ import annotations
 
+import json
+import os
 import sqlite3
 import threading
 import time
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from pathlib import Path
 
 from mhcoin.network.constants import MAX_ADDR_DB, MAX_ADDR_HOST_LEN, SERVICES_NODE_NETWORK
 from mhcoin.network.messages import NetAddress
+
+PEERS_DAT_VERSION = 1
 
 
 @dataclass
@@ -37,61 +45,111 @@ class AddrRecord:
 
 class AddrDB:
     """
-    Bounded SQLite address store. Survives restart.
+    Bounded file address store (``peers.dat``). Survives restart.
     Does not include DNS seeds or central directories.
     """
 
     def __init__(self, path: Path, *, max_entries: int = MAX_ADDR_DB):
+        # Accept legacy ``peers.sqlite`` path from callers and map to ``peers.dat``.
+        path = Path(path)
+        if path.suffix == ".sqlite" or path.name == "peers.sqlite":
+            path = path.with_name("peers.dat")
+        elif path.suffix != ".dat":
+            # If a directory was passed, place peers.dat inside.
+            if path.is_dir() or not path.suffix:
+                path = path / "peers.dat"
         self.path = path
         self.max_entries = max_entries
-        path.parent.mkdir(parents=True, exist_ok=True)
+        self.path.parent.mkdir(parents=True, exist_ok=True)
         self._lock = threading.RLock()
         self._closed = False
-        self._db = sqlite3.connect(str(path), check_same_thread=False)
-        self._db.execute(
-            """
-            CREATE TABLE IF NOT EXISTS addrs (
-                host TEXT NOT NULL,
-                port INTEGER NOT NULL,
-                services INTEGER NOT NULL,
-                last_seen INTEGER NOT NULL,
-                last_try INTEGER NOT NULL DEFAULT 0,
-                attempts INTEGER NOT NULL DEFAULT 0,
-                source TEXT NOT NULL,
-                PRIMARY KEY (host, port)
-            )
-            """
-        )
-        self._db.execute(
-            "CREATE INDEX IF NOT EXISTS idx_addrs_seen ON addrs(last_seen DESC)"
-        )
-        self._db.commit()
+        self._addrs: dict[tuple[str, int], AddrRecord] = {}
+        self._migrate_sqlite_if_needed()
+        self._load()
+
+    def _sqlite_legacy_path(self) -> Path:
+        return self.path.with_name("peers.sqlite")
+
+    def _migrate_sqlite_if_needed(self) -> None:
+        legacy = self._sqlite_legacy_path()
+        if self.path.is_file() or not legacy.is_file():
+            return
+        try:
+            con = sqlite3.connect(str(legacy))
+            rows = con.execute(
+                "SELECT host, port, services, last_seen, last_try, attempts, source FROM addrs"
+            ).fetchall()
+            con.close()
+        except Exception:
+            return
+        for row in rows:
+            rec = AddrRecord(*row)
+            self._addrs[(rec.host, rec.port)] = rec
+        self._save_unlocked()
+        try:
+            legacy.rename(legacy.with_suffix(".sqlite.bak"))
+        except OSError:
+            pass
+
+    def _load(self) -> None:
+        if not self.path.is_file():
+            return
+        try:
+            raw = json.loads(self.path.read_text(encoding="utf-8"))
+        except Exception:
+            # Corrupt file → start empty (same resilience as before).
+            self._addrs = {}
+            return
+        if not isinstance(raw, dict):
+            self._addrs = {}
+            return
+        addrs = raw.get("addrs") or []
+        out: dict[tuple[str, int], AddrRecord] = {}
+        if isinstance(addrs, list):
+            for item in addrs:
+                if not isinstance(item, dict):
+                    continue
+                try:
+                    rec = AddrRecord(
+                        host=str(item["host"]),
+                        port=int(item["port"]),
+                        services=int(item.get("services", SERVICES_NODE_NETWORK)),
+                        last_seen=int(item.get("last_seen", 0)),
+                        last_try=int(item.get("last_try", 0)),
+                        attempts=int(item.get("attempts", 0)),
+                        source=str(item.get("source", "gossip")),
+                    )
+                except (KeyError, TypeError, ValueError):
+                    continue
+                out[(rec.host, rec.port)] = rec
+        self._addrs = out
+
+    def _save_unlocked(self) -> None:
+        payload = {
+            "version": PEERS_DAT_VERSION,
+            "addrs": [asdict(r) for r in self._addrs.values()],
+        }
+        tmp = self.path.with_suffix(".dat.tmp")
+        tmp.write_text(json.dumps(payload, separators=(",", ":")) + "\n", encoding="utf-8")
+        os.replace(tmp, self.path)
+
+    def _save(self) -> None:
+        with self._lock:
+            if self._closed:
+                return
+            self._save_unlocked()
 
     def count(self) -> int:
         with self._lock:
             if self._closed:
                 return 0
-            try:
-                row = self._db.execute("SELECT COUNT(*) FROM addrs").fetchone()
-                return int(row[0]) if row else 0
-            except sqlite3.ProgrammingError:
-                return 0
+            return len(self._addrs)
 
     def get(self, host: str, port: int) -> AddrRecord | None:
         with self._lock:
             if self._closed:
                 return None
-            try:
-                row = self._db.execute(
-                    "SELECT host, port, services, last_seen, last_try, attempts, source "
-                    "FROM addrs WHERE host=? AND port=?",
-                    (host, port),
-                ).fetchone()
-            except sqlite3.ProgrammingError:
-                return None
-            if not row:
-                return None
-            return AddrRecord(*row)
+            return self._addrs.get((host, port))
 
     def add(
         self,
@@ -114,28 +172,35 @@ class AddrDB:
         with self._lock:
             if self._closed:
                 return False
-            try:
-                existing = self.get(host, port)
-                if existing is not None:
-                    new_seen = max(existing.last_seen, seen)
-                    new_source = existing.source if existing.source == "manual" else source
-                    self._db.execute(
-                        "UPDATE addrs SET services=?, last_seen=?, source=? WHERE host=? AND port=?",
-                        (services, new_seen, new_source, host, port),
-                    )
-                    self._db.commit()
-                    return True
-                if self.count() >= self.max_entries:
-                    self._evict_oldest(1)
-                self._db.execute(
-                    "INSERT INTO addrs(host, port, services, last_seen, last_try, attempts, source) "
-                    "VALUES (?,?,?,?,0,0,?)",
-                    (host, port, services, seen, source),
+            key = (host, port)
+            existing = self._addrs.get(key)
+            if existing is not None:
+                new_seen = max(existing.last_seen, seen)
+                new_source = existing.source if existing.source == "manual" else source
+                self._addrs[key] = AddrRecord(
+                    host=host,
+                    port=port,
+                    services=services,
+                    last_seen=new_seen,
+                    last_try=existing.last_try,
+                    attempts=existing.attempts,
+                    source=new_source,
                 )
-                self._db.commit()
+                self._save_unlocked()
                 return True
-            except sqlite3.ProgrammingError:
-                return False
+            if len(self._addrs) >= self.max_entries:
+                self._evict_oldest(1)
+            self._addrs[key] = AddrRecord(
+                host=host,
+                port=port,
+                services=services,
+                last_seen=seen,
+                last_try=0,
+                attempts=0,
+                source=source,
+            )
+            self._save_unlocked()
+            return True
 
     def add_net_address(self, addr: NetAddress, *, source: str = "gossip") -> bool:
         return self.add(
@@ -150,51 +215,51 @@ class AddrDB:
         with self._lock:
             if self._closed:
                 return
-            try:
-                self._db.execute(
-                    "UPDATE addrs SET last_try=?, attempts=attempts+1 WHERE host=? AND port=?",
-                    (int(time.time()), host, port),
-                )
-                self._db.commit()
-            except sqlite3.ProgrammingError:
+            rec = self._addrs.get((host, port))
+            if rec is None:
                 return
+            self._addrs[(host, port)] = AddrRecord(
+                host=rec.host,
+                port=rec.port,
+                services=rec.services,
+                last_seen=rec.last_seen,
+                last_try=int(time.time()),
+                attempts=rec.attempts + 1,
+                source=rec.source,
+            )
+            self._save_unlocked()
 
     def mark_success(self, host: str, port: int) -> None:
         with self._lock:
             if self._closed:
                 return
-            try:
-                self._db.execute(
-                    "UPDATE addrs SET last_seen=?, attempts=0 WHERE host=? AND port=?",
-                    (int(time.time()), host, port),
-                )
-                self._db.commit()
-            except sqlite3.ProgrammingError:
+            rec = self._addrs.get((host, port))
+            if rec is None:
                 return
+            self._addrs[(host, port)] = AddrRecord(
+                host=rec.host,
+                port=rec.port,
+                services=rec.services,
+                last_seen=int(time.time()),
+                last_try=rec.last_try,
+                attempts=0,
+                source=rec.source,
+            )
+            self._save_unlocked()
 
     def remove(self, host: str, port: int) -> None:
         with self._lock:
             if self._closed:
                 return
-            try:
-                self._db.execute("DELETE FROM addrs WHERE host=? AND port=?", (host, port))
-                self._db.commit()
-            except sqlite3.ProgrammingError:
-                return
+            if self._addrs.pop((host, port), None) is not None:
+                self._save_unlocked()
 
     def list_recent(self, limit: int = 32) -> list[AddrRecord]:
         with self._lock:
             if self._closed:
                 return []
-            try:
-                rows = self._db.execute(
-                    "SELECT host, port, services, last_seen, last_try, attempts, source "
-                    "FROM addrs ORDER BY last_seen DESC LIMIT ?",
-                    (limit,),
-                ).fetchall()
-                return [AddrRecord(*r) for r in rows]
-            except sqlite3.ProgrammingError:
-                return []
+            rows = sorted(self._addrs.values(), key=lambda r: r.last_seen, reverse=True)
+            return rows[:limit]
 
     def candidates_for_outbound(
         self,
@@ -209,15 +274,11 @@ class AddrDB:
         with self._lock:
             if self._closed:
                 return []
-            try:
-                rows = self._db.execute(
-                    "SELECT host, port, services, last_seen, last_try, attempts, source "
-                    "FROM addrs ORDER BY attempts ASC, last_seen DESC"
-                ).fetchall()
-            except sqlite3.ProgrammingError:
-                return []
-        for r in rows:
-            rec = AddrRecord(*r)
+            rows = sorted(
+                self._addrs.values(),
+                key=lambda r: (r.attempts, -r.last_seen),
+            )
+        for rec in rows:
             if rec.key in exclude:
                 continue
             if rec.last_try and (now - rec.last_try) < min_retry_age:
@@ -228,13 +289,12 @@ class AddrDB:
         return out
 
     def _evict_oldest(self, n: int) -> None:
-        rows = self._db.execute(
-            "SELECT host, port FROM addrs WHERE source!='manual' "
-            "ORDER BY last_seen ASC LIMIT ?",
-            (n,),
-        ).fetchall()
-        for host, port in rows:
-            self._db.execute("DELETE FROM addrs WHERE host=? AND port=?", (host, port))
+        rows = sorted(
+            (r for r in self._addrs.values() if r.source != "manual"),
+            key=lambda r: r.last_seen,
+        )
+        for rec in rows[:n]:
+            self._addrs.pop((rec.host, rec.port), None)
 
     def close(self) -> None:
         with self._lock:
@@ -242,6 +302,6 @@ class AddrDB:
                 return
             self._closed = True
             try:
-                self._db.close()
-            except sqlite3.Error:
+                self._save_unlocked()
+            except Exception:
                 pass

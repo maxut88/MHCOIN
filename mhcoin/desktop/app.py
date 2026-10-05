@@ -229,6 +229,7 @@ class MhcoinDesktop(tk.Tk):
         v.label("Welcome to MHCOIN", muted=True)
         v.skip(10)
         v.button("Create New Wallet", self._create_wallet, accent=True, width=300)
+        v.button("Restore from Seed", self._restore_wallet, width=300)
         v.button("Open Existing Wallet", self._open_existing, width=300)
         v.skip(20)
         v.label("localnet RC only — not mainnet", muted=True)
@@ -286,14 +287,39 @@ class MhcoinDesktop(tk.Tk):
         if not pwd:
             return
         try:
-            addr = self.ctrl.create_wallet(pwd)
+            created = self.ctrl.create_hd_wallet(pwd)
+        except WalletError as e:
+            messagebox.showerror(APP_TITLE, str(e))
+            return
+        seed = created.get("mnemonic") or ""
+        msg = (
+            f"Your MHCOIN address:\n\n{created['address']}\n\n"
+            f"Write down this recovery seed (BIP39):\n\n{seed}\n\n"
+            f"Anyone with these words can spend your MHC.\n"
+            f"Also back up your wallet password."
+        )
+        messagebox.showinfo(APP_TITLE, msg)
+        self._enter_main()
+
+    def _restore_wallet(self) -> None:
+        words = simpledialog.askstring(
+            APP_TITLE,
+            "Enter BIP39 recovery seed (12 or 24 words):",
+            parent=self,
+        )
+        if not words or not words.strip():
+            return
+        pwd = self._ask_new_password()
+        if not pwd:
+            return
+        try:
+            addr = self.ctrl.restore_wallet(pwd, words)
         except WalletError as e:
             messagebox.showerror(APP_TITLE, str(e))
             return
         messagebox.showinfo(
             APP_TITLE,
-            f"Your MHCOIN address:\n\n{addr}\n\n"
-            f"Back up your wallet password.\nPrivate keys stay encrypted on disk.",
+            f"Wallet restored.\n\nAddress:\n{addr}\n\nBack up your password.",
         )
         self._enter_main()
 

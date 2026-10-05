@@ -32,6 +32,9 @@ hiddenimports = [
     "mhcoin.wallet.send",
     "mhcoin.wallet.storage",
     "mhcoin.wallet.addresses",
+    "mhcoin.wallet.bip39",
+    "mhcoin.wallet.hd",
+    "mhcoin.wallet.wif",
     "mhcoin.mining",
     "mhcoin.mining.miner",
     "mhcoin.mining.block_template",
@@ -40,6 +43,7 @@ hiddenimports = [
     "mhcoin.node.runtime",
     "mhcoin.blockchain",
     "mhcoin.blockchain.chain",
+    "mhcoin.blockchain.blockstore",
     "webview",
     "webview.platforms",
 
@@ -64,6 +68,8 @@ hiddenimports = [
     "Crypto",
     "click",
     "appdirs",
+    "mnemonic",
+    "plyvel",
     "tkinter",
     "_tkinter",
 ]
@@ -79,6 +85,27 @@ try:
     extra_datas += _wv_datas
     extra_binaries += _wv_binaries
     hiddenimports += list(_wv_hidden)
+except Exception:
+    pass
+
+# LevelDB bindings (UTXO chainstate)
+try:
+    from PyInstaller.utils.hooks import collect_all
+
+    _pl_datas, _pl_binaries, _pl_hidden = collect_all("plyvel")
+    extra_datas += _pl_datas
+    extra_binaries += _pl_binaries
+    hiddenimports += list(_pl_hidden)
+except Exception:
+    pass
+
+try:
+    from PyInstaller.utils.hooks import collect_all
+
+    _mn_datas, _mn_binaries, _mn_hidden = collect_all("mnemonic")
+    extra_datas += _mn_datas
+    extra_binaries += _mn_binaries
+    hiddenimports += list(_mn_hidden)
 except Exception:
     pass
 

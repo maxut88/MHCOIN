@@ -31,9 +31,13 @@ jobs:
         with:
           python-version: "3.11"
 
-      - name: Linux Tk deps
+      - name: Linux Tk + LevelDB deps
         if: runner.os == 'Linux'
-        run: sudo apt-get update && sudo apt-get install -y python3-tk libtcl8.6 libtk8.6
+        run: sudo apt-get update && sudo apt-get install -y python3-tk libtcl8.6 libtk8.6 libleveldb-dev libleveldb1d
+
+      - name: macOS LevelDB (plyvel)
+        if: runner.os == 'macOS'
+        run: brew install leveldb || true
 
       - name: Install Python deps
         run: |

@@ -82,7 +82,7 @@ class P2PManager:
         self.relay: TxRelay | None = None
 
         if config.data_dir is not None:
-            self.addrdb = AddrDB(config.data_dir / "peers.sqlite")
+            self.addrdb = AddrDB(config.data_dir / "peers.dat")
             self.bans = BanManager(
                 config.data_dir / "bans.json",
                 threshold=config.ban_threshold,
@@ -92,7 +92,7 @@ class P2PManager:
             import tempfile
 
             td = Path(tempfile.mkdtemp(prefix="mhcoin-p2p-"))
-            self.addrdb = AddrDB(td / "peers.sqlite")
+            self.addrdb = AddrDB(td / "peers.dat")
             self.bans = BanManager(
                 td / "bans.json",
                 threshold=config.ban_threshold,

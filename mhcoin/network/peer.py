@@ -324,7 +324,13 @@ class Peer:
     def _dispatch(self, msg: NetMessage) -> None:
         cmd = msg.command.upper()
         if self.state != PeerState.HANDSHAKED and cmd not in _PRE_HANDSHAKE_CMDS:
-            logger.warning("ignoring %s before handshake from %s", cmd, self.addr)
+            n = int(getattr(self, "_pre_hs_ignored", 0)) + 1
+            self._pre_hs_ignored = n
+            # Seed may flood BLOCKs before VERACK; avoid log spam (segfault-unrelated).
+            if n <= 2 or n == 10 or n % 100 == 0:
+                logger.warning(
+                    "ignoring %s before handshake from %s (×%s)", cmd, self.addr, n
+                )
             return
         if cmd == "VERSION":
             self._on_version(msg.payload)

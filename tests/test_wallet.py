@@ -20,7 +20,7 @@ def test_wallet_create_and_address(tmp_path: Path, monkeypatch: pytest.MonkeyPat
     monkeypatch.setenv("MHCOIN_NETWORK", "localnet")
     paths = wallet_paths("localnet")
     w = Wallet(paths)
-    addr = w.create(password="secret123")
+    addr = w.create(password="secret123").address
     assert addr.startswith("mhc1")
     assert w.default_address() == addr
     wf = paths.wallet_file

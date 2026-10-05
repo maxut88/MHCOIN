@@ -848,6 +848,7 @@ HTML = r"""<!DOCTYPE html>
     <div id="welcomeWallets"></div>
     <div class="row">
       <button class="primary" id="btnCreate" disabled>Create New Wallet</button>
+      <button id="btnRestore" disabled>Restore from Seed</button>
       <button id="btnOpen" disabled>Open Existing Wallet</button>
       <button id="btnSupportWelcome">Support</button>
     </div>
@@ -1017,17 +1018,26 @@ function showModal({ title, message, mode, okLabel, cancelLabel, placeholder, co
     $("modalOk").textContent = okLabel || "OK";
     cancelBtn.textContent = cancelLabel || "Cancel";
     const needInput = mode === "password" || mode === "text";
+    const needMultiline = mode === "multiline";
     const needCancel = mode !== "alert" && mode !== "copy";
     const needCopy = mode === "copy" && !!copyText;
     input.classList.toggle("hidden", !needInput);
     cancelBtn.classList.toggle("hidden", !needCancel);
-    copyArea.classList.toggle("hidden", !needCopy);
+    copyArea.classList.toggle("hidden", !(needCopy || needMultiline));
     tools.classList.toggle("hidden", !needCopy);
     if (needCopy) {
+      copyArea.readOnly = true;
       copyArea.value = copyText;
       copyArea.onclick = () => { copyArea.focus(); copyArea.select(); };
-    } else {
+    } else if (needMultiline) {
+      copyArea.readOnly = false;
       copyArea.value = "";
+      copyArea.placeholder = placeholder || "";
+      copyArea.onclick = null;
+    } else {
+      copyArea.readOnly = true;
+      copyArea.value = "";
+      copyArea.placeholder = "";
       copyArea.onclick = null;
     }
     if (needInput) {
@@ -1067,17 +1077,24 @@ function showModal({ title, message, mode, okLabel, cancelLabel, placeholder, co
       else if (r && r.ok) flash("Saved: " + name);
       else flash("Save failed", false);
     };
-    $("modalOk").onclick = () => finish(needInput ? (input.value || "") : true);
-    cancelBtn.onclick = () => finish(needInput ? "" : false);
+    $("modalOk").onclick = () => {
+      if (needMultiline) finish(copyArea.value || "");
+      else if (needInput) finish(input.value || "");
+      else finish(true);
+    };
+    cancelBtn.onclick = () => finish(needInput || needMultiline ? "" : false);
     input.onkeydown = (e) => {
       if (e.key === "Enter") { e.preventDefault(); finish(input.value || ""); }
       if (e.key === "Escape") { e.preventDefault(); finish(""); }
     };
     bd.onkeydown = (e) => {
-      if (e.key === "Escape") { e.preventDefault(); finish(needInput ? "" : (needCopy ? true : false)); }
+      if (e.key === "Escape") {
+        e.preventDefault();
+        finish(needInput || needMultiline ? "" : (needCopy ? true : false));
+      }
     };
     setTimeout(() => {
-      if (needCopy) { copyArea.focus(); copyArea.select(); }
+      if (needCopy || needMultiline) { copyArea.focus(); if (needCopy) copyArea.select(); }
       else if (needInput) input.focus();
       else $("modalOk").focus();
     }, 30);
@@ -1315,26 +1332,47 @@ async function showSupportHelp(){
     };
   });
 }
-async function walletDetailsBox(address, password, network){
+async function walletDetailsBox(address, password, network, mnemonic){
   const stamp = new Date().toISOString();
-  const text =
+  let text =
     "MHCOIN wallet details\n" +
     "=====================\n" +
     "Created: " + stamp + "\n" +
     "Network: " + (network || "mainnet") + "\n" +
     "Address: " + address + "\n" +
-    "Password: " + password + "\n" +
-    "\n" +
-    "KEEP THIS FILE PRIVATE.\n" +
+    "Password: " + password + "\n";
+  if (mnemonic) {
+    text +=
+      "\nRecovery seed (BIP39) — WRITE THIS DOWN\n" +
+      "----------------------------------------\n" +
+      mnemonic + "\n" +
+      "\nAnyone with these words can spend your MHC.\n" +
+      "Store offline. Never share. Never screenshot in public.\n";
+  }
+  text +=
+    "\nKEEP THIS FILE PRIVATE.\n" +
     "Also download the encrypted wallet.json backup (next step).\n" +
-    "Password is required to unlock — it is not stored inside wallet.json.\n";
+    "Password unlocks the file; seed recovers the key without the file.\n";
   await showModal({
-    title: "Save your wallet",
-    message: "Select / copy / save these details before continuing.\nPassword is shown once — store it safely.",
+    title: mnemonic ? "Save your seed phrase" : "Save your wallet",
+    message: mnemonic
+      ? "Write down these 12 words now. This is the only recovery key.\nPassword is also shown once — store both safely."
+      : "Select / copy / save these details before continuing.\nPassword is shown once — store it safely.",
     mode: "copy",
     copyText: text,
     saveName: "MHCOIN-" + (network || "mainnet") + "-wallet-details.txt",
-    okLabel: "Continue",
+    okLabel: "I saved it — Continue",
+  });
+}
+
+async function askSeedPhrase(){
+  return await showModal({
+    title: "Restore wallet",
+    message: "Enter your BIP39 recovery seed (12 or 24 English words).",
+    mode: "multiline",
+    placeholder: "word1 word2 word3 …",
+    okLabel: "Restore",
+    cancelLabel: "Cancel",
   });
 }
 
@@ -1816,12 +1854,30 @@ $("btnCreate").onclick = async () => {
     flash("New wallet is now active (previous keys stay in wallet.json)");
     let net = "mainnet";
     try { const s = await api("status"); net = s.network || net; } catch(e){}
-    await walletDetailsBox(j.address, a, net);
+    await walletDetailsBox(j.address, a, net, j.mnemonic || "");
     try {
       await doWalletBackup();
     } catch(be){
       flash("Wallet created, but backup failed: "+be.message, false);
     }
+    enterApp();
+  } catch(e){ flash(e.message, false); }
+};
+$("btnRestore").onclick = async () => {
+  if (!welcomeReady) { flash("Still loading — wait for the progress bar", false); return; }
+  try {
+    const words = await askSeedPhrase();
+    if (!words || !String(words).trim()) return;
+    const a = await ask("Choose a wallet password:");
+    if (!a) return;
+    const b = await ask("Confirm password:");
+    if (a !== b) return flash("Passwords do not match", false);
+    const j = await api("wallet/restore", {password:a, mnemonic: words});
+    flash("Wallet restored from seed");
+    let net = "mainnet";
+    try { const s = await api("status"); net = s.network || net; } catch(e){}
+    await walletDetailsBox(j.address, a, net, "");
+    try { await doWalletBackup(); } catch(be){ flash("Restored, but backup failed: "+be.message, false); }
     enterApp();
   } catch(e){ flash(e.message, false); }
 };
@@ -1922,7 +1978,7 @@ function setWelcomeBusy(busy, title, meta){
   if (title && $("welcomeLoadTitle")) $("welcomeLoadTitle").textContent = title;
   if (meta && $("welcomeLoadMeta")) $("welcomeLoadMeta").textContent = meta;
   const dis = !!busy;
-  ["welcomeNetSel","btnCreate","btnOpen"].forEach(id => {
+  ["welcomeNetSel","btnCreate","btnRestore","btnOpen"].forEach(id => {
     const el = $(id); if (el) el.disabled = dis;
   });
   const wsel = $("welcomeWalletSel");
@@ -2276,6 +2332,8 @@ async function render(pre){
       <div class="row">
         <button id="ref">Refresh</button>
         <button id="newW">Create Another Wallet</button>
+        <button id="restoreW">Restore from Seed</button>
+        <button id="exportSeed">Show Recovery Seed</button>
         <button id="lockBtn">Lock wallet</button>
         <button id="supportBtn">Support</button>
         <button id="quitBtn">Quit app</button>
@@ -2344,9 +2402,37 @@ async function render(pre){
         flash("New wallet active");
         let net = "mainnet";
         try { const s = await api("status"); net = s.network || net; } catch(e){}
-        await walletDetailsBox(j.address, a, net);
+        await walletDetailsBox(j.address, a, net, j.mnemonic || "");
         try { await doWalletBackup(); } catch(be){ flash("Backup failed: "+be.message, false); }
         render();
+      } catch(e){ flash(e.message, false); }
+    };
+    if ($("restoreW")) $("restoreW").onclick = async () => {
+      try {
+        const words = await askSeedPhrase();
+        if (!words || !String(words).trim()) return;
+        const a = await ask("Password for restored wallet:");
+        if (!a) return;
+        const b = await ask("Confirm password:");
+        if (a !== b) return flash("Passwords do not match", false);
+        const j = await api("wallet/restore", {password:a, mnemonic: words});
+        flash("Wallet restored from seed");
+        render();
+      } catch(e){ flash(e.message, false); }
+    };
+    if ($("exportSeed")) $("exportSeed").onclick = async () => {
+      try {
+        const p = await ask("Wallet password:");
+        if (!p) return;
+        const j = await api("wallet/export-seed", {password:p});
+        await showModal({
+          title: "Recovery seed",
+          message: "Anyone with these words can spend your MHC. Keep offline.",
+          mode: "copy",
+          copyText: j.mnemonic || "",
+          saveName: "MHCOIN-recovery-seed.txt",
+          okLabel: "Done",
+        });
       } catch(e){ flash(e.message, false); }
     };
     $("lockBtn").onclick = async () => {
@@ -2630,10 +2716,23 @@ def make_handler(state: DesktopState):
                 return {"ok": True}
             with state.lock:
                 if path == "/api/wallet/create":
-                    addr = c.create_wallet(str(body.get("password") or ""))
-                    # Async full-chain scan (must not use full_chain=False): short
-                    # windows omit prev outs from tx_index so Sent never appears.
-                    # Runs before node/start holds the datadir (node waits on _io).
+                    created = c.create_hd_wallet(str(body.get("password") or ""))
+                    try:
+                        c.request_history_build(full_chain=True)
+                    except Exception:
+                        pass
+                    return {
+                        "ok": True,
+                        "address": created["address"],
+                        "mnemonic": created.get("mnemonic") or "",
+                        "wallet_id": created.get("wallet_id") or "",
+                        "wallets": c.list_wallets(),
+                    }
+                if path == "/api/wallet/restore":
+                    addr = c.restore_wallet(
+                        str(body.get("password") or ""),
+                        str(body.get("mnemonic") or ""),
+                    )
                     try:
                         c.request_history_build(full_chain=True)
                     except Exception:
@@ -2643,6 +2742,9 @@ def make_handler(state: DesktopState):
                         "address": addr,
                         "wallets": c.list_wallets(),
                     }
+                if path == "/api/wallet/export-seed":
+                    words = c.export_seed(str(body.get("password") or "") or None)
+                    return {"ok": True, "mnemonic": words}
                 if path == "/api/wallet/unlock":
                     if not c.wallet_exists():
                         raise WalletError("no wallet found")

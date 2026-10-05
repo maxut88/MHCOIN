@@ -6,7 +6,7 @@
 hardcoded seeds + DNS seeds   ← first contact only (not consensus)
            │
            ▼
-        AddrDB                ← peers.sqlite (like Bitcoin peers.dat)
+        AddrDB                ← peers.dat (Bitcoin-style peer address book)
            │
            ▼
    ADDR / GETADDR gossip      ← mesh grows without a central server
@@ -49,7 +49,11 @@ Hosts from peers are untrusted (bounded decode + hygiene).
 
 ## AddrDB
 
-Persistent SQLite (`peers.sqlite`):
+Persistent versioned JSON file (`peers.dat`). On first open, a legacy
+`peers.sqlite` in the same directory is migrated (then renamed to
+`peers.sqlite.bak`).
+
+Fields per address:
 
 - host, port, services, last_seen, last_try, attempts, source
 - sources: `manual` (seeds / `--connect`), `gossip` (ADDR), `inbound`

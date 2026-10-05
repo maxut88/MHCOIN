@@ -12,7 +12,7 @@ from mhcoin.wallet.send import format_mhc, parse_amount_mhc
 def test_solo_mining_start_pays_address(tmp_path: Path):
     paths = WalletPaths(data_dir=tmp_path, network="localnet", hrp="mhc")
     w = Wallet(paths, password="test-pass-123")
-    addr = w.create(password="test-pass-123")
+    addr = w.create(password="test-pass-123").address
     assert addr.startswith("mhc1")
 
     miner = SoloMiner(

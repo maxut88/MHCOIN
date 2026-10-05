@@ -31,7 +31,7 @@ def test_desktop_controller_wallet_mine_send(tmp_path: Path, monkeypatch):
 
     petro = Wallet(ctrl.paths, password="desk-pass-123").create(
         label="petro", password="desk-pass-123", make_default=False
-    )
+    ).address
     txid = ctrl.send(petro, "10", "desk-pass-123")
     assert len(txid) == 64
     ctrl.shutdown()
@@ -48,3 +48,20 @@ def test_desktop_controller_wallet_mine_send(tmp_path: Path, monkeypatch):
     rows = ctrl.recent_transactions()
     assert any(r.kind == "Mining reward" for r in rows)
     ctrl.shutdown()
+
+
+def test_desktop_create_and_restore_seed(tmp_path: Path, monkeypatch):
+    monkeypatch.setenv("MHCOIN_NETWORK", "localnet")
+    ctrl = CoreController(network="localnet", data_dir=tmp_path / "a")
+    created = ctrl.create_hd_wallet("seed-pass-1")
+    assert created["address"].startswith("mhc1")
+    assert len(created["mnemonic"].split()) in (12, 24)
+    seed = created["mnemonic"]
+    addr = created["address"]
+    ctrl.shutdown()
+
+    ctrl2 = CoreController(network="localnet", data_dir=tmp_path / "b")
+    restored = ctrl2.restore_wallet("seed-pass-2", seed)
+    assert restored == addr
+    assert ctrl2.export_seed("seed-pass-2") == seed
+    ctrl2.shutdown()

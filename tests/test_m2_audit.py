@@ -32,8 +32,8 @@ def test_alice_bob_supply_accounting(tmp_path: Path):
     """
     paths = WalletPaths(data_dir=tmp_path, network="regtest", hrp="mhc")
     w = Wallet(paths)
-    alice = w.create(password="audit", label="alice")
-    bob = w.create(password="audit", label="bob", make_default=False)
+    alice = w.create(password="audit", label="alice").address
+    bob = w.create(password="audit", label="bob", make_default=False).address
     node = LocalNode(tmp_path, hrp="mhc")
     node.bootstrap_genesis(alice)
 
@@ -69,7 +69,7 @@ def test_alice_bob_supply_accounting(tmp_path: Path):
 def test_normal_tx_cannot_mint(tmp_path: Path):
     paths = WalletPaths(data_dir=tmp_path, network="regtest", hrp="mhc")
     w = Wallet(paths)
-    alice = w.create(password="x")
+    alice = w.create(password="x").address
     node = LocalNode(tmp_path, hrp="mhc")
     node.bootstrap_genesis(alice)
     kp = w.unlock_default("x")
@@ -122,8 +122,8 @@ def test_excessive_coinbase_rejected(tmp_path: Path):
 def test_utxo_persistence_after_restart(tmp_path: Path):
     paths = WalletPaths(data_dir=tmp_path, network="regtest", hrp="mhc")
     w = Wallet(paths)
-    alice = w.create(password="r")
-    bob = w.create(password="r", label="bob", make_default=False)
+    alice = w.create(password="r").address
+    bob = w.create(password="r", label="bob", make_default=False).address
     node = LocalNode(tmp_path, hrp="mhc")
     node.bootstrap_genesis(alice)
     res = w.send(bob, "1.25", password="r", utxo=node.chain.utxo)
@@ -147,8 +147,8 @@ def test_utxo_persistence_after_restart(tmp_path: Path):
 def test_double_spend_mempool_and_utxo(tmp_path: Path):
     paths = WalletPaths(data_dir=tmp_path, network="regtest", hrp="mhc")
     w = Wallet(paths)
-    alice = w.create(password="d")
-    bob = w.create(password="d", label="bob", make_default=False)
+    alice = w.create(password="d").address
+    bob = w.create(password="d", label="bob", make_default=False).address
     node = LocalNode(tmp_path, hrp="mhc")
     node.bootstrap_genesis(alice)
     t1 = w.send(bob, "1", password="d", utxo=node.chain.utxo)

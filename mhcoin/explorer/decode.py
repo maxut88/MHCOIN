@@ -591,7 +591,11 @@ def summarize_tx(
 
 
 def find_tx(
-    chain: ReadOnlyChain, txid_hex_str: str, *, hrp: str = DEFAULT_HRP
+    chain: ReadOnlyChain,
+    txid_hex_str: str,
+    *,
+    hrp: str = DEFAULT_HRP,
+    data_dir=None,
 ) -> dict[str, Any] | None:
     want = bytes.fromhex(txid_hex_str)
     tip = chain.height
@@ -610,6 +614,71 @@ def find_tx(
                     tip=tip,
                     hrp=hrp,
                 )
+    if data_dir is not None:
+        mp = find_mempool_tx(data_dir, txid_hex_str, chain=chain, hrp=hrp)
+        if mp is not None:
+            return mp
+    return None
+
+
+def find_mempool_tx(
+    data_dir,
+    txid_hex_str: str,
+    *,
+    chain: ReadOnlyChain | None = None,
+    hrp: str = DEFAULT_HRP,
+) -> dict[str, Any] | None:
+    """Resolve an unconfirmed tx from mempool.json (hex-encoded entries)."""
+    from pathlib import Path
+    import json
+
+    path = Path(data_dir) / "mempool.json"
+    if not path.is_file():
+        return None
+    want = txid_hex_str.lower()
+    try:
+        raw = json.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+        return None
+    txs_raw = raw.get("txs") or raw.get("transactions") or {}
+    if isinstance(txs_raw, dict):
+        items = list(txs_raw.items())
+    elif isinstance(txs_raw, list):
+        items = [(None, x) for x in txs_raw]
+    else:
+        return None
+    from mhcoin.transaction.transaction import Transaction
+
+    for key, val in items:
+        tx = None
+        if isinstance(val, str) and len(val) > 64:
+            try:
+                tx = Transaction.deserialize(bytes.fromhex(val))
+            except Exception:
+                continue
+        elif isinstance(val, dict) and isinstance(val.get("hex"), str):
+            try:
+                tx = Transaction.deserialize(bytes.fromhex(val["hex"]))
+            except Exception:
+                continue
+        if tx is None:
+            continue
+        if tx.txid().hex() != want and str(key or "").lower() != want:
+            continue
+        if chain is not None:
+            out = summarize_tx(chain, tx, tip=chain.height, hrp=hrp)
+        else:
+            out = {
+                "txid": tx.txid().hex(),
+                "coinbase": tx.is_coinbase(),
+                "confirmations": 0,
+                "size_bytes": len(tx.serialize()),
+                "output_value_mhc": format_mhc(int(tx.output_value())),
+            }
+        out["unconfirmed"] = True
+        out["in_mempool"] = True
+        out["confirmations"] = 0
+        return out
     return None
 
 
@@ -765,6 +834,21 @@ def blocks_page(
 
 
 
+def _count_transactions(
+    chain: ReadOnlyChain, *, tip: int, transfers_only: bool = False
+) -> int:
+    total = 0
+    for h in range(0, tip + 1):
+        block = chain.get_block_by_height(h)
+        if block is None:
+            continue
+        for tx in block.transactions:
+            if transfers_only and tx.is_coinbase():
+                continue
+            total += 1
+    return total
+
+
 def transactions_page(
     chain: ReadOnlyChain,
     *,
@@ -773,21 +857,86 @@ def transactions_page(
     hrp: str = DEFAULT_HRP,
     transfers_only: bool = False,
 ) -> dict[str, Any]:
-    """Paginated newest-first transaction list (full history)."""
+    """Paginated newest-first transaction list (page slice only — no full materialize)."""
     tip = chain.height
-    # gather all matching txs once (small chains); page slice
-    all_txs = recent_transactions(
-        chain,
-        count=10_000_000,
-        tip=tip,
-        hrp=hrp,
-        transfers_only=transfers_only,
-    )
-    total = len(all_txs)
+    total = _count_transactions(chain, tip=tip, transfers_only=transfers_only)
     total_pages = max(1, (total + per_page - 1) // per_page) if total else 1
     page = max(1, min(int(page), total_pages))
-    start = (page - 1) * per_page
-    end = start + per_page
+    skip = (page - 1) * per_page
+    # Walk tip-down; reuse compact row builder via recent_transactions window + skip.
+    # Collect only the requested page by scanning with an offset.
+    now = int(time.time())
+    out: list[dict[str, Any]] = []
+    seen = 0
+    for h in range(tip, -1, -1):
+        block = chain.get_block_by_height(h)
+        if block is None:
+            continue
+        bh = block.block_hash().hex()
+        ts = int(block.header.timestamp)
+        for idx in range(len(block.transactions) - 1, -1, -1):
+            tx = block.transactions[idx]
+            cb = tx.is_coinbase()
+            if transfers_only and cb:
+                continue
+            if seen < skip:
+                seen += 1
+                continue
+            out_v = int(tx.output_value())
+            from_addr: str | None = None
+            to_addr: str | None = None
+            fee_sats: int | None = None
+            if cb:
+                to_addr = out_address(tx.outputs[0], hrp=hrp) if tx.outputs else None
+                from_addr = "coinbase"
+            else:
+                tin = tx.inputs[0]
+                prev = _prev_output(chain, tin.prev_txid, tin.prev_vout)
+                if prev is not None:
+                    tout, _ = prev
+                    from_addr = out_address(tout, hrp=hrp)
+                    in_sum = int(tout.value)
+                    if len(tx.inputs) == 1 and in_sum >= out_v:
+                        fee_sats = in_sum - out_v
+                if tx.outputs:
+                    to_addr = None
+                    for tout in tx.outputs:
+                        cand = out_address(tout, hrp=hrp)
+                        if cand and cand != from_addr:
+                            to_addr = cand
+                            break
+                    if to_addr is None:
+                        to_addr = out_address(tx.outputs[0], hrp=hrp)
+            pay_sats = payment_amount_sats(tx, from_addr=from_addr, hrp=hrp)
+            out.append(
+                {
+                    "txid": txid_hex(tx),
+                    "coinbase": cb,
+                    "height": h,
+                    "block_hash": bh,
+                    "timestamp": ts,
+                    "time_utc": format_utc(ts),
+                    "age": format_age(ts, now=now),
+                    "confirmations": confirmations(tip, h),
+                    "input_count": len(tx.inputs),
+                    "output_count": len(tx.outputs),
+                    "output_value_sats": out_v,
+                    "output_value_mhc": format_mhc(out_v),
+                    "amount_sats": pay_sats,
+                    "amount_mhc": format_mhc(pay_sats),
+                    "fee_sats": fee_sats,
+                    "fee_mhc": format_mhc(fee_sats) if fee_sats is not None else None,
+                    "from": from_addr,
+                    "to": to_addr,
+                    "size_bytes": len(tx.serialize()),
+                    "index_in_block": idx,
+                }
+            )
+            seen += 1
+            if len(out) >= per_page:
+                break
+        if len(out) >= per_page:
+            break
     return {
         "tip_height": tip,
         "page": page,
@@ -795,7 +944,7 @@ def transactions_page(
         "total_transactions": total,
         "total_pages": total_pages,
         "transfers_only": transfers_only,
-        "transactions": all_txs[start:end],
+        "transactions": out,
         "target_block_time_seconds": TARGET_BLOCK_TIME_SECONDS,
     }
 

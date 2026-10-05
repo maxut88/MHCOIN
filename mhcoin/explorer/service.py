@@ -1,12 +1,16 @@
-"""MHCOIN LAN block explorer — stdlib HTTP (read-only)."""
+"""MHCOIN block explorer — stdlib HTTP (read-only)."""
 
 from __future__ import annotations
 
+import hashlib
 import html
 import json
 import logging
 import mimetypes
 import re
+import threading
+import time
+from collections import defaultdict, deque
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
@@ -25,6 +29,13 @@ STATIC_FILES = {
     "logo.png": ASSETS_DIR / "mhcoin-256.png",
     "favicon.ico": ASSETS_DIR / "mhcoin.ico",
 }
+
+# Home/stats TTL — home tabs poll often; avoid full-chain rescans every hit.
+_HOME_CACHE_TTL_SEC = 3.0
+# Per-client limits only for expensive scans (not HTML / tip poll / static).
+_RATE_LIMIT_WINDOW_SEC = 60.0
+_RATE_LIMIT_ADDRESS = 60  # /address/* chain scans
+_RATE_LIMIT_API_HOME = 90  # full /api/ dumps (tip poll is exempt)
 
 # Same mark as Desktop webui (coin + M) — animated rings / throb / sheen.
 _LOGO_SVG_M = (
@@ -84,11 +95,19 @@ def _page(title: str, body: str, *, tip: int | None = None, hero: bool = False) 
 <meta charset="utf-8"/>
 <meta name="viewport" content="width=device-width, initial-scale=1"/>
 <meta name="theme-color" content="#ffffff"/>
-<link rel="icon" type="image/svg+xml" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Cdefs%3E%3ClinearGradient id='g' x1='12' y1='8' x2='52' y2='56' gradientUnits='userSpaceOnUse'%3E%3Cstop stop-color='%235dffc0'/%3E%3Cstop offset='.42' stop-color='%232dd4a0'/%3E%3Cstop offset='1' stop-color='%230f7a55'/%3E%3C/linearGradient%3E%3C/defs%3E%3Ccircle cx='32' cy='32' r='30' fill='url(%23g)'/%3E%3Cpath d='M14 46V18h7.2l9.8 17.6L40.8 18H48v28h-5.8V27.6L36.2 46h-4.1L21.8 27.6V46H14z' fill='%2306261a'/%3E%3C/svg%3E"/>
-<link rel="alternate icon" href="/static/favicon.ico"/>
+<meta name="description" content="MHCOIN block explorer — live mainnet tip, blocks, transactions, and addresses."/>
+<meta name="robots" content="index,follow"/>
+<meta property="og:title" content="{_esc(title)} — MHCOIN Explorer"/>
+<meta property="og:description" content="Independent HASH256 Proof-of-Work explorer for MHCOIN mainnet."/>
+<meta property="og:type" content="website"/>
+<link rel="icon" href="/favicon.ico?v=3" sizes="any"/>
+<link rel="icon" type="image/svg+xml" href="/static/logo.svg?v=3"/>
+<link rel="apple-touch-icon" href="/static/logo.png?v=3"/>
+<link rel="shortcut icon" href="/favicon.ico?v=3"/>
 <link rel="preconnect" href="https://fonts.googleapis.com"/>
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin/>
-<link href="https://fonts.googleapis.com/css2?family=DM+Sans:wght@500;600;700;800&family=JetBrains+Mono:wght@450;600&display=swap" rel="stylesheet"/>
+<link rel="preload" as="style" href="https://fonts.googleapis.com/css2?family=DM+Sans:wght@500;600;700;800&family=JetBrains+Mono:wght@450;600&display=optional"/>
+<link href="https://fonts.googleapis.com/css2?family=DM+Sans:wght@500;600;700;800&family=JetBrains+Mono:wght@450;600&display=optional" rel="stylesheet"/>
 <title>{_esc(title)} — MHCOIN Explorer</title>
 <style>
   :root {{
@@ -192,29 +211,106 @@ def _page(title: str, body: str, *, tip: int | None = None, hero: bool = False) 
   main {{ width: 100%; margin: 0; padding: 1rem 1.5rem 2.75rem; }}
   .shell {{ width: 100%; }}
   .kpi {{
-    display: grid; grid-template-columns: repeat(6, minmax(120px, 1fr));
+    display: grid; grid-template-columns: repeat(8, minmax(0, 1fr));
     gap: .75rem; margin: 0 0 1rem;
   }}
-  @media (max-width: 1100px) {{ .kpi {{ grid-template-columns: repeat(3, minmax(120px, 1fr)); }} }}
-  @media (max-width: 640px) {{ .kpi {{ grid-template-columns: repeat(2, minmax(120px, 1fr)); }} }}
-  .kpi .stat {{ background: var(--panel); border: 1px solid var(--line); border-radius: 12px; padding: .85rem .95rem; }}
-  .kpi .lbl {{ color: var(--muted); font-size: .7rem; font-weight: 700; text-transform: uppercase; letter-spacing: .05em; }}
-  .kpi .val {{ font-size: 1.2rem; font-weight: 780; margin-top: .2rem; letter-spacing: -.02em; }}
-  .kpi .hint {{ color: var(--muted); font-size: .75rem; margin-top: .15rem; }}
+  @media (max-width: 1280px) {{ .kpi {{ grid-template-columns: repeat(4, minmax(0, 1fr)); }} }}
+  @media (max-width: 720px) {{ .kpi {{ grid-template-columns: repeat(2, minmax(0, 1fr)); }} }}
+  .kpi .stat {{
+    background: var(--panel); border: 1px solid var(--line); border-radius: 12px;
+    padding: .85rem .95rem; min-height: 6.25rem;
+    display: flex; flex-direction: column; min-width: 0;
+  }}
+  .kpi .lbl {{ color: var(--muted); font-size: .7rem; font-weight: 700; text-transform: uppercase; letter-spacing: .05em; line-height: 1.2; }}
+  .kpi .val {{
+    font-size: 1.2rem; font-weight: 780; margin-top: .2rem; letter-spacing: -.02em;
+    line-height: 1.25; min-height: 1.5rem;
+  }}
+  .kpi .hint {{
+    color: var(--muted); font-size: .75rem; margin-top: .15rem;
+    line-height: 1.3; min-height: 2.6em; /* reserve 2 lines — stops shrink after paint */
+  }}
   .blocks-row {{
     display: grid; grid-template-columns: minmax(0, 1.7fr) minmax(300px, .95fr);
     gap: .75rem; align-items: start; margin: 0 0 1rem;
   }}
-  @media (max-width: 1100px) {{ .blocks-row {{ grid-template-columns: 1fr; }} }}
+  @media (max-width: 1100px) {{
+    .blocks-row {{ grid-template-columns: 1fr; }}
+    /* Keep visual order: Latest blocks above Live Blocks on narrow screens. */
+    .blocks-row > .card.latest-blocks {{ grid-column: 1; grid-row: 1; }}
+    .blocks-row > .blocks-side {{ grid-column: 1; grid-row: 2; }}
+  }}
   .blocks-side {{
     display: flex; flex-direction: column; gap: .65rem; min-width: 0;
+    /* Paint Live Blocks before the heavy Latest-blocks table (DOM order), keep right column visually. */
+    grid-column: 2;
+    grid-row: 1;
   }}
-  /* Height set by JS to exactly two full MHC Mined cards (peers sits below). */
+  .blocks-row > .card.latest-blocks {{
+    grid-column: 1;
+    grid-row: 1;
+    margin: 0; min-width: 0;
+  }}
+  /* Fixed Live Blocks box: exactly two full cards visible (compact rows). */
   .blocks-row .term {{
-    margin: 0; overflow: auto;
-    display: flex; flex-direction: column;
+    margin: 0;
+    overflow: hidden;
+    display: flex;
+    flex-direction: column;
+    height: 30rem;
+    min-height: 30rem;
+    max-height: 30rem;
+    contain: layout size;
+    padding: .75rem .85rem;
+    font-size: .8rem;
+    line-height: 1.32;
   }}
-  .blocks-row .term .term-feed {{ flex: 1 1 auto; overflow: visible; }}
+  .blocks-row .term .term-head {{
+    flex-wrap: nowrap;
+    gap: .5rem;
+    margin-bottom: .4rem;
+    align-items: center;
+  }}
+  .blocks-row .term .term-head h1 {{ font-size: 1rem; }}
+  .blocks-row .term .term-head .muted {{
+    font-size: .68rem;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    min-width: 0;
+  }}
+  .blocks-row .term .term-feed {{
+    flex: 1 1 auto;
+    min-height: 0;
+    overflow-x: hidden;
+    overflow-y: scroll;
+    scrollbar-gutter: stable;
+    gap: 0;
+  }}
+  .blocks-row .term .found {{
+    padding-top: .4rem;
+    border-top: 1px solid #e5e7eb;
+  }}
+  .blocks-row .term .found:first-child {{
+    padding-top: 0;
+    border-top: 0;
+  }}
+  .blocks-row .term .found > div {{
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    line-height: 1.32;
+  }}
+  .blocks-row .term .found .title {{ line-height: 1.3; margin-bottom: .05rem; }}
+  .blocks-row .term .found .hash,
+  .blocks-row .term .found .hash a {{
+    font-size: .68rem;
+    letter-spacing: -0.03em;
+  }}
+  .blocks-row .term .found .rule {{
+    margin-top: .15rem;
+    letter-spacing: -0.04em;
+  }}
   .blocks-row > .card {{ margin: 0; min-width: 0; }}
   .blocks-row > .card .table-wrap {{ overflow-x: auto; }}
   .blocks-row > .card table {{ font-size: .74rem; }}
@@ -256,8 +352,25 @@ def _page(title: str, body: str, *, tip: int | None = None, hero: bool = False) 
   .card-head h1 {{ margin: 0; font-size: 1.05rem; }}
   .card-head .more {{ font-size: .85rem; font-weight: 650; }}
   h1 {{ font-size: 1.15rem; margin: 0 0 .85rem; font-weight: 750; letter-spacing: -.02em; }}
-  .table-wrap {{ width: 100%; overflow-x: auto; }}
+  .table-wrap {{ width: 100%; overflow-x: auto; -webkit-overflow-scrolling: touch; }}
   table {{ width: 100%; border-collapse: collapse; font-size: .78rem; }}
+  /* Full hashes / wallets on one line; scroll sideways instead of wrapping under. */
+  table.data-table {{
+    width: max-content; min-width: 100%; table-layout: auto;
+  }}
+  table.data-table th, table.data-table td {{
+    white-space: nowrap; vertical-align: middle;
+  }}
+  table.data-table .mono {{
+    white-space: nowrap; word-break: normal; overflow-wrap: normal;
+  }}
+  table.data-table .copy-wrap {{
+    display: inline-flex; align-items: center; gap: .3rem;
+    max-width: none; flex-wrap: nowrap;
+  }}
+  table.data-table .row-ico {{
+    display: inline-flex; align-items: center; gap: .4rem; flex-wrap: nowrap;
+  }}
   th, td {{ text-align: left; padding: .55rem .45rem; border-bottom: 1px solid var(--line); vertical-align: middle; }}
   th {{ color: var(--muted); font-weight: 700; font-size: .7rem; text-transform: uppercase; letter-spacing: .04em; white-space: nowrap; }}
   tbody tr:hover {{ background: var(--soft); }}
@@ -310,13 +423,23 @@ def _page(title: str, body: str, *, tip: int | None = None, hero: bool = False) 
   .found:first-child {{ border-top: 0; padding-top: 0; }}
   .found .title {{ color: #16a34a; font-weight: 800; }}
   .found .k {{ color: #9ca3af; }}
-  .found .hash, .found .hash a {{ color: #ca8a04; word-break: break-all; text-decoration: none; }}
+  .found .hash, .found .hash a {{
+    color: #ca8a04; text-decoration: none;
+    font-size: .76rem; letter-spacing: -0.02em;
+    white-space: nowrap; word-break: normal;
+  }}
   .found .hash a:hover {{ color: #a16207; text-decoration: underline; }}
   .found .reward {{ color: #16a34a; font-weight: 700; }}
   table .reward, .kv .reward, .stat .reward {{ color: #16a34a; font-weight: 700; }}
-  .found .h, .found .h a {{ color: #111418; font-weight: 700; text-decoration: none; }}
+  /* Terminal-style accents (light panel, same roles as Desktop mine log). */
+  .found .h, .found .h a {{ color: #0891b2; font-weight: 700; text-decoration: none; }}
   .found .h a:hover {{ text-decoration: underline; }}
-  .found .val, .found .session {{ color: #111418; }}
+  .found .val {{ color: #374151; }}
+  .found .v-time {{ color: #0891b2; }}
+  .found .v-size {{ color: #6b7280; }}
+  .found .v-diff {{ color: #a21caf; }}
+  .found .v-hps {{ color: #0d9488; font-weight: 700; }}
+  .found .v-utc {{ color: #6b7280; }}
   .found .cyan, .found .cyan a {{ color: #0891b2; text-decoration: none; }}
   .found .cyan a:hover {{ text-decoration: underline; }}
   .found a {{ color: inherit; }}
@@ -333,15 +456,9 @@ def _page(title: str, body: str, *, tip: int | None = None, hero: bool = False) 
     padding-left: .25rem; padding-right: .25rem;
   }}
   th.hash-col, td.hash-col {{
-    width: 38%; min-width: 16rem; max-width: 42rem;
+    width: auto; min-width: 0; max-width: none;
   }}
-  td.hash-col .copy-wrap {{
-    display: flex; align-items: flex-start; gap: .35rem; max-width: 100%;
-  }}
-  td.hash-col .mono {{
-    word-break: break-all; overflow-wrap: anywhere; line-height: 1.35;
-  }}
-  td.hash-col .copy-btn {{ flex-shrink: 0; margin-top: .1rem; }}
+  td.hash-col .copy-btn {{ flex-shrink: 0; }}
   .muted {{ color: var(--muted); }}
   .err {{ color: #b42318; }}
   .ok {{ color: #0f766e; font-weight: 650; }}
@@ -380,7 +497,6 @@ def _page(title: str, body: str, *, tip: int | None = None, hero: bool = False) 
   .copy-btn:hover {{ color: var(--text); background: #fff; }}
   .copy-btn.ok {{ color: #16a34a; border-color: #86efac; }}
   .spark {{ display: block; width: 100%; max-width: 260px; height: 48px; }}
-  .kpi {{ grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)); }}
   .meta-row {{ display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: .75rem; margin: 0 0 1rem; }}
   .mini-stat .val {{ font-size: 1.05rem; }}
   table .mono {{ font-size: .72rem; }}
@@ -413,28 +529,94 @@ def _page(title: str, body: str, *, tip: int | None = None, hero: bool = False) 
 <main>
 {body}
 </main>
-<footer class="site">MHCOIN · HASH256 PoW · target 600s · LAN explorer</footer>
+<footer class="site">MHCOIN · HASH256 PoW · target 10m · read-only explorer</footer>
 
 <script>
 (function(){{
-  document.addEventListener('click', function(e){{
-    var b = e.target.closest && e.target.closest('.copy-btn');
+  function flash(btn, mark) {{
+    btn.classList.add('ok');
+    btn.textContent = mark;
+    setTimeout(function() {{ btn.classList.remove('ok'); btn.textContent = '⎘'; }}, 1100);
+  }}
+  function execCopy(text) {{
+    // Must stay synchronous inside the click handler (user gesture).
+    // navigator.clipboard is unavailable on plain http://192.168.x.x.
+    var ta = document.createElement('textarea');
+    ta.value = text;
+    ta.setAttribute('readonly', '');
+    ta.setAttribute('aria-hidden', 'true');
+    // Keep in-viewport: some browsers reject off-screen execCommand('copy').
+    ta.style.cssText = 'position:fixed;top:0;left:0;width:1px;height:1px;padding:0;margin:0;border:0;outline:none;box-shadow:none;background:transparent;opacity:0;z-index:-1;';
+    document.body.appendChild(ta);
+    ta.focus({{ preventScroll: true }});
+    ta.select();
+    ta.setSelectionRange(0, text.length);
+    var ok = false;
+    try {{ ok = document.execCommand('copy'); }} catch (err) {{ ok = false; }}
+    document.body.removeChild(ta);
+    if (ok) return true;
+    // Selection API fallback
+    var span = document.createElement('span');
+    span.textContent = text;
+    span.style.cssText = 'position:fixed;top:0;left:0;opacity:0;pointer-events:none;white-space:pre;';
+    document.body.appendChild(span);
+    var range = document.createRange();
+    range.selectNodeContents(span);
+    var sel = window.getSelection();
+    if (sel) {{
+      sel.removeAllRanges();
+      sel.addRange(range);
+      try {{ ok = document.execCommand('copy'); }} catch (err2) {{ ok = false; }}
+      sel.removeAllRanges();
+    }}
+    document.body.removeChild(span);
+    return !!ok;
+  }}
+  function showManualCopy(text, btn) {{
+    var old = document.getElementById('mh-copy-fallback');
+    if (old) old.remove();
+    var box = document.createElement('div');
+    box.id = 'mh-copy-fallback';
+    box.style.cssText = 'position:fixed;z-index:99999;left:50%;top:20%;transform:translateX(-50%);background:#fff;border:1px solid #cbd5e1;border-radius:10px;padding:12px 14px;box-shadow:0 10px 30px rgba(0,0,0,.18);max-width:min(92vw,520px);font:13px/1.4 ui-sans-serif,system-ui,sans-serif;';
+    box.innerHTML = '<div style="margin:0 0 8px;color:#64748b">Press Ctrl+C / ⌘C to copy</div>';
+    var inp = document.createElement('input');
+    inp.type = 'text';
+    inp.value = text;
+    inp.readOnly = true;
+    inp.style.cssText = 'width:100%;box-sizing:border-box;font:12px/1.4 ui-monospace,Menlo,Consolas,monospace;padding:8px;border:1px solid #94a3b8;border-radius:6px;';
+    box.appendChild(inp);
+    document.body.appendChild(box);
+    inp.focus();
+    inp.select();
+    function close() {{ if (box.parentNode) box.parentNode.removeChild(box); }}
+    box.addEventListener('keydown', function(ev) {{ if (ev.key === 'Escape') close(); }});
+    setTimeout(close, 8000);
+    document.addEventListener('click', function once(ev) {{
+      if (!box.contains(ev.target) && ev.target !== btn) {{
+        close();
+        document.removeEventListener('click', once, true);
+      }}
+    }}, true);
+  }}
+  function markDone(btn) {{ flash(btn, '✓'); }}
+  document.addEventListener('click', function(e) {{
+    var b = e.target && e.target.closest && e.target.closest('.copy-btn');
     if (!b) return;
+    e.preventDefault();
+    e.stopPropagation();
     var t = b.getAttribute('data-copy') || '';
     if (!t) return;
-    function done(){{
-      b.classList.add('ok');
-      b.textContent = '✓';
-      setTimeout(function(){{ b.classList.remove('ok'); b.textContent = '⎘'; }}, 900);
-    }}
-    if (navigator.clipboard && navigator.clipboard.writeText) {{
-      navigator.clipboard.writeText(t).then(done).catch(function(){{
-        var a=document.createElement('textarea'); a.value=t; document.body.appendChild(a); a.select();
-        try {{ document.execCommand('copy'); }} catch(e) {{}}
-        document.body.removeChild(a); done();
+    // Prefer Clipboard API only in secure contexts (https / localhost).
+    if (window.isSecureContext && navigator.clipboard && navigator.clipboard.writeText) {{
+      navigator.clipboard.writeText(t).then(function() {{ markDone(b); }}).catch(function() {{
+        if (execCopy(t)) markDone(b);
+        else {{ flash(b, '!'); showManualCopy(t, b); }}
       }});
+      return;
     }}
-  }});
+    if (execCopy(t)) markDone(b);
+    else {{ flash(b, '!'); showManualCopy(t, b); }}
+  }}, true);
 }})();
 </script>
 </body>
@@ -444,15 +626,39 @@ def _page(title: str, body: str, *, tip: int | None = None, hero: bool = False) 
 
 
 
+def _peer_public_id(addr: str) -> str:
+    """Stable anonymous peer label — never expose raw IP:port publicly."""
+    digest = hashlib.sha256(addr.encode("utf-8", errors="ignore")).hexdigest()[:8]
+    return f"peer-{digest}"
+
+
 class ExplorerApp:
     def __init__(self, data_dir: Path, *, hrp: str = "mhc"):
         self.data_dir = Path(data_dir)
         self.hrp = hrp
+        self._home_cache: dict[str, Any] | None = None
+        self._home_cache_at: float = 0.0
+        self._home_lock = threading.Lock()
+        self._rate: dict[str, deque[float]] = defaultdict(deque)
+        self._rate_lock = threading.Lock()
 
     def chain(self) -> ReadOnlyChain:
         c = ReadOnlyChain(self.data_dir)
         c.refresh_tip()
         return c
+
+    def allow_request(self, client: str, *, bucket: str, limit: int) -> bool:
+        """Token window per client+bucket. Normal page views are not rate-limited."""
+        now = time.time()
+        key = f"{client or 'unknown'}:{bucket}"
+        with self._rate_lock:
+            q = self._rate[key]
+            while q and now - q[0] > _RATE_LIMIT_WINDOW_SEC:
+                q.popleft()
+            if len(q) >= limit:
+                return False
+            q.append(now)
+            return True
 
     def node_status(self) -> dict[str, Any]:
         path = self.data_dir / "node_status.json"
@@ -467,33 +673,28 @@ class ExplorerApp:
         if not path.is_file():
             return out
         try:
-            import json
-            import time as _time
-
             raw = json.loads(path.read_text(encoding="utf-8"))
             out["peer_count"] = int(raw.get("peer_count") or 0)
             out["height"] = raw.get("height")
-            out["listen"] = raw.get("listen")
+            # Public explorer: never expose listen bind / raw endpoints.
+            out["listen"] = None
             sync = raw.get("sync") or {}
             out["sync_state"] = sync.get("state")
             out["updated"] = int(path.stat().st_mtime)
-            out["updated_age"] = D.format_age(int(path.stat().st_mtime), now=int(_time.time()))
+            out["updated_age"] = D.format_age(int(path.stat().st_mtime), now=int(time.time()))
             peers_out: list[dict[str, Any]] = []
             for p in raw.get("peers") or []:
                 addr = str(p.get("addr") or "")
-                host, _, port = addr.rpartition(":")
-                if not host:
-                    host, port = addr, ""
-                # Strip IPv6 brackets if present
-                if host.startswith("[") and host.endswith("]"):
-                    host = host[1:-1]
+                peer_id = _peer_public_id(addr or str(p.get("agent") or id(p)))
                 mining = bool(p.get("mining"))
                 hps = int(p.get("hps") or 0) if mining else 0
                 peers_out.append(
                     {
-                        "addr": addr,
-                        "ip": host,
-                        "port": port,
+                        # Anonymized public fields only (same table shape).
+                        "id": peer_id,
+                        "ip": peer_id,
+                        "port": "",
+                        "addr": peer_id,
                         "inbound": bool(p.get("inbound")),
                         "direction": "in" if p.get("inbound") else "out",
                         "state": p.get("state") or "—",
@@ -507,14 +708,12 @@ class ExplorerApp:
                         "status_age": p.get("status_age"),
                     }
                 )
-            # Live total = sum of rows shown (same source as peers table)
             reported_hps = sum(int(p.get("hps") or 0) for p in peers_out if p.get("mining"))
             reported_n = sum(1 for p in peers_out if p.get("mining"))
             out["reported_hashrate_hps"] = int(reported_hps)
             out["reported_hashrate"] = D.format_hps(float(reported_hps)) if reported_hps > 0 else None
             out["reported_miners"] = int(reported_n)
-            # Stable order: inbound first, then IP
-            peers_out.sort(key=lambda x: (0 if x["inbound"] else 1, x.get("ip") or ""))
+            peers_out.sort(key=lambda x: (0 if x["inbound"] else 1, x.get("id") or ""))
             out["peers"] = peers_out
             miner = raw.get("miner") or {}
             if miner.get("hashrate_hps"):
@@ -524,15 +723,87 @@ class ExplorerApp:
             pass
         return out
 
-    def home(self) -> dict[str, Any]:
+    def home(self, *, force: bool = False) -> dict[str, Any]:
+        now = time.time()
+        with self._home_lock:
+            if (
+                not force
+                and self._home_cache is not None
+                and (now - self._home_cache_at) < _HOME_CACHE_TTL_SEC
+            ):
+                return self._home_cache
         c = self.chain()
         try:
             data = D.chain_stats(c, hrp=self.hrp)
             data["node"] = self.node_status()
             data["mempool"] = D.load_mempool(self.data_dir, hrp=self.hrp)
-            return data
         finally:
             c.close()
+        with self._home_lock:
+            self._home_cache = data
+            self._home_cache_at = time.time()
+        return data
+
+    def tip_status(self) -> dict[str, Any]:
+        """Lightweight poll payload for the home live tick."""
+        home = self.home()
+        node = home.get("node") or {}
+        return {
+            "tip_height": home.get("tip_height"),
+            "tip_hash": home.get("tip_hash"),
+            "tip_age": home.get("tip_age"),
+            "tip_age_seconds": home.get("tip_age_seconds"),
+            "tip_difficulty_display": home.get("tip_difficulty_display"),
+            "network_hashrate": home.get("network_hashrate"),
+            "network_hashrate_label": home.get("network_hashrate_label"),
+            "next_block_eta": home.get("next_block_eta"),
+            "next_block_eta_seconds": home.get("next_block_eta_seconds"),
+            "next_block_overdue": home.get("next_block_overdue"),
+            "next_block_hint": home.get("next_block_hint"),
+            "minted_mhc": home.get("minted_mhc"),
+            "total_blocks": home.get("total_blocks"),
+            "total_transactions": home.get("total_transactions"),
+            "transfer_transactions": home.get("transfer_transactions"),
+            "avg_block_interval_seconds": home.get("avg_block_interval_seconds"),
+            "node": {
+                "peer_count": node.get("peer_count"),
+                "sync_state": node.get("sync_state"),
+                "reported_hashrate": node.get("reported_hashrate"),
+                "reported_hashrate_hps": node.get("reported_hashrate_hps"),
+                "reported_miners": node.get("reported_miners"),
+                "peers": node.get("peers") or [],
+                "updated_age": node.get("updated_age"),
+            },
+            "mempool_count": (home.get("mempool") or {}).get("count"),
+            "live_finds": home.get("live_finds"),
+            "cached": True,
+        }
+
+    def health(self) -> dict[str, Any]:
+        chain_path = self.data_dir / "chain.sqlite"
+        tip = None
+        err = None
+        try:
+            c = self.chain()
+            try:
+                tip = c.height
+            finally:
+                c.close()
+        except Exception as exc:
+            err = str(exc)
+        node = self.node_status()
+        ok = tip is not None and chain_path.is_file() and err is None
+        return {
+            "ok": ok,
+            "service": "mhcoin-explorer",
+            "tip_height": tip,
+            "datadir": str(self.data_dir),
+            "chain_sqlite": chain_path.is_file(),
+            "node_updated_age": node.get("updated_age"),
+            "peer_count": node.get("peer_count"),
+            "error": err,
+            "time": int(time.time()),
+        }
 
     def blocks(self, page: int = 1) -> dict[str, Any]:
         c = self.chain()
@@ -575,7 +846,9 @@ class ExplorerApp:
             return None
         c = self.chain()
         try:
-            return D.find_tx(c, txid.lower(), hrp=self.hrp)
+            return D.find_tx(
+                c, txid.lower(), hrp=self.hrp, data_dir=self.data_dir
+            )
         finally:
             c.close()
 
@@ -687,6 +960,18 @@ def _inferred_tip(height: Any, conf: Any) -> int | None:
         return None
 
 
+def _fmt_size(n: Any) -> str:
+    try:
+        b = int(n)
+    except (TypeError, ValueError):
+        return "—"
+    if b < 1024:
+        return f"{b} B"
+    if b < 1024 * 1024:
+        return f"{b / 1024:.1f} KB"
+    return f"{b / (1024 * 1024):.2f} MB"
+
+
 def _blocks_table(blocks: list[dict[str, Any]]) -> str:
     rows = []
     for b in blocks:
@@ -712,7 +997,7 @@ def _blocks_table(blocks: list[dict[str, Any]]) -> str:
             "</tr>"
         )
     return f"""
-    <div class="table-wrap"><table>
+    <div class="table-wrap"><table class="data-table">
       <tr>
         <th class="num">Height</th><th class="hash-col">Hash</th><th class="num">Txs</th><th class="num">Reward</th><th>Type</th>
         <th class="num">Time</th><th class="num">Age</th><th>Miner</th><th class="num-conf" title="Confirmations">Conf</th>
@@ -743,8 +1028,8 @@ def _txs_table(txs: list[dict[str, Any]], *, empty: str = "No transactions yet."
         fee = t.get("fee_mhc")
         rows.append(
             "<tr>"
-            f'<td><span class="row-ico">{mark}'
-            f'{_copyable(t.get("txid"), href="/tx/" + str(t.get("txid")))}</span></td>'
+            f'<td class="hash-col"><span class="row-ico">{mark}'
+            f'{_copyable(t.get("txid"), short=False, href="/tx/" + str(t.get("txid")))}</span></td>'
             f"<td>{pill}</td>"
             f'<td><a href="/block/{t.get("height")}">#{t.get("height")}</a></td>'
             f"<td>{fr_html}</td>"
@@ -756,9 +1041,9 @@ def _txs_table(txs: list[dict[str, Any]], *, empty: str = "No transactions yet."
             "</tr>"
         )
     return f"""
-    <div class="table-wrap"><table>
+    <div class="table-wrap"><table class="data-table">
       <tr>
-        <th>Txid</th><th>Type</th><th>Block</th><th>From wallet</th><th>To wallet</th>
+        <th class="hash-col">Txid</th><th>Type</th><th>Block</th><th>From</th><th>To</th>
         <th>Amount</th><th>Fee</th><th>Age</th><th class="num-conf">Confirmations</th>
       </tr>
       {"".join(rows)}
@@ -767,47 +1052,54 @@ def _txs_table(txs: list[dict[str, Any]], *, empty: str = "No transactions yet."
 
 
 def _found_terminal(blocks: list[dict[str, Any]]) -> str:
+    """Latest real tip blocks — no fake miner-session totals."""
     if not blocks:
         return '<p class="muted">Waiting for the next block…</p>'
     cards = []
-    rewards: list[float] = []
     for b in blocks:
-        try:
-            rewards.append(float(b.get("reward_mhc") or 0))
-        except (TypeError, ValueError):
-            rewards.append(0.0)
-    n = len(blocks)
-    for i, b in enumerate(blocks):
         h = b.get("height")
         dt = b.get("interval_seconds")
+        # On-chain interval since previous tip (not miner PoW stopwatch).
         time_s = f"{dt:.2f}s" if isinstance(dt, (int, float)) else "—"
-        session_n = n - i
-        session_rew = sum(rewards[i:])
-        session_txt = f"{session_n} blocks · {session_rew:.8f} MHC"
         bh = b.get("hash") or ""
+        bits = b.get("bits") or ""
+        diff = b.get("difficulty_display") or "—"
+        if bits:
+            diff = f"{diff} ({bits})"
         cards.append(
             "<div class='found' data-height='"
             + _esc(h)
             + "'>"
-            "<div class='title'>▸ MHC Mined</div>"
-            "<div>  <span class='k'>height</span>   <span class='h'><a href='/block/"
+            "<div class='title'><span class='row-ico'>"
+            + _mint_mark(title="MHC Mined")
+            + "▸ MHC Mined</span></div>"
+            "<div>  <span class='k'>height</span>     <span class='h'><a href='/block/"
             + _esc(h)
             + "'>#"
             + _esc(h)
             + "</a></span></div>"
-            "<div>  <span class='k'>hash</span>     <span class='hash'><a href='/block/"
+            "<div>  <span class='k'>hash</span>       <span class='hash'><a href='/block/"
             + _esc(bh)
             + "'>"
             + _esc(bh)
             + "</a></span></div>"
-            "<div>  <span class='k'>reward</span>   <span class='reward'>"
+            "<div>  <span class='k'>reward</span>     <span class='reward'>"
             + _esc(b.get("reward_mhc") or "—")
             + " MHC</span></div>"
-            "<div>  <span class='k'>time</span>     <span class='val'>"
+            "<div>  <span class='k'>time</span>       <span class='val v-time'>"
             + _esc(time_s)
             + "</span></div>"
-            "<div>  <span class='k'>session</span>  <span class='session'>"
-            + _esc(session_txt)
+            "<div>  <span class='k'>size</span>       <span class='val v-size'>"
+            + _esc(_fmt_size(b.get("size_bytes")))
+            + "</span></div>"
+            "<div>  <span class='k'>difficulty</span> <span class='val v-diff'>"
+            + _esc(diff)
+            + "</span></div>"
+            "<div>  <span class='k'>h/s</span>        <span class='val v-hps'>"
+            + _esc(b.get("implied_hashrate") or "—")
+            + "</span></div>"
+            "<div>  <span class='k'>utc</span>        <span class='val v-utc'>"
+            + _esc(b.get("time_utc") or "—")
             + "</span></div>"
             "<div class='rule'>──────────────────────────────────────────────────────────────</div>"
             "</div>"
@@ -825,9 +1117,7 @@ def _peers_panel(
     rows: list[str] = []
     sum_hps = 0
     for p in peers or []:
-        ip = p.get("ip") or "—"
-        port = p.get("port") or ""
-        ip_full = f"{ip}:{port}" if port else str(ip)
+        peer_lbl = p.get("id") or p.get("ip") or "—"
         direction = "in" if p.get("inbound") else "out"
         dir_lbl = "in" if direction == "in" else "out"
         height = p.get("height")
@@ -840,7 +1130,7 @@ def _peers_panel(
             sum_hps += int(p.get("hps") or 0)
         rows.append(
             "<tr>"
-            f'<td class="ip" title="{_esc(p.get("addr") or ip_full)}">{_esc(ip_full)}</td>'
+            f'<td class="ip" title="{_esc(peer_lbl)}">{_esc(peer_lbl)}</td>'
             f'<td><span class="dir {direction}">{dir_lbl}</span></td>'
             f"<td>{_esc(height_s)}</td>"
             f"<td>{_esc(hr)}</td>"
@@ -857,7 +1147,7 @@ def _peers_panel(
         f"""
     <div class="table-wrap peers-panel"><table>
       <thead><tr>
-        <th>IP</th><th>Dir</th><th>Height</th><th>H/s</th><th>Mining</th><th>Version</th><th>State</th>
+        <th>Peer</th><th>Dir</th><th>Height</th><th>H/s</th><th>Mining</th><th>Version</th><th>State</th>
       </tr></thead>
       <tbody>{"".join(rows)}</tbody>
     </table></div>
@@ -990,6 +1280,7 @@ def _render_home(data: dict[str, Any]) -> bytes:
         <div class="stat">
           <div class="lbl">Total blocks</div>
           <div class="val" id="kpiTotal"><a href="/blocks">{data.get("total_blocks")}</a></div>
+          <div class="hint" id="kpiTotalHint">&nbsp;</div>
         </div>
         <div class="stat">
           <div class="lbl">Transactions</div>
@@ -1004,7 +1295,17 @@ def _render_home(data: dict[str, Any]) -> bytes:
       </div>
 
       <div class="blocks-row">
-        <section class="card">
+        <div class="blocks-side">
+          <section class="term">
+            <div class="term-head">
+              <h1>Live Blocks</h1>
+              <span class="muted" style="font-size:.78rem">latest on chain · time = since previous block</span>
+            </div>
+            {_found_terminal(data.get("live_finds") or [])}
+          </section>
+          {peers_panel}
+        </div>
+        <section class="card latest-blocks">
           <div class="card-head">
             <h1>Latest blocks</h1>
             <a class="more" href="/blocks">View all →</a>
@@ -1012,18 +1313,9 @@ def _render_home(data: dict[str, Any]) -> bytes:
           <div id="latestBlocks"
                data-page="1"
                data-per-page="100"
-               data-total-blocks="{_esc(data.get("total_blocks") or 0)}">{_blocks_table(data.get("recent") or [])}</div>
+               data-total-blocks="{_esc(data.get("total_blocks") or 0)}">{_blocks_table((data.get("recent") or [])[:25])}</div>
           <div class="pager" id="latestBlocksPager"></div>
         </section>
-        <div class="blocks-side">
-          <section class="term">
-            <div class="term-head">
-              <h1>Live Blocks</h1>
-            </div>
-            {_found_terminal(data.get("live_finds") or [])}
-          </section>
-          {peers_panel}
-        </div>
       </div>
 
       <section class="card">
@@ -1035,7 +1327,7 @@ def _render_home(data: dict[str, Any]) -> bytes:
         <div id="latestTxs"
              data-page="1"
              data-per-page="100"
-             data-total-txs="{_esc(data.get("total_transactions") or 0)}">{_txs_table(data.get("recent_txs") or [])}</div>
+             data-total-txs="{_esc(data.get("total_transactions") or 0)}">{_txs_table((data.get("recent_txs") or [])[:25])}</div>
         <div class="pager" id="latestTxsPager"></div>
       </section>
 
@@ -1142,62 +1434,44 @@ def _render_home(data: dict[str, Any]) -> bytes:
         if (s < 86400) return Math.floor(s/3600) + 'h' + nb + Math.floor((s%3600)/60) + 'm';
         return Math.floor(s/86400) + 'd';
       }}
+      function fmtSize(n) {{
+        n = Number(n);
+        if (!isFinite(n) || n < 0) return '—';
+        if (n < 1024) return Math.round(n) + ' B';
+        if (n < 1024 * 1024) return (n / 1024).toFixed(1) + ' KB';
+        return (n / (1024 * 1024)).toFixed(2) + ' MB';
+      }}
       function fitLiveBlocksTwoCards() {{
-        var term = document.querySelector('.blocks-row .term');
-        var feed = document.getElementById('liveFinds');
-        if (!term || !feed) return;
-        var head = term.querySelector('.term-head');
-        var cards = feed.querySelectorAll('.found');
-        if (!cards.length) {{
-          term.style.height = '';
-          term.style.minHeight = '';
-          term.style.maxHeight = '';
-          return;
-        }}
-        var st = window.getComputedStyle(term);
-        var h = parseFloat(st.paddingTop) + parseFloat(st.paddingBottom);
-        if (head) h += head.offsetHeight;
-        var headSt = head ? window.getComputedStyle(head) : null;
-        if (headSt) h += parseFloat(headSt.marginBottom) || 0;
-        var n = Math.min(2, cards.length);
-        for (var i = 0; i < n; i++) h += cards[i].offsetHeight;
-        h = Math.ceil(h);
-        term.style.height = h + 'px';
-        term.style.minHeight = h + 'px';
-        term.style.maxHeight = h + 'px';
+        // Height is CSS-driven (max-height on .term-feed) to avoid layout jump on refresh.
+        return;
       }}
       function renderFinds(blocks) {{
         var feed = document.getElementById('liveFinds');
         if (!feed || !blocks || !blocks.length) return;
-        var rewards = blocks.map(function (b) {{
-          var n = Number(b.reward_mhc);
-          return isFinite(n) ? n : 0;
-        }});
-        var n = blocks.length;
+        // Skip DOM rewrite when tip list unchanged — prevents Live Blocks jump.
+        var nextKey = blocks.map(function (b) {{ return String(b.height) + ':' + String(b.hash || ''); }}).join('|');
+        if (feed.dataset.key === nextKey) return;
+        feed.dataset.key = nextKey;
         feed.innerHTML = blocks.map(function (b, i) {{
           var dt = b.interval_seconds;
           var timeS = (typeof dt === 'number') ? (dt.toFixed(2) + 's') : '—';
-          var sessionN = n - i;
-          var sessionRew = 0;
-          for (var j = i; j < n; j++) sessionRew += rewards[j];
-          var sessionTxt = sessionN + ' blocks · ' + sessionRew.toFixed(8) + ' MHC';
+          var diff = b.difficulty_display || '—';
+          if (b.bits) diff = diff + ' (' + b.bits + ')';
           return (
             '<div class="found" data-height="' + esc(b.height) + '">' +
-            '<div class="title">▸ MHC Mined</div>' +
-            '<div>  <span class="k">height</span>   <span class="h"><a href="/block/' + esc(b.height) + '">#' + esc(b.height) + '</a></span></div>' +
-            '<div>  <span class="k">hash</span>     <span class="hash"><a href="/block/' + esc(b.hash) + '">' + esc(b.hash) + '</a></span></div>' +
-            '<div>  <span class="k">reward</span>   <span class="reward">' + esc(b.reward_mhc || '—') + ' MHC</span></div>' +
-            '<div>  <span class="k">time</span>     <span class="val">' + esc(timeS) + '</span></div>' +
-            '<div>  <span class="k">session</span>  <span class="session">' + esc(sessionTxt) + '</span></div>' +
+            '<div class="title"><span class="row-ico">' + mintMark('MHC Mined') + '▸ MHC Mined</span></div>' +
+            '<div>  <span class="k">height</span>     <span class="h"><a href="/block/' + esc(b.height) + '">#' + esc(b.height) + '</a></span></div>' +
+            '<div>  <span class="k">hash</span>       <span class="hash"><a href="/block/' + esc(b.hash) + '">' + esc(b.hash) + '</a></span></div>' +
+            '<div>  <span class="k">reward</span>     <span class="reward">' + esc(b.reward_mhc || '—') + ' MHC</span></div>' +
+            '<div>  <span class="k">time</span>       <span class="val v-time">' + esc(timeS) + '</span></div>' +
+            '<div>  <span class="k">size</span>       <span class="val v-size">' + esc(fmtSize(b.size_bytes)) + '</span></div>' +
+            '<div>  <span class="k">difficulty</span> <span class="val v-diff">' + esc(diff) + '</span></div>' +
+            '<div>  <span class="k">h/s</span>        <span class="val v-hps">' + esc(b.implied_hashrate || '—') + '</span></div>' +
+            '<div>  <span class="k">utc</span>        <span class="val v-utc">' + esc(b.time_utc || '—') + '</span></div>' +
             '<div class="rule">──────────────────────────────────────────────────────────────</div>' +
             '</div>'
           );
         }}).join('');
-        // After layout: viewport = exactly two full cards; rest scroll inside.
-        requestAnimationFrame(function () {{
-          fitLiveBlocksTwoCards();
-          requestAnimationFrame(fitLiveBlocksTwoCards);
-        }});
       }}
       function fmtHps(hps) {{
         hps = Number(hps) || 0;
@@ -1220,13 +1494,12 @@ def _render_home(data: dict[str, Any]) -> bytes:
         var rows = peers.map(function (p) {{
           var dir = p.inbound ? 'in' : 'out';
           var height = (p.height == null) ? '—' : ('#' + p.height);
-          var ipFull = p.ip || '—';
-          if (p.port) ipFull += ':' + p.port;
+          var peerLbl = p.id || p.ip || '—';
           var hr = p.hashrate || (p.mining ? '…' : '—');
           var mine = p.mining ? 'yes' : 'no';
           if (p.mining) {{ miners += 1; sum += Number(p.hps) || 0; }}
           return '<tr>' +
-            '<td class="ip" title="' + esc(p.addr || ipFull) + '">' + esc(ipFull) + '</td>' +
+            '<td class="ip" title="' + esc(peerLbl) + '">' + esc(peerLbl) + '</td>' +
             '<td><span class="dir ' + dir + '">' + dir + '</span></td>' +
             '<td>' + esc(height) + '</td>' +
             '<td>' + esc(hr) + '</td>' +
@@ -1238,7 +1511,7 @@ def _render_home(data: dict[str, Any]) -> bytes:
         var total = fmtHps(sum) || '—';
         box.innerHTML =
           '<div class="table-wrap peers-panel"><table>' +
-          '<thead><tr><th>IP</th><th>Dir</th><th>Height</th><th>H/s</th><th>Mining</th><th>Version</th><th>State</th></tr></thead>' +
+          '<thead><tr><th>Peer</th><th>Dir</th><th>Height</th><th>H/s</th><th>Mining</th><th>Version</th><th>State</th></tr></thead>' +
           '<tbody>' + rows + '</tbody></table></div>' +
           '<p class="peers-total" id="peersTotal">Total live: ' + esc(total) +
           ' · ' + miners + ' miners</p>';
@@ -1259,7 +1532,7 @@ def _render_home(data: dict[str, Any]) -> bytes:
             '<td>' + miner + '</td>' +
             '<td class="muted num-conf">' + esc(b.confirmations) + '</td></tr>';
         }}).join('');
-        el.innerHTML = '<div class="table-wrap"><table><tr><th class="num">Height</th><th class="hash-col">Hash</th><th class="num">Txs</th><th class="num">Reward</th><th>Type</th><th class="num">Time</th><th class="num">Age</th><th>Miner</th><th class="num-conf" title="Confirmations">Conf</th></tr>' + rows + '</table></div>';
+        el.innerHTML = '<div class="table-wrap"><table class="data-table"><tr><th class="num">Height</th><th class="hash-col">Hash</th><th class="num">Txs</th><th class="num">Reward</th><th>Type</th><th class="num">Time</th><th class="num">Age</th><th>Miner</th><th class="num-conf" title="Confirmations">Conf</th></tr>' + rows + '</table></div>';
       }}
       function blocksPagerHtml(page, totalPages) {{
         page = Number(page) || 1;
@@ -1313,7 +1586,7 @@ def _render_home(data: dict[str, Any]) -> bytes:
           var to = t.to ? copyable(t.to, '/address/' + encodeURIComponent(t.to)) : '<span class="muted">—</span>';
           var mark = mintMark(cb ? 'MHC Mined' : 'Transfer');
           return '<tr>' +
-            '<td><span class="row-ico">' + mark + copyable(t.txid, '/tx/' + encodeURIComponent(t.txid)) + '</span></td>' +
+            '<td class="hash-col"><span class="row-ico">' + mark + copyable(t.txid, '/tx/' + encodeURIComponent(t.txid), true) + '</span></td>' +
             '<td>' + pill + '</td>' +
             '<td><a href="/block/' + esc(t.height) + '">#' + esc(t.height) + '</a></td>' +
             '<td>' + fr + '</td><td>' + to + '</td>' +
@@ -1322,7 +1595,7 @@ def _render_home(data: dict[str, Any]) -> bytes:
             '<td class="muted nowrap">' + esc(t.age || '—') + '</td>' +
             '<td class="muted num-conf">' + esc(t.confirmations) + '</td></tr>';
         }}).join('');
-        el.innerHTML = '<div class="table-wrap"><table><tr><th>Txid</th><th>Type</th><th>Block</th><th>From</th><th>To</th><th>Amount</th><th>Fee</th><th>Age</th><th class="num-conf">Confirmations</th></tr>' + rows + '</table></div>';
+        el.innerHTML = '<div class="table-wrap"><table class="data-table"><tr><th class="hash-col">Txid</th><th>Type</th><th>Block</th><th>From</th><th>To</th><th>Amount</th><th>Fee</th><th>Age</th><th class="num-conf">Confirmations</th></tr>' + rows + '</table></div>';
       }}
       function txsPagerHtml(page, totalPages) {{
         page = Number(page) || 1;
@@ -1360,79 +1633,112 @@ def _render_home(data: dict[str, Any]) -> bytes:
           updateTxsPager(d.page || page, d.total_transactions, d.per_page || 100);
         }} catch (e) {{}}
       }}
-async function tick() {{
+      function setText(id, text) {{
+        var el = document.getElementById(id);
+        if (!el || text == null) return;
+        if (el.textContent !== String(text)) el.textContent = String(text);
+      }}
+      function applyKpis(d) {{
+        var tip = d.tip_height;
+        var node = d.node || {{}};
+        var tipChanged = tip != null && Number(tip) !== Number(lastTip);
+        var hrEl = document.getElementById('kpiHashrate');
+        var hrLbl = document.getElementById('kpiHashLbl');
+        var hh = document.getElementById('kpiHashHint');
+        if (node.reported_hashrate_hps > 0 && node.reported_hashrate) {{
+          if (hrLbl && hrLbl.textContent !== 'Hashrate (live)') hrLbl.textContent = 'Hashrate (live)';
+          if (hrEl && hrEl.textContent !== node.reported_hashrate) hrEl.textContent = node.reported_hashrate;
+          if (hh) {{
+            var parts = ['total ' + (node.reported_miners || 0) + ' miners'];
+            if (d.network_hashrate) parts.push('implied ' + d.network_hashrate);
+            if (d.network_hashrate_window) parts.push('obs ' + d.network_hashrate_window);
+            if (d.network_hashrate_short) parts.push('recent ' + d.network_hashrate_short);
+            var htxt = parts.join(' · ');
+            if (hh.textContent !== htxt) hh.textContent = htxt;
+          }}
+        }} else {{
+          if (hrLbl && hrLbl.textContent !== 'Hashrate (implied)') hrLbl.textContent = 'Hashrate (implied)';
+          if (hrEl && d.network_hashrate && hrEl.textContent !== d.network_hashrate) hrEl.textContent = d.network_hashrate;
+          if (hh) {{
+            var parts2 = ['live —', 'implied @10m'];
+            if (d.network_hashrate_window) parts2.push('obs ' + d.network_hashrate_window);
+            if (d.network_hashrate_short) parts2.push('recent ' + d.network_hashrate_short);
+            var htxt2 = parts2.join(' · ');
+            if (hh.textContent !== htxt2) hh.textContent = htxt2;
+          }}
+        }}
+        var ageEl = document.getElementById('kpiAge');
+        if (ageEl && d.tip_age) {{
+          var ageTxt = d.tip_age + ' ago';
+          if (ageEl.textContent !== ageTxt) ageEl.textContent = ageTxt;
+        }}
+        var hEl = document.getElementById('kpiHeight');
+        if (hEl && tip != null) {{
+          var href = '/block/' + tip;
+          var a = hEl.querySelector('a');
+          if (!a || a.getAttribute('href') !== href || a.textContent !== String(tip)) {{
+            hEl.innerHTML = '<a href="' + href + '">' + tip + '</a>';
+          }}
+        }}
+        var tot = document.getElementById('kpiTotal');
+        if (tot && d.total_blocks != null) {{
+          var th = '/blocks';
+          var ta = tot.querySelector('a');
+          if (!ta || ta.textContent !== String(d.total_blocks)) {{
+            tot.innerHTML = '<a href="' + th + '">' + d.total_blocks + '</a>';
+          }}
+        }}
+        setText('kpiTxs', d.total_transactions);
+        setText('kpiMint', d.minted_mhc);
+        setText('kpiDiff', d.tip_difficulty_display);
+        if (d.tip_bits) setText('kpiBits', 'bits ' + d.tip_bits);
+        var eta = document.getElementById('kpiEta');
+        if (eta) {{
+          var et = d.next_block_overdue ? 'overdue' : (d.next_block_eta || '—');
+          if (eta.textContent !== et) eta.textContent = et;
+        }}
+        var etaH = document.getElementById('kpiEtaHint');
+        if (etaH && d.next_block_hint) {{
+          if (etaH.textContent !== d.next_block_hint) etaH.textContent = d.next_block_hint;
+          var cls = 'hint ' + (d.next_block_overdue ? 'err' : 'muted');
+          if (etaH.className !== cls) etaH.className = cls;
+        }}
+        setText('kpiPeers', node.peer_count != null ? String(node.peer_count) : null);
+        setText('kpiSync', node.sync_state || '—');
+        // Peers / live finds: only rebuild DOM when tip advances (stops layout jump).
+        if (tipChanged) {{
+          renderPeers(node.peers || [], node.peer_count);
+          if (d.live_finds) renderFinds(d.live_finds);
+        }}
+        var meta = document.getElementById('hdrMeta');
+        if (meta && tip != null) {{
+          var mtxt = 'Live mainnet · read-only · tip #' + tip;
+          if (meta.textContent !== mtxt) meta.textContent = mtxt;
+        }}
+      }}
+      function applyTables(d) {{
+        if (d.recent) {{
+          var bel = document.getElementById('latestBlocks');
+          var cur = bel ? Number(bel.dataset.page || 1) : 1;
+          if (cur <= 1) renderBlocks(d.recent);
+          updateBlocksPager(cur <= 1 ? 1 : cur, d.total_blocks, 100);
+        }}
+        if (d.recent_txs) {{
+          var tel = document.getElementById('latestTxs');
+          var tcur = tel ? Number(tel.dataset.page || 1) : 1;
+          if (tcur <= 1) renderTxs(d.recent_txs, 'latestTxs');
+          updateTxsPager(tcur <= 1 ? 1 : tcur, d.total_transactions, 100);
+        }}
+        if (d.recent_transfers) renderTxs(d.recent_transfers, 'xferOnly');
+      }}
+      async function tick() {{
         try {{
-          var r = await fetch('/api/?_=' + Date.now(), {{ cache: 'no-store' }});
+          // Light poll — full /api/ only when tip advances (tables refresh).
+          var r = await fetch('/api/tip?_=' + Date.now(), {{ cache: 'no-store' }});
           if (!r.ok) return;
           var d = await r.json();
           var tip = d.tip_height;
-          var node = d.node || {{}};
-          var hrEl = document.getElementById('kpiHashrate');
-          var hrLbl = document.getElementById('kpiHashLbl');
-          var hh = document.getElementById('kpiHashHint');
-          if (node.reported_hashrate_hps > 0 && node.reported_hashrate) {{
-            if (hrLbl) hrLbl.textContent = 'Hashrate (live)';
-            if (hrEl) hrEl.textContent = node.reported_hashrate;
-            if (hh) {{
-              var parts = ['total ' + (node.reported_miners || 0) + ' miners'];
-              if (d.network_hashrate) parts.push('implied ' + d.network_hashrate);
-              if (d.network_hashrate_window) parts.push('obs ' + d.network_hashrate_window);
-              if (d.network_hashrate_short) parts.push('recent ' + d.network_hashrate_short);
-              hh.textContent = parts.join(' · ');
-            }}
-          }} else {{
-            if (hrLbl) hrLbl.textContent = 'Hashrate (implied)';
-            if (hrEl && d.network_hashrate) hrEl.textContent = d.network_hashrate;
-            if (hh) {{
-              var parts2 = ['live —', 'implied @10m'];
-              if (d.network_hashrate_window) parts2.push('obs ' + d.network_hashrate_window);
-              if (d.network_hashrate_short) parts2.push('recent ' + d.network_hashrate_short);
-              hh.textContent = parts2.join(' · ');
-            }}
-          }}
-          var ageEl = document.getElementById('kpiAge');
-          if (ageEl && d.tip_age) ageEl.textContent = d.tip_age + ' ago';
-          var hEl = document.getElementById('kpiHeight');
-          if (hEl && tip != null) hEl.innerHTML = '<a href="/block/' + tip + '">' + tip + '</a>';
-          var tot = document.getElementById('kpiTotal');
-          if (tot && d.total_blocks != null) tot.innerHTML = '<a href="/blocks">' + d.total_blocks + '</a>';
-          var txs = document.getElementById('kpiTxs');
-          if (txs && d.total_transactions != null) txs.textContent = d.total_transactions;
-          var mint = document.getElementById('kpiMint');
-          if (mint && d.minted_mhc) mint.textContent = d.minted_mhc;
-          var diff = document.getElementById('kpiDiff');
-          if (diff && d.tip_difficulty_display) diff.textContent = d.tip_difficulty_display;
-          var bits = document.getElementById('kpiBits');
-          if (bits && d.tip_bits) bits.textContent = 'bits ' + d.tip_bits;
-          var eta = document.getElementById('kpiEta');
-          if (eta) eta.textContent = d.next_block_overdue ? 'overdue' : (d.next_block_eta || '—');
-          var etaH = document.getElementById('kpiEtaHint');
-          if (etaH && d.next_block_hint) {{
-            etaH.textContent = d.next_block_hint;
-            etaH.className = 'hint ' + (d.next_block_overdue ? 'err' : 'muted');
-          }}
-          var peers = document.getElementById('kpiPeers');
-          if (peers && node.peer_count != null) peers.textContent = String(node.peer_count);
-          var sync = document.getElementById('kpiSync');
-          if (sync) sync.textContent = node.sync_state || '—';
-          renderPeers(node.peers || [], node.peer_count);
-          var meta = document.getElementById('hdrMeta');
-          if (meta && tip != null) meta.textContent = 'Live mainnet · read-only · tip #' + tip;
-          if (d.live_finds) renderFinds(d.live_finds);
-          else fitLiveBlocksTwoCards();
-          if (d.recent) {{
-            var bel = document.getElementById('latestBlocks');
-            var cur = bel ? Number(bel.dataset.page || 1) : 1;
-            if (cur <= 1) renderBlocks(d.recent);
-            updateBlocksPager(cur <= 1 ? 1 : cur, d.total_blocks, 100);
-          }}
-          if (d.recent_txs) {{
-            var tel = document.getElementById('latestTxs');
-            var tcur = tel ? Number(tel.dataset.page || 1) : 1;
-            if (tcur <= 1) renderTxs(d.recent_txs, 'latestTxs');
-            updateTxsPager(tcur <= 1 ? 1 : tcur, d.total_transactions, 100);
-          }}
-          if (d.recent_transfers) renderTxs(d.recent_transfers, 'xferOnly');
+          applyKpis(d);
           if (tip != null && tip > lastTip && lastTip >= 0) {{
             document.title = '▸ BLOCK #' + tip + ' — MHCOIN Explorer';
             var term = document.querySelector('.term');
@@ -1440,18 +1746,32 @@ async function tick() {{
               term.style.outline = '2px solid #111418';
               setTimeout(function(){{ term.style.outline = 'none'; }}, 1800);
             }}
+            try {{
+              var fr = await fetch('/api/?_=' + Date.now(), {{ cache: 'no-store' }});
+              if (fr.ok) applyTables(await fr.json());
+            }} catch (e2) {{}}
           }}
           if (tip != null) lastTip = tip;
           var home = document.getElementById('explorerHome');
           if (home && tip != null) home.dataset.tip = String(tip);
         }} catch (e) {{}}
       }}
-      setInterval(tick, 3000);
-      tick();
-      window.addEventListener('resize', function () {{
-        requestAnimationFrame(fitLiveBlocksTwoCards);
+      document.addEventListener('click', function (e) {{
+        var bp = e.target && e.target.closest && e.target.closest('[data-blocks-page]');
+        if (bp) {{
+          e.preventDefault();
+          loadBlocksPage(bp.getAttribute('data-blocks-page'));
+          return;
+        }}
+        var tp = e.target && e.target.closest && e.target.closest('[data-txs-page]');
+        if (tp) {{
+          e.preventDefault();
+          loadTxsPage(tp.getAttribute('data-txs-page'));
+        }}
       }});
-      requestAnimationFrame(fitLiveBlocksTwoCards);
+      // Delay first poll — SSR already painted; avoids flash/jump on refresh.
+      setInterval(tick, 3000);
+      setTimeout(tick, 3000);
     }})();
     </script>
     """
@@ -1523,7 +1843,7 @@ def _render_block(b: dict[str, Any]) -> bytes:
         txs.append(
             "<tr>"
             f'<td class="num">{i}</td>'
-            f"<td>{_copyable(tid, href='/tx/' + tid)}</td>"
+            f'<td class="hash-col">{_copyable(tid, short=False, href="/tx/" + tid)}</td>'
             f"<td>{_type_pill(bool(tx.get('coinbase')))}</td>"
             f'<td class="num"><strong class="reward">{_esc(tx.get("amount_mhc") or tx.get("output_value_mhc"))}</strong></td>'
             f'<td class="num muted">{fee_s}</td>'
@@ -1534,7 +1854,7 @@ def _render_block(b: dict[str, Any]) -> bytes:
         for i, tid in enumerate(b.get("txids") or []):
             pill = _type_pill(i == 0)
             txs.append(
-                f'<tr><td class="num">{i}</td><td>{_copyable(tid, href="/tx/" + tid)}</td>'
+                f'<tr><td class="num">{i}</td><td class="hash-col">{_copyable(tid, short=False, href="/tx/" + tid)}</td>'
                 f"<td>{pill}</td>"
                 f'<td></td><td></td><td></td></tr>'
             )
@@ -1570,7 +1890,7 @@ def _render_block(b: dict[str, Any]) -> bytes:
     </div>
     <div class="card">
       <h1>Transactions</h1>
-      <div class="table-wrap"><table>
+      <div class="table-wrap"><table class="data-table">
         <tr><th class="num">#</th><th>Txid</th><th>Type</th><th class="num">Amount</th><th class="num">Fee</th><th class="num">Fee rate</th></tr>
         {"".join(txs)}
       </table></div>
@@ -1689,7 +2009,7 @@ def _render_address(a: dict[str, Any]) -> bytes:
             "<tr>"
             f'<td class="num"><span class="row-ico">{_mint_mark(title="MHC Mined" if o.get("coinbase") else "Transfer")}'
             f'<a href="/block/{o.get("height")}">{o.get("height")}</a></span></td>'
-            f'<td>{_copyable(o.get("txid"), href="/tx/" + str(o.get("txid")))}</td>'
+            f'<td class="hash-col">{_copyable(o.get("txid"), short=False, href="/tx/" + str(o.get("txid")))}</td>'
             f'<td class="num">{o.get("vout")}</td>'
             f'<td class="num"><strong class="reward">{_esc(o.get("value_mhc"))}</strong></td>'
             f'<td class="muted nowrap num">{_esc(o.get("age") or "")}</td>'
@@ -1724,8 +2044,8 @@ def _render_address(a: dict[str, Any]) -> bytes:
         <h1>Received outputs</h1>
         <span class="muted">newest first</span>
       </div>
-      <div class="table-wrap"><table>
-        <tr><th class="num">Height</th><th>Txid</th><th class="num">vout</th><th class="num">MHC</th>
+      <div class="table-wrap"><table class="data-table">
+        <tr><th class="num">Height</th><th class="hash-col">Txid</th><th class="num">vout</th><th class="num">MHC</th>
             <th class="num">Age</th><th class="num-conf">Confirmations</th><th>Type</th></tr>
         {"".join(rows) or '<tr><td colspan="7" class="muted">No outputs</td></tr>'}
       </table></div>
@@ -1738,16 +2058,40 @@ def _render_address(a: dict[str, Any]) -> bytes:
 
 def make_handler(app: ExplorerApp):
     class Handler(BaseHTTPRequestHandler):
+        server_version = "MHCOINExplorer/1"
+        sys_version = ""
+
         def log_message(self, fmt: str, *args) -> None:  # noqa: A003
             logger.info("%s - %s", self.address_string(), fmt % args)
+
+        def _client(self) -> str:
+            return (self.client_address or ("unknown", 0))[0]
+
+        def _security_headers(self) -> None:
+            self.send_header("X-Content-Type-Options", "nosniff")
+            self.send_header("X-Frame-Options", "SAMEORIGIN")
+            self.send_header("Referrer-Policy", "strict-origin-when-cross-origin")
+            self.send_header(
+                "Content-Security-Policy",
+                "default-src 'self'; "
+                "img-src 'self' data:; "
+                "style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; "
+                "font-src 'self' https://fonts.gstatic.com; "
+                "script-src 'self' 'unsafe-inline'; "
+                "connect-src 'self'; "
+                "base-uri 'self'; "
+                "form-action 'self'",
+            )
 
         def _send(self, code: int, body: bytes, content_type: str) -> None:
             self.send_response(code)
             self.send_header("Content-Type", content_type)
             self.send_header("Content-Length", str(len(body)))
             self.send_header("Cache-Control", "no-store")
+            self._security_headers()
             self.end_headers()
-            self.wfile.write(body)
+            if self.command != "HEAD":
+                self.wfile.write(body)
 
         def _json(self, code: int, obj: Any) -> None:
             raw = json.dumps(obj, indent=2, sort_keys=True, default=str).encode()
@@ -1755,6 +2099,12 @@ def make_handler(app: ExplorerApp):
 
         def _html(self, code: int, body: bytes) -> None:
             self._send(code, body, "text/html; charset=utf-8")
+
+        def _error(self, code: int, message: str, *, want_json: bool) -> None:
+            if want_json:
+                self._json(code, {"error": message, "code": code})
+            else:
+                self._html(code, _page("Error", f'<p class="err">{_esc(message)}</p>'))
 
         def _static(self, name: str) -> bool:
             path = STATIC_FILES.get(name)
@@ -1768,9 +2118,14 @@ def make_handler(app: ExplorerApp):
             self.send_header("Content-Type", ctype)
             self.send_header("Content-Length", str(len(data)))
             self.send_header("Cache-Control", "public, max-age=3600")
+            self._security_headers()
             self.end_headers()
-            self.wfile.write(data)
+            if self.command != "HEAD":
+                self.wfile.write(data)
             return True
+
+        def do_HEAD(self) -> None:  # noqa: N802
+            self.do_GET()
 
         def do_GET(self) -> None:  # noqa: N802
             parsed = urlparse(self.path)
@@ -1787,15 +2142,70 @@ def make_handler(app: ExplorerApp):
                 if key.startswith("/static/"):
                     name = key[len("/static/") :].strip("/")
                     if not self._static(name):
-                        self._html(404, _page("Not found", '<p class="err">Asset not found.</p>'))
+                        self._error(404, "Asset not found.", want_json=want_json)
                     return
-                if key == "/favicon.ico":
-                    if not self._static("favicon.ico"):
+                if key in (
+                    "/favicon.ico",
+                    "/apple-touch-icon.png",
+                    "/apple-touch-icon-precomposed.png",
+                ):
+                    asset = "favicon.ico" if key == "/favicon.ico" else "logo.png"
+                    if not self._static(asset):
                         self.send_response(404)
                         self.end_headers()
                     return
 
+                if key in ("/health", "/health/"):
+                    self._json(200, app.health())
+                    return
+
+                if key == "/robots.txt":
+                    body = (
+                        "User-agent: *\n"
+                        "Allow: /\n"
+                        "Disallow: /api/\n"
+                        "Sitemap: /sitemap.xml\n"
+                    ).encode()
+                    self._send(200, body, "text/plain; charset=utf-8")
+                    return
+
+                if key == "/sitemap.xml":
+                    tip = None
+                    try:
+                        tip = app.tip_status().get("tip_height")
+                    except Exception:
+                        tip = None
+                    urls = ["/", "/blocks", "/transactions", "/block/0"]
+                    if isinstance(tip, int) and tip >= 0:
+                        urls.append(f"/block/{tip}")
+                    items = "".join(
+                        f"<url><loc>{u}</loc><changefreq>hourly</changefreq></url>"
+                        for u in urls
+                    )
+                    xml = (
+                        '<?xml version="1.0" encoding="UTF-8"?>'
+                        '<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">'
+                        f"{items}</urlset>"
+                    ).encode()
+                    self._send(200, xml, "application/xml; charset=utf-8")
+                    return
+
+                if key in ("/tip", "/tip/", "/status", "/status/"):
+                    # Hot poll path — never rate-limit (cached server-side).
+                    self._json(200, app.tip_status())
+                    return
+
                 if key in ("/", ""):
+                    # HTML home is unrestricted; only full JSON dump is capped.
+                    if want_json and not app.allow_request(
+                        self._client(), bucket="api-home", limit=_RATE_LIMIT_API_HOME
+                    ):
+                        self._error(
+                            429,
+                            "Rate limit exceeded. Try again shortly.",
+                            want_json=True,
+                        )
+                        return
                     data = app.home()
                     if want_json:
                         self._json(200, data)
@@ -1833,7 +2243,7 @@ def make_handler(app: ExplorerApp):
                     bkey = key[len("/block/") :].strip("/")
                     data = app.block(bkey)
                     if data is None:
-                        self._html(404, _page("Not found", '<p class="err">Block not found.</p>'))
+                        self._error(404, "Block not found.", want_json=want_json)
                         return
                     if want_json:
                         self._json(200, data)
@@ -1845,7 +2255,7 @@ def make_handler(app: ExplorerApp):
                     txid = key[len("/tx/") :].strip("/").lower()
                     data = app.tx(txid)
                     if data is None:
-                        self._html(404, _page("Not found", '<p class="err">Transaction not found.</p>'))
+                        self._error(404, "Transaction not found.", want_json=want_json)
                         return
                     if want_json:
                         self._json(200, data)
@@ -1854,10 +2264,19 @@ def make_handler(app: ExplorerApp):
                     return
 
                 if key.startswith("/address/"):
+                    if not app.allow_request(
+                        self._client(), bucket="address", limit=_RATE_LIMIT_ADDRESS
+                    ):
+                        self._error(
+                            429,
+                            "Rate limit exceeded. Try again shortly.",
+                            want_json=want_json,
+                        )
+                        return
                     addr = key[len("/address/") :].strip("/")
                     data = app.address(addr)
                     if data is None:
-                        self._html(404, _page("Not found", '<p class="err">Invalid or unknown address.</p>'))
+                        self._error(404, "Invalid or unknown address.", want_json=want_json)
                         return
                     if want_json:
                         self._json(200, data)
@@ -1868,47 +2287,51 @@ def make_handler(app: ExplorerApp):
                 if key.startswith("/search"):
                     q = ((qs.get("q") or qs.get("query") or [""])[0] or "").strip()
                     if not q:
-                        self._html(400, _page("Search", '<p class="err">Empty query.</p>'))
+                        self._error(400, "Empty query.", want_json=want_json)
                         return
-                    # height
                     if q.isdigit():
                         self.send_response(302)
                         self.send_header("Location", f"/block/{int(q)}")
+                        self._security_headers()
                         self.end_headers()
                         return
                     ql = q.lower()
                     if HEX64.match(ql):
-                        # try block then tx
                         if app.block(ql) is not None:
                             self.send_response(302)
                             self.send_header("Location", f"/block/{ql}")
+                            self._security_headers()
                             self.end_headers()
                             return
                         if app.tx(ql) is not None:
                             self.send_response(302)
                             self.send_header("Location", f"/tx/{ql}")
+                            self._security_headers()
                             self.end_headers()
                             return
-                        self._html(404, _page("Not found", '<p class="err">No block or tx with that hash.</p>'))
+                        self._error(404, "No block or tx with that hash.", want_json=want_json)
                         return
                     if ql.startswith(app.hrp + "1"):
+                        if not validate_address(q, hrp=app.hrp):
+                            self._error(400, "Invalid address checksum.", want_json=want_json)
+                            return
                         self.send_response(302)
                         self.send_header("Location", f"/address/{q}")
+                        self._security_headers()
                         self.end_headers()
                         return
-                    self._html(400, _page("Search", '<p class="err">Unrecognized query.</p>'))
+                    self._error(400, "Unrecognized query.", want_json=want_json)
                     return
 
-                self._html(404, _page("Not found", '<p class="err">Not found.</p>'))
+                self._error(404, "Not found.", want_json=want_json)
             except Exception:
                 logger.exception("explorer request failed path=%s", path)
                 try:
-                    self._html(500, _page("Error", '<p class="err">Internal error.</p>'))
+                    self._error(500, "Internal error.", want_json=want_json)
                 except Exception:
                     pass
 
     return Handler
-
 
 
 def serve(data_dir: Path, *, host: str, port: int, hrp: str = "mhc") -> None:

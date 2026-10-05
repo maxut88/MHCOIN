@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 import os
 import secrets
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, fields
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -28,6 +28,9 @@ class WalletRecord:
     public_key_hex: str
     encrypted_private_key: str  # base64 payload
     created_at: str
+    # Optional Bitcoin-style recovery metadata (older wallet.json omit these).
+    derivation_path: str | None = None
+    encrypted_mnemonic: str | None = None
 
 
 @dataclass
@@ -77,7 +80,13 @@ def load_wallet_file(path: Path) -> WalletFile | None:
     if not path.is_file():
         return None
     raw = json.loads(path.read_text(encoding="utf-8"))
-    wallets = [WalletRecord(**w) for w in raw.get("wallets", [])]
+    wallets = []
+    for w in raw.get("wallets", []):
+        if not isinstance(w, dict):
+            continue
+        # Ignore unknown forward-compat keys; keep known fields only.
+        allowed = {f.name for f in fields(WalletRecord)}
+        wallets.append(WalletRecord(**{k: v for k, v in w.items() if k in allowed}))
     return WalletFile(
         version=int(raw.get("version", 1)),
         network=str(raw.get("network", "localnet")),

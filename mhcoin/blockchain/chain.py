@@ -26,6 +26,7 @@ from mhcoin.consensus.params import DIFFICULTY_WINDOW, MTP_WINDOW, get_network_p
 from mhcoin.mempool import Mempool, MempoolError
 from mhcoin.network import constants as net_constants
 from mhcoin.transaction.transaction import Transaction
+from mhcoin.blockchain.blockstore import BlockFileStore
 from mhcoin.blockchain.disk_lock import chain_disk_lock
 from mhcoin.utxo import UTXOSet
 
@@ -50,7 +51,7 @@ def _sqlite_retry(fn, *, attempts: int = 12, base_delay: float = 0.05):
     raise last  # pragma: no cover
 
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3  # v3: raw blocks in blocks/blk*.dat; sqlite keeps index (+ undo)
 STATUS_SIDE = 0
 STATUS_ACTIVE = 1
 
@@ -102,7 +103,8 @@ class Blockchain:
         self.orphans = OrphanPool()
         # Open DB + repair under datadir lock so GUI/miner cannot race UTXO tip.
         with chain_disk_lock(self.data_dir):
-            self.utxo = UTXOSet(self.data_dir / "utxo.sqlite")
+            self.utxo = UTXOSet(self.data_dir / "chainstate")
+            self._blockstore = BlockFileStore(self.data_dir / "blocks")
             self._db = sqlite3.connect(
                 str(self.data_dir / "chain.sqlite"), check_same_thread=False
             )
@@ -121,14 +123,15 @@ class Blockchain:
                 self._db.close()
                 raise ChainError(
                     f"chain.sqlite is corrupted ({e}). Quit the app, keep wallet.json, "
-                    f"delete chain.sqlite* and utxo.sqlite* in {self.data_dir}, then re-sync."
+                    f"delete chain.sqlite* / chainstate/ / utxo.sqlite* / blocks/ in "
+                    f"{self.data_dir}, then re-sync."
                 ) from e
             if check.lower() != "ok":
                 self._db.close()
                 raise ChainError(
                     f"chain.sqlite failed integrity check ({check}). Quit the app, keep "
-                    f"wallet.json, delete chain.sqlite* and utxo.sqlite* in {self.data_dir}, "
-                    f"then re-sync."
+                    f"wallet.json, delete chain.sqlite* / chainstate/ / utxo.sqlite* / "
+                    f"blocks/ in {self.data_dir}, then re-sync."
                 )
             self._ensure_schema()
             self._tip_hash: bytes | None = None
@@ -168,58 +171,100 @@ class Blockchain:
         has_old = self._table_exists("blocks")
         has_index = self._table_exists("block_index")
 
-        if has_index:
-            if version != str(SCHEMA_VERSION):
-                self._meta_set("schema_version", str(SCHEMA_VERSION))
-                self._db.commit()
-            return
-
-        # Create new tables
-        self._db.execute(
-            """
-            CREATE TABLE IF NOT EXISTS block_index (
-                block_hash BLOB PRIMARY KEY,
-                prev_hash BLOB NOT NULL,
-                height INTEGER NOT NULL,
-                chain_work TEXT NOT NULL,
-                status INTEGER NOT NULL,
-                bits INTEGER NOT NULL,
-                timestamp INTEGER NOT NULL,
-                raw BLOB NOT NULL
-            )
-            """
-        )
-        self._db.execute(
-            "CREATE INDEX IF NOT EXISTS idx_block_prev ON block_index(prev_hash)"
-        )
-        self._db.execute(
-            "CREATE INDEX IF NOT EXISTS idx_block_status_h ON block_index(status, height)"
-        )
-        self._db.execute(
-            """
-            CREATE TABLE IF NOT EXISTS block_undo (
-                block_hash BLOB PRIMARY KEY,
-                undo_blob BLOB NOT NULL
-            )
-            """
-        )
-
-        if has_old:
-            self._migrate_from_v1()
-        else:
-            # Compatibility view: keep empty `blocks` table for any external tooling
+        if not has_index:
+            # Create new tables
             self._db.execute(
                 """
-                CREATE TABLE IF NOT EXISTS blocks (
-                    height INTEGER PRIMARY KEY,
-                    block_hash BLOB NOT NULL UNIQUE,
-                    raw BLOB NOT NULL
+                CREATE TABLE IF NOT EXISTS block_index (
+                    block_hash BLOB PRIMARY KEY,
+                    prev_hash BLOB NOT NULL,
+                    height INTEGER NOT NULL,
+                    chain_work TEXT NOT NULL,
+                    status INTEGER NOT NULL,
+                    bits INTEGER NOT NULL,
+                    timestamp INTEGER NOT NULL,
+                    raw BLOB NOT NULL DEFAULT X'',
+                    file_id INTEGER,
+                    data_pos INTEGER,
+                    data_len INTEGER
                 )
                 """
             )
+            self._db.execute(
+                "CREATE INDEX IF NOT EXISTS idx_block_prev ON block_index(prev_hash)"
+            )
+            self._db.execute(
+                "CREATE INDEX IF NOT EXISTS idx_block_status_h ON block_index(status, height)"
+            )
+            self._db.execute(
+                """
+                CREATE TABLE IF NOT EXISTS block_undo (
+                    block_hash BLOB PRIMARY KEY,
+                    undo_blob BLOB NOT NULL
+                )
+                """
+            )
+            if has_old:
+                self._migrate_from_v1()
+            else:
+                # Compatibility view: keep empty `blocks` table for any external tooling
+                self._db.execute(
+                    """
+                    CREATE TABLE IF NOT EXISTS blocks (
+                        height INTEGER PRIMARY KEY,
+                        block_hash BLOB NOT NULL UNIQUE,
+                        raw BLOB NOT NULL
+                    )
+                    """
+                )
+        else:
+            self._ensure_flat_block_columns()
 
+        # Move embedded raw blobs into blocks/blk*.dat (idempotent).
+        self._migrate_raw_to_flat_files()
         self._meta_set("schema_version", str(SCHEMA_VERSION))
         self._db.commit()
+        if version != str(SCHEMA_VERSION):
+            logger.info("chain schema ready at v%s (was %s)", SCHEMA_VERSION, version)
+
+    def _column_names(self, table: str) -> set[str]:
+        rows = self._db.execute(f"PRAGMA table_info({table})").fetchall()
+        return {str(r[1]) for r in rows}
+
+    def _ensure_flat_block_columns(self) -> None:
+        cols = self._column_names("block_index")
+        for name, decl in (
+            ("file_id", "INTEGER"),
+            ("data_pos", "INTEGER"),
+            ("data_len", "INTEGER"),
+        ):
+            if name not in cols:
+                self._db.execute(f"ALTER TABLE block_index ADD COLUMN {name} {decl}")
+
+    def _migrate_raw_to_flat_files(self) -> None:
+        """Copy sqlite-embedded raw blocks into flat blk*.dat; clear raw to save space."""
+        self._ensure_flat_block_columns()
+        rows = self._db.execute(
+            "SELECT block_hash, raw, file_id FROM block_index "
+            "WHERE raw IS NOT NULL AND length(raw) > 0 "
+            "AND (file_id IS NULL OR data_pos IS NULL OR data_len IS NULL)"
+        ).fetchall()
+        if not rows:
+            return
+        moved = 0
+        for bh, raw, _fid in rows:
+            if not raw:
+                continue
+            file_n, offset, size = self._blockstore.append(bytes(raw))
+            self._db.execute(
+                "UPDATE block_index SET file_id=?, data_pos=?, data_len=?, raw=X'' "
+                "WHERE block_hash=?",
+                (file_n, offset, size, bh),
+            )
+            moved += 1
+        if moved:
+            self._db.commit()
+            logger.info("Migrated %s blocks into flat blocks/blk*.dat", moved)
 
     def _table_exists(self, name: str) -> bool:
         row = self._db.execute(
@@ -298,13 +343,9 @@ class Blockchain:
         except Exception:
             return False
         try:
-            row = self._db.execute(
-                "SELECT raw FROM block_index WHERE block_hash=?",
-                (self._tip_hash,),
-            ).fetchone()
-            if not row or not row[0]:
+            tip_block = self.get_block_by_hash(self._tip_hash)
+            if tip_block is None:
                 return False
-            tip_block = Block.deserialize(row[0])
             cb = tip_block.transactions[0]
             from mhcoin.utxo import OutPoint
 
@@ -362,16 +403,10 @@ class Blockchain:
         # mid-rebuild failure does not wipe a good UTXO set via clear_all.
         blocks: list[tuple[int, Block]] = []
         for h in range(self._height + 1):
-            row = self._db.execute(
-                "SELECT raw FROM block_index WHERE height=? AND status=?",
-                (h, STATUS_ACTIVE),
-            ).fetchone()
-            if not row or not row[0]:
+            block = self.get_block_by_height(h)
+            if block is None:
                 raise ChainError(f"missing block at {h} during UTXO rebuild")
-            try:
-                blocks.append((h, Block.deserialize(row[0])))
-            except Exception as e:
-                raise ChainError(f"bad block at {h} during UTXO rebuild: {e}") from e
+            blocks.append((h, block))
         self.utxo.clear_all()
         # clear_all leaves meta; drop tip marker until rebuild finishes cleanly.
         try:
@@ -458,20 +493,37 @@ class Blockchain:
                 timestamp=int(row[6]),
             )
 
+    def _raw_from_index_row(self, row: tuple) -> bytes | None:
+        """Row: raw, file_id, data_pos, data_len."""
+        raw, file_id, data_pos, data_len = row
+        if file_id is not None and data_pos is not None and data_len is not None:
+            try:
+                return self._blockstore.read(int(file_id), int(data_pos), int(data_len))
+            except Exception:
+                logger.exception("flat block read failed file=%s pos=%s", file_id, data_pos)
+                return None
+        if raw:
+            return bytes(raw)
+        return None
+
     def get_block_by_height(self, height: int) -> Block | None:
         with self._lock:
             if getattr(self, "_closed", False) or self._db is None:
                 return None
             try:
                 row = self._db.execute(
-                    "SELECT raw FROM block_index WHERE height=? AND status=?",
+                    "SELECT raw, file_id, data_pos, data_len FROM block_index "
+                    "WHERE height=? AND status=?",
                     (height, STATUS_ACTIVE),
                 ).fetchone()
             except Exception:
                 return None
             if not row:
                 return None
-            return Block.deserialize(row[0])
+            data = self._raw_from_index_row(row)
+            if data is None:
+                return None
+            return Block.deserialize(data)
 
     def get_block_by_hash(self, block_hash: bytes) -> Block | None:
         with self._lock:
@@ -479,13 +531,18 @@ class Blockchain:
                 return None
             try:
                 row = self._db.execute(
-                    "SELECT raw FROM block_index WHERE block_hash=?", (block_hash,)
+                    "SELECT raw, file_id, data_pos, data_len FROM block_index "
+                    "WHERE block_hash=?",
+                    (block_hash,),
                 ).fetchone()
             except Exception:
                 return None
             if not row:
                 return None
-            return Block.deserialize(row[0])
+            data = self._raw_from_index_row(row)
+            if data is None:
+                return None
+            return Block.deserialize(data)
 
     def get_height_of_hash(self, block_hash: bytes) -> int | None:
         entry = self.get_index(block_hash)
@@ -760,11 +817,13 @@ class Blockchain:
     ) -> None:
         raw = block.serialize()
         bh = block.block_hash()
+        file_n, offset, size = self._blockstore.append(raw)
         self._db.execute(
             """
             INSERT OR REPLACE INTO block_index(
-                block_hash, prev_hash, height, chain_work, status, bits, timestamp, raw
-            ) VALUES (?,?,?,?,?,?,?,?)
+                block_hash, prev_hash, height, chain_work, status, bits, timestamp,
+                raw, file_id, data_pos, data_len
+            ) VALUES (?,?,?,?,?,?,?,?,?,?,?)
             """,
             (
                 bh,
@@ -774,7 +833,10 @@ class Blockchain:
                 status,
                 int(block.header.bits),
                 int(block.header.timestamp),
-                raw,
+                b"",
+                file_n,
+                offset,
+                size,
             ),
         )
 
@@ -1295,7 +1357,7 @@ class Blockchain:
         old_height = self._height
         old_tip = self._tip_hash
         self.utxo.close()
-        self.utxo = UTXOSet(self.data_dir / "utxo.sqlite")
+        self.utxo = UTXOSet(self.data_dir / "chainstate")
         self._load_tip()
         self._repair_utxo_if_needed()
         if self._tip_hash == old_tip and self._height <= old_height:

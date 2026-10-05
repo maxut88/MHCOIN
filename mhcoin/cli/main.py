@@ -54,27 +54,151 @@ def wallet() -> None:
     default=None,
     help="Make this the active (default) wallet. Default: yes for first wallet, no when adding another.",
 )
+@click.option(
+    "--words",
+    "strength",
+    type=click.Choice(["12", "24"]),
+    default="12",
+    show_default=True,
+    help="BIP39 mnemonic length (12 or 24 words).",
+)
 def wallet_create(
-    network: str | None, label: str, password: str | None, activate: bool | None
+    network: str | None,
+    label: str,
+    password: str | None,
+    activate: bool | None,
+    strength: str,
 ) -> None:
-    """Create an encrypted wallet (password required). Prints your MHC address."""
+    """Create an encrypted HD wallet. Prints BIP39 seed words once + MHC address."""
     paths = wallet_paths(network)
     pwd = password or os.environ.get("MHCOIN_WALLET_PASSWORD") or _password(create=True)
     w = Wallet(paths, password=pwd)
     existing = bool(w.list_wallets())
     make_default = (not existing) if activate is None else bool(activate)
+    bits = 128 if strength == "12" else 256
     try:
-        address = w.create(label=label, password=pwd, make_default=make_default)
+        created = w.create(
+            label=label, password=pwd, make_default=make_default, strength=bits
+        )
     except WalletError as e:
         raise click.ClickException(str(e)) from e
-    click.echo("Wallet created.")
-    click.echo(f"Address: {address}")
+    click.echo("Wallet created (BIP39 + BIP32).")
+    click.echo("")
+    click.echo("=== RECOVERY SEED (write down offline — shown once) ===")
+    click.echo(created.mnemonic)
+    click.echo("======================================================")
+    click.echo("")
+    click.echo(f"Address: {created.address}")
+    click.echo(f"Path:    {created.derivation_path}")
     if label and label != "default":
         click.echo(f"Label: {label}")
     if make_default:
         click.echo("Active wallet: this address (default).")
     else:
         click.echo("Note: previous default wallet stays active (use --activate to switch).")
+
+
+@wallet.command("restore")
+@click.option("--network", default=None, help="localnet | testnet | mainnet | regtest")
+@click.option("--mnemonic", default=None, help="BIP39 words (or prompt)")
+@click.option("--passphrase", default="", help="Optional BIP39 passphrase (not wallet password)")
+@click.option("--label", default="restored", help="Wallet label")
+@click.option("--password", default=None, help="New encryption password for wallet.json")
+@click.option(
+    "--activate/--no-activate",
+    default=True,
+    show_default=True,
+    help="Make restored wallet the active default.",
+)
+def wallet_restore(
+    network: str | None,
+    mnemonic: str | None,
+    passphrase: str,
+    label: str,
+    password: str | None,
+    activate: bool,
+) -> None:
+    """Restore a wallet from BIP39 seed words (Bitcoin-style)."""
+    paths = wallet_paths(network)
+    words = mnemonic or click.prompt("BIP39 mnemonic", hide_input=False)
+    pwd = password or os.environ.get("MHCOIN_WALLET_PASSWORD") or _password(create=True)
+    w = Wallet(paths, password=pwd)
+    try:
+        created = w.restore_from_mnemonic(
+            words,
+            password=pwd,
+            label=label,
+            make_default=bool(activate),
+            passphrase=passphrase or "",
+        )
+    except WalletError as e:
+        raise click.ClickException(str(e)) from e
+    click.echo("Wallet restored from mnemonic.")
+    click.echo(f"Address: {created.address}")
+    click.echo(f"Path:    {created.derivation_path}")
+
+
+@wallet.command("import-key")
+@click.option("--network", default=None, help="localnet | testnet | mainnet | regtest")
+@click.option("--key", "key_text", default=None, help="WIF or 64-char hex private key")
+@click.option("--label", default="imported", help="Wallet label")
+@click.option("--password", default=None, help="Encryption password for wallet.json")
+@click.option(
+    "--activate/--no-activate",
+    default=True,
+    show_default=True,
+    help="Make imported wallet the active default.",
+)
+def wallet_import_key(
+    network: str | None,
+    key_text: str | None,
+    label: str,
+    password: str | None,
+    activate: bool,
+) -> None:
+    """Import a private key (WIF or hex), Bitcoin-compatible."""
+    paths = wallet_paths(network)
+    raw = key_text or click.prompt("Private key (WIF or hex)", hide_input=True)
+    pwd = password or os.environ.get("MHCOIN_WALLET_PASSWORD") or _password(create=True)
+    w = Wallet(paths, password=pwd)
+    try:
+        created = w.import_private_key(
+            raw, password=pwd, label=label, make_default=bool(activate)
+        )
+    except WalletError as e:
+        raise click.ClickException(str(e)) from e
+    click.echo("Private key imported.")
+    click.echo(f"Address: {created.address}")
+
+
+@wallet.command("export-key")
+@click.option("--network", default=None)
+@click.option("--password", default=None)
+def wallet_export_key(network: str | None, password: str | None) -> None:
+    """Export the active wallet private key as compressed WIF (keep secret)."""
+    paths = wallet_paths(network)
+    pwd = password or os.environ.get("MHCOIN_WALLET_PASSWORD") or _password(create=False)
+    w = Wallet(paths, password=pwd)
+    try:
+        wif = w.export_wif(password=pwd)
+    except WalletError as e:
+        raise click.ClickException(str(e)) from e
+    click.echo(wif)
+
+
+@wallet.command("export-seed")
+@click.option("--network", default=None)
+@click.option("--password", default=None)
+def wallet_export_seed(network: str | None, password: str | None) -> None:
+    """Show stored BIP39 mnemonic for the active wallet (if created from seed)."""
+    paths = wallet_paths(network)
+    pwd = password or os.environ.get("MHCOIN_WALLET_PASSWORD") or _password(create=False)
+    w = Wallet(paths, password=pwd)
+    try:
+        words = w.export_mnemonic(password=pwd)
+    except WalletError as e:
+        raise click.ClickException(str(e)) from e
+    click.echo(words)
 
 
 @wallet.command("address")
@@ -671,7 +795,7 @@ def node_addrs(data_dir: str) -> None:
     """Show known peer addresses from AddrDB (Stage 7)."""
     from mhcoin.network.addrdb import AddrDB
 
-    db = AddrDB(Path(data_dir) / "peers.sqlite")
+    db = AddrDB(Path(data_dir) / "peers.dat")
     try:
         rows = db.list_recent(limit=100)
         click.echo(f"Known addresses: {db.count()}")

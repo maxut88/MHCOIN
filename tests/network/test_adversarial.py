@@ -468,18 +468,21 @@ def test_restart_after_reorg_preserves_state(tmp_path: Path):
 
 
 def test_addrdb_survives_partial_truncation(tmp_path: Path):
-    """Corrupted peers.sqlite should not crash node start (empty/recoverable)."""
+    """Corrupted peers.dat should not crash node start (empty/recoverable)."""
     from mhcoin.network.addrdb import AddrDB
 
-    path = tmp_path / "peers.sqlite"
+    path = tmp_path / "peers.dat"
     db = AddrDB(path)
     db.add("10.0.0.1", 18444, source="manual")
     db.close()
     # Truncate / corrupt
-    path.write_bytes(b"NOTASQLITE")
-    # Re-open should fail gracefully or recreate — expect exception or empty
+    path.write_bytes(b"NOTJSON{{{")
+    # Re-open corrupt path → empty book; clean path still works.
+    db_bad = AddrDB(path)
+    assert db_bad.count() == 0
+    db_bad.close()
     try:
-        db2 = AddrDB(tmp_path / "peers2.sqlite")
+        db2 = AddrDB(tmp_path / "peers2.dat")
         db2.add("10.0.0.2", 18444)
         assert db2.count() >= 1
         db2.close()

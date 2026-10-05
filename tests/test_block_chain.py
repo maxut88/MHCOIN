@@ -155,8 +155,8 @@ def test_excessive_reward_rejected(tmp_path: Path):
 def test_local_send_and_mine(tmp_path: Path):
     paths = WalletPaths(data_dir=tmp_path, network="regtest", hrp="mhc")
     wa = Wallet(paths)
-    addr_a = wa.create(password="pass-a")
-    addr_b = wa.create(label="b", password="pass-a", make_default=False)
+    addr_a = wa.create(password="pass-a").address
+    addr_b = wa.create(label="b", password="pass-a", make_default=False).address
 
     node = LocalNode(tmp_path, hrp="mhc")
     node.bootstrap_genesis(addr_a)
