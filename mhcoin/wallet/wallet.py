@@ -765,9 +765,19 @@ class Wallet:
         # No unused change address available — derive the next one from seed.
         root = next((w for w in account_recs if w.encrypted_mnemonic), None)
         if root is None or not root.encrypted_mnemonic:
-            raise WalletError(
-                "cannot derive a change address — this wallet has no BIP39 seed "
-                "(imported key only)."
+            # Single-key / imported WIF wallets have no BIP39 seed. Bitcoin-style
+            # fallback: send change back to the active spendable address so Send
+            # still works (no silent fund lock).
+            if active.watch_only or not active.encrypted_private_key:
+                raise WalletError(
+                    "cannot derive a change address — this wallet has no BIP39 seed "
+                    "(imported key only). Create or restore from seed, or unlock a "
+                    "spendable key."
+                )
+            return WalletCreateResult(
+                address=active.address,
+                wallet_id=active.wallet_id,
+                derivation_path=active.derivation_path,
             )
         if not root.account_id:
             root.account_id = root.wallet_id
