@@ -11,5 +11,7 @@
 | [TRANSACTIONS.md](TRANSACTIONS.md) | Transactions |
 | [DESKTOP.md](DESKTOP.md) | Desktop app |
 | [USER_QUICKSTART.md](USER_QUICKSTART.md) | CLI quickstart |
+| [USER_FAQ.md](USER_FAQ.md) | Upgrade · backup · mining · peers (one page) |
 | [MAINNET.md](MAINNET.md) | Mainnet notes |
+| [STORAGE.md](STORAGE.md) | peers · flat blocks · chainstate |
 | [SECURITY_AUDIT.md](SECURITY_AUDIT.md) | Security audit notes |

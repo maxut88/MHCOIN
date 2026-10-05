@@ -88,6 +88,8 @@ class CoreController:
         self._blocks_found = 0
         self._rewards_sats = 0
         self._hashrate = 0.0
+        self._hashrate_ema = 0.0
+        self._hashrate_sample_t0 = 0.0
         self._node: NodeRuntime | None = None
         self._node_thread: threading.Thread | None = None
         self._last_txid: str | None = None
@@ -1552,11 +1554,46 @@ class CoreController:
         except Exception:
             pass
 
+    def _update_hashrate(self, hps: float, *, sample_t0: float) -> float:
+        """Smooth Desktop hashrate for UI + STATUS (reject early / spike samples).
+
+        Early PoW ticks after a tip rebuild can look like tens of kH/s for a
+        fraction of a second; broadcasting those inflated peers' H/S column.
+        """
+        try:
+            raw = float(hps or 0.0)
+        except (TypeError, ValueError):
+            raw = 0.0
+        if raw <= 0:
+            return float(self._hashrate or 0.0)
+        elapsed = max(0.0, time.time() - float(sample_t0 or 0.0))
+        # Need a real sample window before trusting the rate.
+        if elapsed < 2.0:
+            return float(self._hashrate or 0.0)
+        prev = float(getattr(self, "_hashrate_ema", 0.0) or 0.0)
+        # Cap absurd jumps (timer glitches / bad progress callbacks).
+        if prev > 0 and raw > max(prev * 6.0, prev + 5_000.0):
+            raw = prev
+        # Desktop solo CPU mining is typically < 5 kH/s per process today.
+        if raw > 50_000:
+            raw = prev if prev > 0 else min(raw, 50_000.0)
+        ema = raw if prev <= 0 else (0.80 * prev + 0.20 * raw)
+        self._hashrate_ema = ema
+        self._hashrate = ema
+        return ema
+
     def _broadcast_miner_status(self, *, force: bool = False) -> None:
         """Advise peers of local mining hashrate (STATUS). Throttled ~10s."""
         now = time.time()
         last = float(getattr(self, "_status_last_broadcast", 0.0) or 0.0)
         if not force and (now - last) < 10.0:
+            return
+        # Do not advertise until EMA has a stable sample.
+        if (
+            self._mining
+            and float(getattr(self, "_hashrate_ema", 0.0) or 0.0) <= 0
+            and not force
+        ):
             return
         rt = self._node
         if rt is None or getattr(rt, "_stopped", False):
@@ -1643,6 +1680,8 @@ class CoreController:
         # 0.3.7.3-style: one tight PoW lane (max stable hashrate).
         self._mine_intensity = 100
         self._mine_workers = 1
+        self._hashrate = 0.0
+        self._hashrate_ema = 0.0
         self._start_caffeine()
         self._mine_log_line(f"MHCOIN Live Miner · {self.network}")
         self._mine_log_line(f"reward  {reward_addr}")
@@ -1706,15 +1745,15 @@ class CoreController:
                         def _prog(nonce: int, _h: bytes, hps: float) -> None:
                             if self._miner_stop.is_set():
                                 return
-                            self._hashrate = hps
+                            shown = self._update_hashrate(hps, sample_t0=t0)
                             self._broadcast_miner_status()
                             now = time.time()
                             if now - self._mine_log_last_prog >= 0.5:
                                 self._mine_log_last_prog = now
                                 rate = (
-                                    f"{hps/1000:.1f} kH/s"
-                                    if hps >= 1000
-                                    else f"{hps:,.0f} H/s"
+                                    f"{shown/1000:.1f} kH/s"
+                                    if shown >= 1000
+                                    else f"{shown:,.0f} H/s"
                                 )
                                 self._mine_log_line(
                                     f"· height {height}  nonce {nonce:,}  {rate}"
@@ -1840,6 +1879,7 @@ class CoreController:
                 self._mining = False
                 self._mine_stopping = False
                 self._hashrate = 0.0
+                self._hashrate_ema = 0.0
                 self._miner_reconfigure.clear()
                 self._stop_caffeine()
                 self._broadcast_miner_status(force=True)

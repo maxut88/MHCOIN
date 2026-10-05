@@ -18,9 +18,16 @@ hardcoded seeds + DNS seeds   ← first contact only (not consensus)
 There is **no central coin server**. Seeds do not mint blocks and are not
 trusted for consensus. Every node validates PoW and rules itself.
 
-If the original seed goes offline and enough peers already know each other,
-the mesh continues. New installs need at least one reachable bootstrap peer
-(seed IP, DNS seed, or `--connect`).
+Today the published mainnet list may still be **small** (often one operator IP
+until more seeds are published). That is a **bootstrap** risk for brand-new
+installs with an empty `peers.dat` — not a consensus authority. Mitigations:
+
+- Run additional public nodes and add them to `HARDCODED_SEEDS`
+- Publish DNS seed names (`DNS_SEEDS` / `MHCOIN_DNS_SEEDS`)
+- Users: `export MHCOIN_CONNECT=ip:8333,...` when the default seed is unreachable
+
+Once a node has gossiped peers into `peers.dat`, it can reconnect without the
+original seed.
 
 ## Bootstrap sources
 
