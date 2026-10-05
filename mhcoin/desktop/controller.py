@@ -36,7 +36,6 @@ from mhcoin.mempool import Mempool
 from mhcoin.mining.abortable_pow import (
     MiningAborted,
     mine_block_cancellable,
-    mine_block_parallel,
 )
 from mhcoin.mining.miner import format_mine_plain_found
 from mhcoin.mining.block_template import build_block_template
@@ -1640,18 +1639,11 @@ class CoreController:
         self._miner_reconfigure.clear()
         self._mine_stopping = False
         self._mining = True
-        self._mine_intensity = clamp_mine_intensity(self._mine_intensity)
-        self._mine_workers = self._workers_for_intensity(self._mine_intensity)
-        cpus = max(1, int(os.cpu_count() or 1))
         self._start_caffeine()
         self._mine_log_line(f"MHCOIN Live Miner · {self.network}")
         self._mine_log_line(f"reward  {reward_addr}")
         self._mine_log_line(f"data    {self.data_dir}")
         self._mine_log_line("mode    live node (P2P stays online)")
-        self._mine_log_line(
-            f"CPU     {self._mine_intensity}% · {self._mine_workers}/{cpus} workers "
-            f"(duty-cycle throttle)"
-        )
         self._mine_log_line("────────────────────────────────")
         self._status_last_broadcast = 0.0
 
@@ -1707,7 +1699,7 @@ class CoreController:
                     try:
 
                         def _prog(nonce: int, _h: bytes, hps: float) -> None:
-                            if self._miner_stop.is_set() or self._miner_reconfigure.is_set():
+                            if self._miner_stop.is_set():
                                 return
                             self._hashrate = hps
                             self._broadcast_miner_status()
@@ -1731,7 +1723,7 @@ class CoreController:
                         self._mine_log_line(f"template #{height}  bits=0x{bits:08x}")
 
                         def _abort() -> bool:
-                            if self._miner_stop.is_set() or self._miner_reconfigure.is_set():
+                            if self._miner_stop.is_set():
                                 return True
                             # In-memory tip/epoch only — never touch SQLite here.
                             if int(rt.chain.tip_epoch) != epoch0:
@@ -1740,24 +1732,16 @@ class CoreController:
                             return tip is not None and tip != parent
 
                         try:
-                            self._miner_reconfigure.clear()
-                            intensity = clamp_mine_intensity(self._mine_intensity)
-                            workers = self._workers_for_intensity(intensity)
-                            self._mine_workers = workers
-                            duty = max(0.05, min(1.0, float(intensity) / 100.0))
-                            mine_block_parallel(
+                            # Stable 0.3.7.3-style PoW: tight single-lane loop,
+                            # abort_check for Stop / tip moves (no duty-cycle).
+                            mine_block_cancellable(
                                 block,
-                                workers=workers,
                                 progress=_prog,
                                 abort_check=_abort,
-                                duty_cycle=duty,
                             )
                         except MiningAborted:
                             if self._miner_stop.is_set():
                                 break
-                            if self._miner_reconfigure.is_set():
-                                self._miner_reconfigure.clear()
-                                continue
                             self._mine_log_line(
                                 f"stale template #{height} — tip moved, rebuilding"
                             )

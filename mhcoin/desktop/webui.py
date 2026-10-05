@@ -1652,11 +1652,11 @@ async function waitHistoryReady(maxMs){
   return last;
 }
 async function bootAndEnter(){
-  showBoot("Unlocking wallet · building history…");
-  if ($("bootSyncTitle")) $("bootSyncTitle").textContent = "Preparing wallet…";
+  // Enter UI immediately — history + node start in background (no long splash wait).
   unlocked = true;
   $("welcome").classList.add("hidden");
   $("app").classList.remove("hidden");
+  hideBoot();
   const tb = $("tabs");
   tb.innerHTML = "";
   tabs.forEach(name => {
@@ -1671,38 +1671,17 @@ async function bootAndEnter(){
     if (!unlocked) return;
     refreshStatus();
   }, 1500);
-  await waitHistoryReady();
-  try {
-    if ($("bootMsg")) $("bootMsg").textContent = "Starting node…";
-    if ($("bootSyncTitle")) $("bootSyncTitle").textContent = "Connecting to peers…";
-    await api("node/start", {});
-    if ($("bootMsg")) $("bootMsg").textContent = "Connected · checking chain sync…";
-  } catch(e) {
-    if ($("bootMsg")) $("bootMsg").textContent = "Node start: " + (e.message||e);
-    if ($("bootSyncTitle")) $("bootSyncTitle").textContent = "Node error";
-  }
-  // Show splash briefly with live sync numbers during initial block download.
-  const t0 = Date.now();
-  for (let i = 0; i < 12; i++) {
-    try {
-      const s = await api("status");
-      patchSyncBox("boot", s);
-      if ($("bootSyncTitle")) {
-        $("bootSyncTitle").textContent = s.syncing
-          ? "Synchronizing with network…"
-          : (s.sync || "Almost ready…");
-      }
-      $("topStatus").textContent = s.network + " · height " + s.height + " · peers " + s.peers +
-        (s.syncing ? " · syncing" : "") + (s.mining ? " · mining" : "");
-      // Leave splash once we have status and either synced or waited ~2.5s.
-      if (!s.syncing && Date.now() - t0 > 900) break;
-      if (Date.now() - t0 > 3500) break;
-    } catch(e) {}
-    await new Promise(r => setTimeout(r, 400));
-  }
-  hideBoot();
   render();
   flash("Wallet ready");
+  // Background: start node (history already kicked off on create/unlock).
+  (async () => {
+    try {
+      await api("node/start", {});
+    } catch(e) {
+      flash("Node: " + (e.message || e), false);
+    }
+    try { await refreshStatus(); } catch(e) {}
+  })();
 }
 function historyCard(t, i){
   const type = t.type || ((t.kind||"").toLowerCase().includes("mining") ? "mined" :
@@ -1919,11 +1898,10 @@ async function refreshStatus(){
       if ($("statHash")) $("statHash").textContent = s.hashrate || "—";
       if ($("statBlocks")) $("statBlocks").textContent = String(s.blocks_found ?? 0);
       if ($("statRewards")) $("statRewards").textContent = s.rewards || "0";
-      if ($("mineLoadPct") && s.mine_intensity != null) $("mineLoadPct").textContent = String(s.mine_intensity);
-      if ($("mineWorkers") && s.mine_workers != null) $("mineWorkers").textContent = String(s.mine_workers);
       if ($("mineCpus") && s.mine_cpus != null) $("mineCpus").textContent = String(s.mine_cpus);
-      if ($("mineLoad") && s.mine_intensity != null && document.activeElement !== $("mineLoad")) {
-        $("mineLoad").value = String(s.mine_intensity);
+      // intensity slider removed — keep hashrate/blocks live only
+      if ($("mineLog") && Array.isArray(s.mine_log)) {
+        setMineLogEl($("mineLog"), s.mine_log);
       }
       const logEl = $("mineLog");
       if (logEl) setMineLogEl(logEl, s.mine_log || []);
@@ -2182,21 +2160,6 @@ async function render(pre){
           </div>
         </div>
       </div>
-      <div class="mine-load">
-        <div class="load-top">
-          <strong>CPU load</strong>
-          <span class="load-meta"><span id="mineLoadPct">${s.mine_intensity??100}</span>% · <span id="mineWorkers">${s.mine_workers??1}</span>/<span id="mineCpus">${s.mine_cpus??1}</span> workers</span>
-        </div>
-        <input id="mineLoad" type="range" min="10" max="100" step="5" value="${s.mine_intensity??100}"/>
-        <p class="sub">Expected hashrate ≈ load% of your Mac peak (often ~0.6–0.7 MH/s at 100% on Apple Silicon). 25% should be ~¼ of peak — not the same as 100%.</p>
-        <div class="load-row">
-          <button class="sm" type="button" data-load="25">25%</button>
-          <button class="sm" type="button" data-load="50">50%</button>
-          <button class="sm" type="button" data-load="75">75%</button>
-          <button class="sm" type="button" data-load="100" id="mineLoadMax">Max 100%</button>
-        </div>
-        <p class="sub" style="margin:.55rem 0 0">100% uses all CPU cores in this same app (keeps Mac awake while mining).</p>
-      </div>
       <label>Reward address</label>
       <input id="mineAddr" class="mono" value="${s.address||""}"/>
       <div class="row">
@@ -2228,22 +2191,30 @@ async function render(pre){
         const stopBtn = $("mineStop");
         if (btn) btn.disabled = true;
         if (stopBtn) stopBtn.disabled = false;
+        if ($("mineState")) $("mineState").textContent = "Starting…";
+        if ($("mineDot")) $("mineDot").className = "dot on";
         flash("Starting miner…");
-        const load = $("mineLoad") ? Number($("mineLoad").value) : (s.mine_intensity||100);
-        await api("mine/start", {address:$("mineAddr").value.trim(), intensity: load});
+        await api("mine/start", {address:$("mineAddr").value.trim()});
         flash("Mining started");
-        render();
-      } catch(e){ flash(e.message, false); }
+        if ($("mineState")) $("mineState").textContent = "Mining";
+        if ($("mineHero")) $("mineHero").classList.add("live");
+      } catch(e){
+        flash(e.message, false);
+        if ($("mineState")) $("mineState").textContent = "Idle";
+        if ($("mineDot")) $("mineDot").className = "dot";
+      }
       finally { const btn = $("mineStart"); if (btn) btn.disabled = false; }
     };
     $("mineStop").onclick = async () => {
       try {
         const btn = $("mineStop");
         if (btn) btn.disabled = true;
+        if ($("mineState")) $("mineState").textContent = "Stopping…";
         flash("Stopping miner…");
         await api("mine/stop", {});
         flash("Stop signal sent");
-        render();
+        // Do not full-render here — keeps Stop responsive while PoW unwinds.
+        if ($("mineHero")) $("mineHero").classList.remove("live");
       } catch(e){ flash(e.message, false); }
       finally { const btn = $("mineStop"); if (btn) btn.disabled = false; }
     };
@@ -2251,32 +2222,6 @@ async function render(pre){
       const addr = ($("mineAddr") && $("mineAddr").value.trim()) || s.address || "";
       await showMineTerminalHelp(addr, s.network || "mainnet");
     };
-    const applyLoadUi = (pct, workers, cpus) => {
-      if ($("mineLoadPct")) $("mineLoadPct").textContent = String(pct);
-      if ($("mineWorkers")) $("mineWorkers").textContent = String(workers);
-      if ($("mineCpus")) $("mineCpus").textContent = String(cpus);
-      if ($("mineLoad") && Number($("mineLoad").value) !== Number(pct)) $("mineLoad").value = String(pct);
-      document.querySelectorAll("[data-load]").forEach(b => {
-        b.classList.toggle("active", Number(b.getAttribute("data-load")) === Number(pct));
-      });
-    };
-    applyLoadUi(s.mine_intensity??100, s.mine_workers??1, s.mine_cpus??1);
-    const setLoad = async (pct) => {
-      try {
-        const r = await api("mine/intensity", {intensity: Number(pct)});
-        applyLoadUi(r.intensity??pct, r.workers??1, r.cpus??(s.mine_cpus||1));
-        flash("CPU load " + (r.intensity??pct) + "%");
-      } catch(e){ flash(e.message, false); }
-    };
-    if ($("mineLoad")) {
-      $("mineLoad").oninput = () => {
-        if ($("mineLoadPct")) $("mineLoadPct").textContent = $("mineLoad").value;
-      };
-      $("mineLoad").onchange = async () => { await setLoad($("mineLoad").value); };
-    }
-    document.querySelectorAll("[data-load]").forEach(b => {
-      b.onclick = async () => { await setLoad(b.getAttribute("data-load")); };
-    });
   } else if (active === "Network") {
     p.innerHTML = `
       <h2>Network</h2>
@@ -2691,8 +2636,6 @@ def make_handler(state: DesktopState):
             # Keep UI responsive: do not hold state.lock across node stop / mining start
             # (those can take seconds; status polling would freeze the whole app).
             if path == "/api/mine/start":
-                if body.get("intensity") is not None:
-                    c.set_mine_intensity(body.get("intensity"))
                 addr = str(body.get("address") or "") or None
                 c.start_mining(addr)
                 return {"ok": True}
@@ -2700,16 +2643,17 @@ def make_handler(state: DesktopState):
                 c.stop_mining()
                 return {"ok": True}
             if path == "/api/mine/intensity":
-                n = c.set_mine_intensity(body.get("intensity", body.get("value", 100)))
+                # Slider removed — keep endpoint as no-op for older UI clients.
                 st = c.mining_stats
                 return {
                     "ok": True,
-                    "intensity": n,
+                    "intensity": 100,
                     "workers": st.get("workers"),
                     "cpus": st.get("cpus"),
                 }
             if path == "/api/node/start":
-                c.start_node()
+                # Don't block UI on full history wait — scan continues in background.
+                c.start_node(skip_history_wait=True)
                 return {"ok": True, "seeds": c.chain_info().get("seeds") or []}
             if path == "/api/node/stop":
                 c.stop_node(rebuild_history=True, join_timeout=3.0)
