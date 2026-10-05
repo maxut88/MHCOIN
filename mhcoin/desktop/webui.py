@@ -18,10 +18,9 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import parse_qs, urlparse
 
-from mhcoin.consensus.params import SOFTWARE_VERSION, get_network_params
-from mhcoin.desktop.controller import CoreController
-from mhcoin.network.seeds import default_connect_peers
-from mhcoin.wallet.wallet import WalletError
+# Keep top-level imports light so the native window can appear before
+# CoreController / chain / crypto modules finish loading (frozen Mac .app).
+from mhcoin import __version__ as SOFTWARE_VERSION
 
 HOST = "127.0.0.1"
 DEFAULT_PORT = 18765
@@ -1652,11 +1651,12 @@ async function waitHistoryReady(maxMs){
   return last;
 }
 async function bootAndEnter(){
-  // Enter UI immediately — history + node start in background (no long splash wait).
+  // Splash shows full load (history + node + short sync), then opens the app.
+  showBoot("Unlocking wallet · building history…");
+  if ($("bootSyncTitle")) $("bootSyncTitle").textContent = "Preparing wallet…";
   unlocked = true;
   $("welcome").classList.add("hidden");
   $("app").classList.remove("hidden");
-  hideBoot();
   const tb = $("tabs");
   tb.innerHTML = "";
   tabs.forEach(name => {
@@ -1671,17 +1671,37 @@ async function bootAndEnter(){
     if (!unlocked) return;
     refreshStatus();
   }, 1500);
+  await waitHistoryReady();
+  try {
+    if ($("bootMsg")) $("bootMsg").textContent = "Starting node…";
+    if ($("bootSyncTitle")) $("bootSyncTitle").textContent = "Connecting to peers…";
+    await api("node/start", {});
+    if ($("bootMsg")) $("bootMsg").textContent = "Connected · checking chain sync…";
+  } catch(e) {
+    if ($("bootMsg")) $("bootMsg").textContent = "Node start: " + (e.message||e);
+    if ($("bootSyncTitle")) $("bootSyncTitle").textContent = "Node error";
+  }
+  // Brief splash with live sync numbers during initial block download.
+  const t0 = Date.now();
+  for (let i = 0; i < 12; i++) {
+    try {
+      const s = await api("status");
+      patchSyncBox("boot", s);
+      if ($("bootSyncTitle")) {
+        $("bootSyncTitle").textContent = s.syncing
+          ? "Synchronizing with network…"
+          : (s.sync || "Almost ready…");
+      }
+      $("topStatus").textContent = s.network + " · height " + s.height + " · peers " + s.peers +
+        (s.syncing ? " · syncing" : "") + (s.mining ? " · mining" : "");
+      if (!s.syncing && Date.now() - t0 > 900) break;
+      if (Date.now() - t0 > 3500) break;
+    } catch(e) {}
+    await new Promise(r => setTimeout(r, 400));
+  }
+  hideBoot();
   render();
   flash("Wallet ready");
-  // Background: start node (history already kicked off on create/unlock).
-  (async () => {
-    try {
-      await api("node/start", {});
-    } catch(e) {
-      flash("Node: " + (e.message || e), false);
-    }
-    try { await refreshStatus(); } catch(e) {}
-  })();
 }
 function historyCard(t, i){
   const type = t.type || ((t.kind||"").toLowerCase().includes("mining") ? "mined" :
@@ -2419,6 +2439,8 @@ function go(name){
 
 class DesktopState:
     def __init__(self, network: str) -> None:
+        from mhcoin.desktop.controller import CoreController
+
         self.ctrl = CoreController(network=network)
         self.lock = threading.RLock()
 
@@ -2427,6 +2449,10 @@ class DesktopState:
 
         Caller must hold self.lock.
         """
+        from mhcoin.consensus.params import get_network_params
+        from mhcoin.network.seeds import default_connect_peers
+        from mhcoin.wallet.wallet import WalletError
+
         c = self.ctrl
         params = get_network_params(c.network)
         unlocked = c._password is not None
@@ -2472,6 +2498,8 @@ class DesktopState:
 
     def status(self) -> dict[str, Any]:
         # Do not hold self.lock across chain_info / balance — that froze tab navigation.
+        from mhcoin.wallet.wallet import WalletError
+
         c = self.ctrl
         with self.lock:
             unlocked = c._password is not None
@@ -2576,6 +2604,8 @@ def _json(handler: BaseHTTPRequestHandler, code: int, payload: dict) -> None:
 
 
 def make_handler(state: DesktopState):
+    from mhcoin.wallet.wallet import WalletError
+
     class Handler(BaseHTTPRequestHandler):
         def log_message(self, fmt: str, *args) -> None:  # quieter
             return
@@ -2759,64 +2789,262 @@ def make_handler(state: DesktopState):
     return Handler
 
 
-def run_web_desktop(network: str | None = None, port: int | None = None) -> None:
-    from mhcoin.desktop.prefs import resolve_launch_network, save_preferred_network
+_COLD_SPLASH_HTML = f"""<!DOCTYPE html>
+<html lang="en"><head>
+<meta charset="utf-8"/>
+<meta name="viewport" content="width=device-width, initial-scale=1"/>
+<title>MHCOIN Core {SOFTWARE_VERSION}</title>
+<style>
+  html,body {{ margin:0; height:100%; background:#0c1210; color:#e8f0ea;
+    font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif; }}
+  .wrap {{ min-height:100%; display:flex; flex-direction:column; align-items:center;
+    justify-content:center; gap:14px; padding:24px; box-sizing:border-box; }}
+  .logo {{ width:64px; height:64px; border-radius:50%; background:#1a8f5a;
+    display:flex; align-items:center; justify-content:center; box-shadow:0 0 0 8px rgba(26,143,90,.15); }}
+  .logo svg {{ width:34px; height:34px; }}
+  h1 {{ margin:0; font-size:22px; letter-spacing:.04em; }}
+  p {{ margin:0; color:#9bb0a2; font-size:13px; }}
+  .bar {{ width:180px; height:4px; border-radius:99px; background:#1a2420; overflow:hidden; margin-top:8px; }}
+  .bar > i {{ display:block; height:100%; width:40%; background:#1a8f5a;
+    animation: slide 1.1s ease-in-out infinite; }}
+  @keyframes slide {{ 0% {{ transform:translateX(-120%); }} 100% {{ transform:translateX(320%); }} }}
+</style></head><body>
+<div class="wrap">
+  <div class="logo" aria-hidden="true">
+    <svg viewBox="0 0 32 32" fill="none" xmlns="http://www.w3.org/2000/svg">
+      <path d="M6 24V8h4.2l5.8 10.4L21.8 8H26v16h-3.4V13.2L17.2 24h-2.4L9.4 13.2V24H6z" fill="#06261a"/>
+    </svg>
+  </div>
+  <h1>MHCOIN Core</h1>
+  <p id="msg">Starting…</p>
+  <div class="bar"><i></i></div>
+</div>
+</body></html>
+"""
 
-    net = resolve_launch_network(explicit=network)
-    save_preferred_network(net)
-    port = int(port or os.environ.get("MHCOIN_DESKTOP_PORT", DEFAULT_PORT))
-    state = DesktopState(net)
 
+def _prepare_desktop_http(
+    network: str,
+    port: int,
+) -> tuple[Any, DesktopState, str, int]:
+    """Build DesktopState + HTTP server (heavy imports happen here)."""
+    state = DesktopState(network)
     httpd = None
     last_err: Exception | None = None
+    bind_port = port
     for p in range(port, port + 20):
         try:
             httpd = ThreadingHTTPServer((HOST, p), make_handler(state))
-            port = p
+            bind_port = p
             break
         except OSError as e:
             last_err = e
             continue
     if httpd is None:
-        raise SystemExit(f"cannot bind desktop port ({last_err})")
+        raise OSError(f"cannot bind desktop port ({last_err})")
+    url = f"http://{HOST}:{bind_port}/"
+    return httpd, state, url, bind_port
 
-    url = f"http://{HOST}:{port}/"
-    frozen = getattr(__import__("sys"), "frozen", False)
-    print(f"MHCOIN Core Desktop")
-    print(f"UI: {url}")
-    print(f"Network: {net}")
-    print(f"Data: {state.ctrl.data_dir}")
 
-    server_thread = threading.Thread(target=httpd.serve_forever, daemon=True)
-    server_thread.start()
+def run_web_desktop(network: str | None = None, port: int | None = None) -> None:
+    """Show a native splash window immediately, then load the full UI."""
+    from mhcoin.desktop.prefs import resolve_launch_network, save_preferred_network
 
-    try:
-        ok, detail = _open_native_window(url, state=state)
-        if not ok:
-            print(f"Shell: browser UI — {detail}")
+    net = resolve_launch_network(explicit=network)
+    save_preferred_network(net)
+    port = int(port or os.environ.get("MHCOIN_DESKTOP_PORT", DEFAULT_PORT))
+    frozen = getattr(sys, "frozen", False)
+
+    # Browser fallback: no early splash window — prepare then open URL.
+    if _want_browser_fallback():
+        httpd, state, url, port = _prepare_desktop_http(net, port)
+        print("MHCOIN Core Desktop")
+        print(f"UI: {url}")
+        print(f"Network: {net}")
+        print(f"Data: {state.ctrl.data_dir}")
+        server_thread = threading.Thread(target=httpd.serve_forever, daemon=True)
+        server_thread.start()
+        try:
+            print("Shell: browser UI — MHCOIN_DESKTOP_BROWSER is set")
             print(f"Open: {url}")
-            if not frozen:
-                print("Same UI + local API as native window (127.0.0.1 only).")
-                print("Fix native window:  pip install 'pywebview>=5.0'")
-                print("Then relaunch. Force browser: MHCOIN_DESKTOP_BROWSER=1")
-                print("Dev mode — Press Ctrl+C to stop.")
-            else:
-                print("Browser UI is normal on Linux without Qt/WebKitGTK.")
-                print("If it did not open, paste the URL above. Ctrl+C stops the app.")
             threading.Timer(0.35, lambda u=url: _open_system_browser(u)).start()
             try:
                 server_thread.join()
             except KeyboardInterrupt:
                 print("\nStopping…")
-        else:
-            print(f"Shell: native window ({detail})")
-    finally:
+        finally:
+            try:
+                httpd.shutdown()
+            except Exception:
+                pass
+            state.ctrl.shutdown()
+            httpd.server_close()
+        return
+
+    try:
+        import webview  # type: ignore
+    except ImportError:
+        httpd, state, url, port = _prepare_desktop_http(net, port)
+        print("MHCOIN Core Desktop")
+        print(f"UI: {url}")
+        server_thread = threading.Thread(target=httpd.serve_forever, daemon=True)
+        server_thread.start()
         try:
-            httpd.shutdown()
+            print("Shell: browser UI — pywebview not installed")
+            threading.Timer(0.35, lambda u=url: _open_system_browser(u)).start()
+            server_thread.join()
+        finally:
+            try:
+                httpd.shutdown()
+            except Exception:
+                pass
+            state.ctrl.shutdown()
+            httpd.server_close()
+        return
+
+    boot: dict[str, Any] = {
+        "httpd": None,
+        "state": None,
+        "url": None,
+        "error": None,
+        "navigated": False,
+    }
+    ready = threading.Event()
+
+    def _prepare() -> None:
+        try:
+            httpd, state, url, _p = _prepare_desktop_http(net, port)
+            boot["httpd"] = httpd
+            boot["state"] = state
+            boot["url"] = url
+            threading.Thread(target=httpd.serve_forever, daemon=True).start()
+            print("MHCOIN Core Desktop")
+            print(f"UI: {url}")
+            print(f"Network: {net}")
+            print(f"Data: {state.ctrl.data_dir}")
+        except Exception as e:  # noqa: BLE001
+            boot["error"] = e
+            print(f"Desktop boot failed: {e}", file=sys.stderr)
+        finally:
+            ready.set()
+
+    threading.Thread(target=_prepare, name="mhcoin-desktop-boot", daemon=True).start()
+
+    win_title = f"MHCOIN Core {SOFTWARE_VERSION}"
+    _GUI["allow_quit"] = False
+    try:
+        webview.settings["ALLOW_DOWNLOADS"] = True
+    except Exception:
+        pass
+    bridge = _NativeBridge()
+    window = webview.create_window(
+        win_title,
+        html=_COLD_SPLASH_HTML,
+        width=720,
+        height=780,
+        min_size=(480, 560),
+        confirm_close=False,
+        background_color="#0c1210",
+        js_api=bridge,
+    )
+    _GUI["window"] = window
+    try:
+        window.set_title(win_title)
+    except Exception:
+        pass
+
+    def _on_closing() -> bool:
+        _GUI["allow_quit"] = True
+        st = _GUI.get("state") or boot.get("state")
+
+        def _force_quit() -> None:
+            import time
+
+            time.sleep(0.05)
+            try:
+                if st is not None:
+                    st.ctrl.lock()
+                    st.ctrl.request_stop_mining()
+            except Exception:
+                pass
+            os._exit(0)
+
+        threading.Thread(target=_force_quit, daemon=True).start()
+        return True
+
+    try:
+        window.events.closing += _on_closing
+    except Exception:
+        pass
+
+    def _navigate_when_ready() -> None:
+        if boot["navigated"]:
+            return
+        ready.wait(timeout=180.0)
+        if boot["navigated"]:
+            return
+        boot["navigated"] = True
+        err = boot.get("error")
+        if err is not None:
+            try:
+                window.load_html(
+                    "<html><body style='background:#0c1210;color:#fcc;font-family:sans-serif;"
+                    f"padding:40px'><h2>MHCOIN Core failed to start</h2><p>{err}</p></body></html>"
+                )
+            except Exception:
+                pass
+            return
+        state = boot.get("state")
+        url = boot.get("url")
+        _GUI["state"] = state
+        try:
+            window.set_title(win_title)
         except Exception:
             pass
-        state.ctrl.shutdown()
-        httpd.server_close()
+        try:
+            window.load_url(url)
+        except Exception as e:  # noqa: BLE001
+            print(f"load_url failed: {e}", file=sys.stderr)
+
+    def _on_loaded() -> None:
+        try:
+            window.set_title(win_title)
+        except Exception:
+            pass
+        if not boot["navigated"]:
+            threading.Thread(
+                target=_navigate_when_ready, name="mhcoin-nav", daemon=True
+            ).start()
+
+    try:
+        window.events.loaded += _on_loaded
+    except Exception:
+        threading.Thread(target=_navigate_when_ready, daemon=True).start()
+
+    try:
+        icon = _app_icon_path()
+        if icon:
+            webview.start(icon=icon)
+        else:
+            webview.start()
+    finally:
+        httpd = boot.get("httpd")
+        state = boot.get("state")
+        if httpd is not None:
+            try:
+                httpd.shutdown()
+            except Exception:
+                pass
+            try:
+                httpd.server_close()
+            except Exception:
+                pass
+        if state is not None:
+            try:
+                state.ctrl.shutdown()
+            except Exception:
+                pass
+        print("Shell: native window (cold-splash)")
 
 
 def main(argv: list[str] | None = None) -> None:
