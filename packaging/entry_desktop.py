@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
 """PyInstaller entrypoint for MHCOIN Core Desktop.
 
-Critical for macOS feel: show a native window BEFORE importing mhcoin.*
-(heavy crypto/chain modules). Dock bounce without a window = user thinks
-the app is hung.
+Show a splash window before importing mhcoin.* (heavy crypto/chain). On macOS
+never pass icon= into webview.start — Dock uses the .app bundle icns, and
+icon= has crashed Cocoa builds (seen as “app never opens” in 0.4.1.5).
+Backend boot starts only after the UI loop is up (webview.start(func=...)).
 """
 
 from __future__ import annotations
@@ -12,6 +13,7 @@ import os
 import sys
 import threading
 from pathlib import Path
+from typing import Any
 
 
 def _prepare_env() -> None:
@@ -23,32 +25,31 @@ def _prepare_env() -> None:
             os.environ.setdefault("MHCOIN_DESKTOP_BROWSER", "1")
 
 
-def _splash_html(version: str = "") -> str:
-    ver = f" {version}" if version else ""
-    return f"""<!DOCTYPE html>
+def _splash_html() -> str:
+    return """<!DOCTYPE html>
 <html lang="en"><head>
 <meta charset="utf-8"/>
 <meta name="viewport" content="width=device-width, initial-scale=1"/>
-<title>MHCOIN Core{ver}</title>
+<title>MHCOIN Core</title>
 <style>
-  html,body {{ margin:0; height:100%; background:#0c1210; color:#e8f0ea;
-    font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif; }}
-  .wrap {{ min-height:100%; display:flex; flex-direction:column; align-items:center;
-    justify-content:center; gap:14px; padding:24px; box-sizing:border-box; }}
-  .logo {{ width:64px; height:64px; border-radius:50%; background:#1a8f5a;
+  html,body { margin:0; height:100%; background:#0c1210; color:#e8f0ea;
+    font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif; }
+  .wrap { min-height:100%; display:flex; flex-direction:column; align-items:center;
+    justify-content:center; gap:14px; padding:24px; box-sizing:border-box; }
+  .logo { width:64px; height:64px; border-radius:50%; background:#1a8f5a;
     display:flex; align-items:center; justify-content:center;
-    box-shadow:0 0 0 8px rgba(26,143,90,.15); }}
-  .logo svg {{ width:34px; height:34px; }}
-  h1 {{ margin:0; font-size:22px; letter-spacing:.04em; }}
-  p {{ margin:0; color:#9bb0a2; font-size:13px; }}
-  .bar {{ width:180px; height:4px; border-radius:99px; background:#1a2420;
-    overflow:hidden; margin-top:8px; }}
-  .bar > i {{ display:block; height:100%; width:40%; background:#1a8f5a;
-    animation: slide 1.1s ease-in-out infinite; }}
-  @keyframes slide {{
-    0% {{ transform:translateX(-120%); }}
-    100% {{ transform:translateX(320%); }}
-  }}
+    box-shadow:0 0 0 8px rgba(26,143,90,.15); }
+  .logo svg { width:34px; height:34px; }
+  h1 { margin:0; font-size:22px; letter-spacing:.04em; }
+  p { margin:0; color:#9bb0a2; font-size:13px; }
+  .bar { width:180px; height:4px; border-radius:99px; background:#1a2420;
+    overflow:hidden; margin-top:8px; }
+  .bar > i { display:block; height:100%; width:40%; background:#1a8f5a;
+    animation: slide 1.1s ease-in-out infinite; }
+  @keyframes slide {
+    0% { transform:translateX(-120%); }
+    100% { transform:translateX(320%); }
+  }
 </style></head><body>
 <div class="wrap">
   <div class="logo" aria-hidden="true">
@@ -65,12 +66,10 @@ def _splash_html(version: str = "") -> str:
 
 
 def _find_app_icon() -> str | None:
-    """Locate mhcoin.icns/png without importing mhcoin (keeps splash fast)."""
-    names = (
-        ("mhcoin.icns", "mhcoin.png", "mhcoin-256.png")
-        if sys.platform == "darwin"
-        else ("mhcoin.png", "mhcoin-256.png", "mhcoin.ico", "mhcoin.icns")
-    )
+    """Non-macOS window icon. macOS Dock uses the .app bundle icns."""
+    if sys.platform == "darwin":
+        return None
+    names = ("mhcoin.png", "mhcoin-256.png", "mhcoin.ico", "mhcoin.icns")
     bases: list[Path] = []
     if getattr(sys, "frozen", False):
         meipass = getattr(sys, "_MEIPASS", None)
@@ -78,15 +77,7 @@ def _find_app_icon() -> str | None:
             bases.append(Path(meipass))
             bases.append(Path(meipass) / "mhcoin" / "desktop" / "assets")
         exe = Path(sys.executable).resolve()
-        bases.extend(
-            [
-                exe.parent,
-                exe.parent / "assets",
-                exe.parent.parent / "Resources",
-                exe.parent.parent / "Resources" / "assets",
-            ]
-        )
-    # Source / editable install
+        bases.extend([exe.parent, exe.parent / "assets"])
     here = Path(__file__).resolve()
     bases.extend(
         [
@@ -102,55 +93,91 @@ def _find_app_icon() -> str | None:
     return None
 
 
+class _SaveBridge:
+    """Minimal JS bridge so Save As works before mhcoin is imported."""
+
+    def save_text_file(self, filename: str, content: str) -> dict[str, Any]:
+        import webview  # type: ignore
+
+        wins = getattr(webview, "windows", None) or []
+        window = wins[0] if wins else None
+        if window is None:
+            return {"ok": False, "error": "no window"}
+
+        name = (filename or "MHCOIN-save.txt").replace("/", "_").replace("\\", "_")
+        for ch in '<>:"|?*':
+            name = name.replace(ch, "_")
+        start_dir = str(Path.home() / "Downloads")
+        if not Path(start_dir).is_dir():
+            start_dir = str(Path.home())
+
+        save_flag = getattr(getattr(webview, "FileDialog", None), "SAVE", None)
+        if save_flag is None:
+            save_flag = getattr(webview, "SAVE_DIALOG", 20)
+
+        try:
+            result = window.create_file_dialog(
+                save_flag,
+                directory=start_dir,
+                save_filename=name,
+                file_types=("JSON (*.json)", "Text (*.txt)", "All files (*.*)"),
+            )
+        except Exception as e:  # noqa: BLE001
+            return {"ok": False, "error": str(e)}
+
+        if not result:
+            return {"ok": False, "cancelled": True}
+        path = result[0] if isinstance(result, (list, tuple)) else result
+        try:
+            Path(path).write_text(content if content is not None else "", encoding="utf-8")
+            try:
+                Path(path).chmod(0o600)
+            except OSError:
+                pass
+        except Exception as e:  # noqa: BLE001
+            return {"ok": False, "error": str(e)}
+        return {"ok": True, "path": str(path)}
+
+
+def _want_browser() -> bool:
+    return os.environ.get("MHCOIN_DESKTOP_BROWSER", "").strip().lower() in (
+        "1",
+        "true",
+        "yes",
+        "browser",
+    )
+
+
+def _run_classic() -> None:
+    from mhcoin.desktop.webui import run_web_desktop
+
+    run_web_desktop()
+
+
 def _run_with_early_splash() -> None:
-    """Show window first (webview only), then load mhcoin backend."""
     import webview  # type: ignore
 
-    boot: dict = {
-        "url": None,
-        "state": None,
+    boot: dict[str, Any] = {
         "cleanup": None,
-        "error": None,
-        "navigated": False,
-        "nav_started": False,
-        "version": "",
+        "state": None,
+        "done": False,
     }
-    ready = threading.Event()
 
-    def prepare() -> None:
-        try:
-            # Heavy imports only after the splash window exists.
-            from mhcoin.desktop.webui import start_desktop_backend
-
-            url, state, cleanup, version = start_desktop_backend()
-            boot["url"] = url
-            boot["state"] = state
-            boot["cleanup"] = cleanup
-            boot["version"] = version or ""
-        except Exception as e:  # noqa: BLE001
-            boot["error"] = e
-            print(f"Desktop boot failed: {e}", file=sys.stderr)
-        finally:
-            ready.set()
-
-    win_title = "MHCOIN Core"
     try:
         webview.settings["ALLOW_DOWNLOADS"] = True
     except Exception:
         pass
 
-    # Create the window FIRST — do not import mhcoin before this line.
     window = webview.create_window(
-        win_title,
+        "MHCOIN Core",
         html=_splash_html(),
         width=720,
         height=780,
         min_size=(480, 560),
         confirm_close=False,
         background_color="#0c1210",
+        js_api=_SaveBridge(),
     )
-    # Backend boot in parallel only after the splash window object exists.
-    threading.Thread(target=prepare, name="mhcoin-boot", daemon=True).start()
 
     def _force_quit() -> None:
         import time
@@ -174,60 +201,49 @@ def _run_with_early_splash() -> None:
     except Exception:
         pass
 
-    def navigate() -> None:
-        ready.wait(timeout=180.0)
-        if boot.get("navigated"):
+    def _boot_backend() -> None:
+        if boot["done"]:
             return
-        boot["navigated"] = True
-        err = boot.get("error")
-        if err is not None:
+        boot["done"] = True
+        try:
+            from mhcoin.desktop.webui import start_desktop_backend
+            from mhcoin.desktop import webui as wui
+
+            url, state, cleanup, version = start_desktop_backend()
+            boot["cleanup"] = cleanup
+            boot["state"] = state
+            wui._GUI["window"] = window
+            wui._GUI["state"] = state
+            wui._GUI["allow_quit"] = False
+            if version:
+                try:
+                    window.set_title(f"MHCOIN Core {version}")
+                except Exception:
+                    pass
+            window.load_url(url)
+        except Exception as e:  # noqa: BLE001
+            print(f"Desktop boot failed: {e}", file=sys.stderr)
             try:
                 window.load_html(
                     "<html><body style='background:#0c1210;color:#fcc;"
                     "font-family:sans-serif;padding:40px'>"
                     "<h2>MHCOIN Core failed to start</h2>"
-                    f"<p>{err}</p></body></html>"
+                    f"<p>{e}</p></body></html>"
                 )
             except Exception:
                 pass
-            return
-        try:
-            # Wire close / save bridge used by the full UI.
-            from mhcoin.desktop import webui as wui
 
-            wui._GUI["window"] = window
-            wui._GUI["state"] = boot["state"]
-            wui._GUI["allow_quit"] = False
-            ver = boot.get("version") or ""
-            if ver:
-                try:
-                    window.set_title(f"MHCOIN Core {ver}")
-                except Exception:
-                    pass
-        except Exception as e:  # noqa: BLE001
-            print(f"GUI wire failed: {e}", file=sys.stderr)
-        try:
-            window.load_url(boot["url"])
-        except Exception as e:  # noqa: BLE001
-            print(f"load_url failed: {e}", file=sys.stderr)
+    def _after_ui_ready() -> None:
+        # UI loop is up — safe to import native/mhcoin modules off the GUI thread.
+        threading.Thread(target=_boot_backend, name="mhcoin-boot", daemon=True).start()
 
-    def on_loaded() -> None:
-        if boot.get("nav_started"):
-            return
-        boot["nav_started"] = True
-        threading.Thread(target=navigate, name="mhcoin-nav", daemon=True).start()
+    start_kwargs: dict[str, Any] = {"func": _after_ui_ready}
+    icon = _find_app_icon()
+    if icon:
+        start_kwargs["icon"] = icon
 
     try:
-        window.events.loaded += on_loaded
-    except Exception:
-        threading.Thread(target=navigate, daemon=True).start()
-
-    try:
-        icon = _find_app_icon()
-        if icon:
-            webview.start(icon=icon)
-        else:
-            webview.start()
+        webview.start(**start_kwargs)
     finally:
         cleanup = boot.get("cleanup")
         if callable(cleanup):
@@ -244,21 +260,20 @@ def main() -> None:
     _prepare_env()
 
     if _want_browser():
-        # Linux AppImage / no WebKit: no early native splash.
-        from mhcoin.desktop.webui import run_web_desktop
-
-        run_web_desktop()
+        _run_classic()
         return
 
     try:
         import webview  # noqa: F401
     except ImportError:
-        from mhcoin.desktop.webui import run_web_desktop
-
-        run_web_desktop()
+        _run_classic()
         return
 
-    _run_with_early_splash()
+    try:
+        _run_with_early_splash()
+    except Exception as e:  # noqa: BLE001
+        print(f"Early splash failed ({e}); falling back to classic start", file=sys.stderr)
+        _run_classic()
 
 
 if __name__ == "__main__":
