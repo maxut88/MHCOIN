@@ -20,7 +20,7 @@ Independent Proof-of-Work blockchain. **Not** a Bitcoin Core fork.
 | Ledger | UTXO |
 | Mainnet P2P port | **8333** |
 | Mainnet magic | `4D48434E` (`MHCN`) |
-| Software | **0.3.7.3** |
+| Software | **0.4.1.7** |
 
 ## Mainnet identity (frozen)
 
@@ -42,19 +42,21 @@ mhcoin audit fingerprint
 
 ## Features
 
-- Full validating node (P2P sync, mempool, orphan/side-chain handling)
-- Encrypted wallet · Send / Receive · multi-wallet
-- Solo mining (Desktop GUI + CLI) with live tip-sync while P2P stays online
+- Full validating node (P2P sync, mempool, orphan / reorg handling)
+- Encrypted wallet · **BIP39 seed** recovery · Send / Receive · multi-wallet
+- Bitcoin-style storage: `peers.dat` · flat `blocks/blk*.dat` · LMDB `chainstate/`
+- Solo mining (Desktop + CLI) on the live mainnet tip while P2P stays online
 - Same **MHCOIN Core** Desktop UI on **Linux**, **macOS**, and **Windows**
 
 ## Install MHCOIN Core (users)
 
-**Download:** [v0.3.7.3 Release](https://github.com/maxut88/MHCOIN/releases/tag/v0.3.7.3) · verify `SHA256SUMS`
+**Current:** [MHCOIN Core 0.4.1.7](https://github.com/maxut88/MHCOIN/releases/tag/v0.4.1.7) · verify `SHA256SUMS`  
+**Previous:** [MHCOIN Core 0.3.7.3](https://github.com/maxut88/MHCOIN/releases/tag/v0.3.7.3) (still available)
 
 ### Linux
 
-1. Download `MHCOIN-Core-0.3.7.3-x86_64.AppImage` **or** `MHCOIN-Core-0.3.7.3-linux-x86_64.tar.gz`.
-2. AppImage: `chmod +x MHCOIN-Core-0.3.7.3-x86_64.AppImage && ./MHCOIN-Core-0.3.7.3-x86_64.AppImage`
+1. Download `MHCOIN-Core-0.4.1.7-x86_64.AppImage` **or** `MHCOIN-Core-0.4.1.7-linux-x86_64.tar.gz`.
+2. AppImage: `chmod +x MHCOIN-Core-0.4.1.7-x86_64.AppImage && ./MHCOIN-Core-0.4.1.7-x86_64.AppImage`
 3. tarball: extract and run `./MHCOIN-Core`.
 4. Allow sync from genesis, create or open a wallet, then Receive / Send / Mining.
 
@@ -68,16 +70,18 @@ export MHCOIN_CONNECT=176.38.3.168:8333
 
 ### macOS
 
-1. Download `MHCOIN-Core-0.3.7.3-macos.dmg` (Apple Silicon / recent macOS).
-2. Older Intel Macs: use `MHCOIN-Core-0.3.7.3-macos110-legacy.dmg` if the regular build will not open.
-3. Open the DMG → install **MHCOIN Core** → sync from genesis → create/open a wallet.
+1. Download `MHCOIN-Core-0.4.1.7-macos.dmg`.
+2. Open the DMG → install **MHCOIN Core** → sync from genesis → create/open a wallet.
+3. If Gatekeeper blocks the app: right-click → **Open**, or allow it in System Settings → Privacy & Security.
 
 ### Windows
 
-1. Download `MHCOIN-Core-0.3.7.3-windows-x86_64.exe` (or the `.zip`).
+1. Download `MHCOIN-Core-0.4.1.7-windows-x86_64.exe` (or the `.zip`).
 2. Launch **MHCOIN Core**, sync from genesis, create/open a wallet.
 
 Wallet data defaults to `~/.mhcoin/mainnet/` (Windows: `%USERPROFILE%\.mhcoin\mainnet\`).
+
+Upgrading from **0.3.7.3**: open the same data folder once — storage migrates automatically (`utxo.sqlite` → `chainstate/`, blocks → `blk*.dat`). Keep a backup of `wallet.json` first.
 
 ## Mining
 
@@ -143,7 +147,8 @@ Peer discovery: hardcoded/DNS seeds, then ADDR gossip ([docs/DISCOVERY.md](docs/
 
 - [Consensus](docs/CONSENSUS.md) — frozen parameters & fingerprint
 - [Genesis](docs/GENESIS.md)
-- [Wallet](docs/WALLET.md)
+- [Storage](docs/STORAGE.md) — peers · flat blocks · LMDB chainstate
+- [Wallet](docs/WALLET.md) — BIP39 / BIP32 · `mhc1…`
 - [Node](docs/NODE.md)
 - [P2P protocol](docs/NETWORK_PROTOCOL.md)
 - [Desktop](docs/DESKTOP.md)
