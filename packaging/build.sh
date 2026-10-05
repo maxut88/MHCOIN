@@ -173,6 +173,11 @@ EOF
         mkdir -p "${APP}/Contents/Resources"
         cp "${ICNS}" "${APP}/Contents/Resources/mhcoin.icns"
       fi
+      # Normalize icon key: Apple wants basename without .icns
+      /usr/libexec/PlistBuddy -c "Set :CFBundleIconFile mhcoin" \
+        "${APP}/Contents/Info.plist" 2>/dev/null \
+        || /usr/libexec/PlistBuddy -c "Add :CFBundleIconFile string mhcoin" \
+          "${APP}/Contents/Info.plist" 2>/dev/null || true
       /usr/libexec/PlistBuddy -c "Add :LSMinimumSystemVersion string ${MACOS_MIN}" \
         "${APP}/Contents/Info.plist" 2>/dev/null \
         || /usr/libexec/PlistBuddy -c "Set :LSMinimumSystemVersion ${MACOS_MIN}" \

@@ -1,10 +1,12 @@
 #!/usr/bin/env python3
 """PyInstaller entrypoint for MHCOIN Core Desktop.
 
-Show a splash window before importing mhcoin.* (heavy crypto/chain). On macOS
-never pass icon= into webview.start — Dock uses the .app bundle icns, and
-icon= has crashed Cocoa builds (seen as “app never opens” in 0.4.1.5).
-Backend boot starts only after the UI loop is up (webview.start(func=...)).
+Show a splash window before importing mhcoin.* (heavy crypto/chain). Backend
+boot starts only after the UI loop is up (webview.start(func=...)).
+
+Dock / taskbar icon: same approach as 0.3.7.3 — pass icon= into webview.start
+when an mhcoin.icns/png is found. On failure, retry without icon so a bad path
+cannot leave the app with no window.
 """
 
 from __future__ import annotations
@@ -66,18 +68,34 @@ def _splash_html() -> str:
 
 
 def _find_app_icon() -> str | None:
-    """Non-macOS window icon. macOS Dock uses the .app bundle icns."""
+    """Locate MHCOIN Dock/window icon (prefer .icns on macOS — same as 0.3.7.3)."""
     if sys.platform == "darwin":
-        return None
-    names = ("mhcoin.png", "mhcoin-256.png", "mhcoin.ico", "mhcoin.icns")
+        names = ("mhcoin.icns", "mhcoin.png", "mhcoin-256.png")
+    elif sys.platform == "win32":
+        names = ("mhcoin.ico", "mhcoin.png", "mhcoin-256.png")
+    else:
+        names = ("mhcoin.png", "mhcoin-256.png", "mhcoin.ico", "mhcoin.icns")
+
     bases: list[Path] = []
     if getattr(sys, "frozen", False):
         meipass = getattr(sys, "_MEIPASS", None)
         if meipass:
-            bases.append(Path(meipass))
-            bases.append(Path(meipass) / "mhcoin" / "desktop" / "assets")
+            bases.extend(
+                [
+                    Path(meipass) / "mhcoin" / "desktop" / "assets",
+                    Path(meipass) / "assets",
+                    Path(meipass),
+                ]
+            )
         exe = Path(sys.executable).resolve()
-        bases.extend([exe.parent, exe.parent / "assets"])
+        bases.extend(
+            [
+                exe.parent / "mhcoin" / "desktop" / "assets",
+                exe.parent / "assets",
+                exe.parent,
+                exe.parent.parent / "Resources",
+            ]
+        )
     here = Path(__file__).resolve()
     bases.extend(
         [
@@ -234,16 +252,25 @@ def _run_with_early_splash() -> None:
                 pass
 
     def _after_ui_ready() -> None:
-        # UI loop is up — safe to import native/mhcoin modules off the GUI thread.
         threading.Thread(target=_boot_backend, name="mhcoin-boot", daemon=True).start()
 
-    start_kwargs: dict[str, Any] = {"func": _after_ui_ready}
     icon = _find_app_icon()
+    start_kwargs: dict[str, Any] = {"func": _after_ui_ready}
     if icon:
         start_kwargs["icon"] = icon
 
     try:
-        webview.start(**start_kwargs)
+        try:
+            webview.start(**start_kwargs)
+        except Exception as e:  # noqa: BLE001
+            if "icon" in start_kwargs:
+                print(
+                    f"webview.start(icon=) failed ({e}); retrying without icon",
+                    file=sys.stderr,
+                )
+                webview.start(func=_after_ui_ready)
+            else:
+                raise
     finally:
         cleanup = boot.get("cleanup")
         if callable(cleanup):

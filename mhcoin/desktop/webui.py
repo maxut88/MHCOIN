@@ -286,12 +286,19 @@ def _open_native_window(url: str, state: Any | None = None) -> tuple[bool, str]:
         except Exception:
             pass
 
-        # macOS Dock icon comes from the .app bundle icns. Passing icon= into
-        # webview.start has crashed some Cocoa / pywebview builds (0.4.1.5).
-        if icon and sys.platform != "darwin":
-            webview.start(icon=icon)
-        else:
-            webview.start()
+        # Same as 0.3.7.3: pass icon= so Dock/taskbar show MHCOIN (not Python).
+        # If Cocoa rejects the path, fall back without icon rather than crash.
+        try:
+            if icon:
+                webview.start(icon=icon)
+            else:
+                webview.start()
+        except Exception as e:  # noqa: BLE001
+            if icon:
+                print(f"webview.start(icon=) failed ({e}); retrying without icon", file=sys.stderr)
+                webview.start()
+            else:
+                raise
         return True, "quit" if _GUI.get("allow_quit") else "native window closed"
     except Exception as e:  # noqa: BLE001 — surface any GUI backend failure
         return False, f"pywebview failed: {type(e).__name__}: {e}"
@@ -3062,11 +3069,18 @@ def run_web_desktop(network: str | None = None, port: int | None = None) -> None
 
     try:
         icon = _app_icon_path()
-        # See _open_native_window: never pass icon= on darwin.
-        if icon and sys.platform != "darwin":
-            webview.start(icon=icon)
-        else:
-            webview.start()
+        # Match 0.3.7.3 Dock branding; fall back if icon= is rejected.
+        try:
+            if icon:
+                webview.start(icon=icon)
+            else:
+                webview.start()
+        except Exception as e:  # noqa: BLE001
+            if icon:
+                print(f"webview.start(icon=) failed ({e}); retrying without icon", file=sys.stderr)
+                webview.start()
+            else:
+                raise
     finally:
         httpd = boot.get("httpd")
         state = boot.get("state")
