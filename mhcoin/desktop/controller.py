@@ -88,8 +88,6 @@ class CoreController:
         self._blocks_found = 0
         self._rewards_sats = 0
         self._hashrate = 0.0
-        self._hashrate_ema = 0.0
-        self._hashrate_sample_t0 = 0.0
         self._node: NodeRuntime | None = None
         self._node_thread: threading.Thread | None = None
         self._last_txid: str | None = None
@@ -457,6 +455,8 @@ class CoreController:
                     "wallet_id": rec.wallet_id,
                     "label": rec.label,
                     "address": rec.address,
+                    "path": rec.derivation_path,
+                    "account_id": rec.account_id,
                     "public_key_fp": hashlib.sha256(bytes.fromhex(rec.public_key_hex)).hexdigest()[
                         :16
                     ],
@@ -464,22 +464,63 @@ class CoreController:
             )
         return rows
 
+    def list_receive_addresses(self) -> list[dict]:
+        return Wallet(self.paths).list_receive_addresses()
+
+    def new_receive_address(self) -> dict[str, str]:
+        """Derive next HD receive address; requires unlocked BIP39 wallet."""
+        if not self._password:
+            raise WalletError("unlock wallet first")
+        created = Wallet(self.paths, password=self._password).new_receive_address(
+            password=self._password,
+            make_default=True,
+        )
+        self._reset_session_wallet_stats()
+        self._refresh_balance_cache(created.address)
+        self._invalidate_history_cache()
+        return {
+            "address": created.address,
+            "wallet_id": created.wallet_id,
+            "path": created.derivation_path or "",
+        }
+
     def select_wallet(self, wallet_id: str) -> str:
         if self._mining:
             self.stop_mining()
-        w = Wallet(self.paths)
+        pwd = self._password
+        w = Wallet(self.paths, password=pwd)
         w.set_default_wallet_id(wallet_id)
-        self._password = None  # require unlock for the newly selected wallet
         self._reset_session_wallet_stats()
+        # Same-session switch (Receive multi-address): keep unlock if password known.
+        if pwd:
+            try:
+                addr = w.unlock_with_password(pwd, wallet_id=wallet_id)
+                self._password = pwd
+                self._refresh_balance_cache(addr)
+                return addr
+            except WalletError:
+                self._password = None
+                raise
+        self._password = None  # require unlock for Settings-style wallet switch
         return w.default_address()
 
     def select_wallet_by_address(self, address: str) -> str:
         if self._mining:
             self.stop_mining()
-        w = Wallet(self.paths)
-        w.set_default_by_address(address)
-        self._password = None
+        pwd = self._password
+        w = Wallet(self.paths, password=pwd)
+        wid = w.set_default_by_address(address)
         self._reset_session_wallet_stats()
+        if pwd:
+            try:
+                addr = w.unlock_with_password(pwd, wallet_id=wid)
+                self._password = pwd
+                self._refresh_balance_cache(addr)
+                return addr
+            except WalletError:
+                self._password = None
+                raise
+        self._password = None
         return w.default_address()
 
     def default_address(self) -> str:
@@ -1554,46 +1595,11 @@ class CoreController:
         except Exception:
             pass
 
-    def _update_hashrate(self, hps: float, *, sample_t0: float) -> float:
-        """Smooth Desktop hashrate for UI + STATUS (reject early / spike samples).
-
-        Early PoW ticks after a tip rebuild can look like tens of kH/s for a
-        fraction of a second; broadcasting those inflated peers' H/S column.
-        """
-        try:
-            raw = float(hps or 0.0)
-        except (TypeError, ValueError):
-            raw = 0.0
-        if raw <= 0:
-            return float(self._hashrate or 0.0)
-        elapsed = max(0.0, time.time() - float(sample_t0 or 0.0))
-        # Need a real sample window before trusting the rate.
-        if elapsed < 2.0:
-            return float(self._hashrate or 0.0)
-        prev = float(getattr(self, "_hashrate_ema", 0.0) or 0.0)
-        # Cap absurd jumps (timer glitches / bad progress callbacks).
-        if prev > 0 and raw > max(prev * 6.0, prev + 5_000.0):
-            raw = prev
-        # Desktop solo CPU mining is typically < 5 kH/s per process today.
-        if raw > 50_000:
-            raw = prev if prev > 0 else min(raw, 50_000.0)
-        ema = raw if prev <= 0 else (0.80 * prev + 0.20 * raw)
-        self._hashrate_ema = ema
-        self._hashrate = ema
-        return ema
-
     def _broadcast_miner_status(self, *, force: bool = False) -> None:
         """Advise peers of local mining hashrate (STATUS). Throttled ~10s."""
         now = time.time()
         last = float(getattr(self, "_status_last_broadcast", 0.0) or 0.0)
         if not force and (now - last) < 10.0:
-            return
-        # Do not advertise until EMA has a stable sample.
-        if (
-            self._mining
-            and float(getattr(self, "_hashrate_ema", 0.0) or 0.0) <= 0
-            and not force
-        ):
             return
         rt = self._node
         if rt is None or getattr(rt, "_stopped", False):
@@ -1681,7 +1687,6 @@ class CoreController:
         self._mine_intensity = 100
         self._mine_workers = 1
         self._hashrate = 0.0
-        self._hashrate_ema = 0.0
         self._start_caffeine()
         self._mine_log_line(f"MHCOIN Live Miner · {self.network}")
         self._mine_log_line(f"reward  {reward_addr}")
@@ -1745,15 +1750,16 @@ class CoreController:
                         def _prog(nonce: int, _h: bytes, hps: float) -> None:
                             if self._miner_stop.is_set():
                                 return
-                            shown = self._update_hashrate(hps, sample_t0=t0)
+                            # 0.4.1.10-style: live measured H/s (no 50k cap / EMA lag).
+                            self._hashrate = float(hps or 0.0)
                             self._broadcast_miner_status()
                             now = time.time()
                             if now - self._mine_log_last_prog >= 0.5:
                                 self._mine_log_last_prog = now
                                 rate = (
-                                    f"{shown/1000:.1f} kH/s"
-                                    if shown >= 1000
-                                    else f"{shown:,.0f} H/s"
+                                    f"{hps/1000:.1f} kH/s"
+                                    if hps >= 1000
+                                    else f"{hps:,.0f} H/s"
                                 )
                                 self._mine_log_line(
                                     f"· height {height}  nonce {nonce:,}  {rate}"
@@ -1879,7 +1885,6 @@ class CoreController:
                 self._mining = False
                 self._mine_stopping = False
                 self._hashrate = 0.0
-                self._hashrate_ema = 0.0
                 self._miner_reconfigure.clear()
                 self._stop_caffeine()
                 self._broadcast_miner_status(force=True)

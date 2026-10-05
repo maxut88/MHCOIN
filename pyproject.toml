@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "mhcoin"
-version = "0.4.1.11"
+version = "0.4.1.12"
 description = "MHCOIN (MHC) — independent Proof-of-Work blockchain"
 readme = "README.md"
 requires-python = ">=3.9"

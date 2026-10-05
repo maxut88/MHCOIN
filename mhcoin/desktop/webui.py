@@ -2102,20 +2102,68 @@ async function render(pre){
     $("histReload").onclick = () => { $("histBox").dataset.fp=""; fill(); };
     fill();
   } else if (active === "Receive") {
+    const addrs = (s.receive_addrs || []).length ? s.receive_addrs : [{
+      address: s.address||"", wallet_id: "", path: "", index: 0, is_default: true, label: "default"
+    }];
+    const listHtml = addrs.map((a,i) => {
+      const path = a.path || (a.index!=null ? ("m/84'/0'/0'/0/"+a.index) : "");
+      const mark = a.is_default || a.address===s.address ? " · active" : "";
+      const lab = a.label || ("receive #"+(a.index!=null?a.index:i));
+      return `<div class="card" style="padding:12px;margin-bottom:10px">
+        <div class="sub">${esc(lab)}${mark}${path?(" · "+esc(path)):""}</div>
+        <textarea id="recvAddr${i}" rows="2" readonly class="mono" style="user-select:text;-webkit-user-select:text;cursor:text">${esc(a.address||"")}</textarea>
+        <div class="row">
+          <button class="primary copyRecv" data-addr="${esc(a.address||"")}">Copy</button>
+          ${a.address===s.address ? "" : `<button class="useRecv" data-wid="${esc(a.wallet_id||"")}" data-addr="${esc(a.address||"")}">Use</button>`}
+        </div>
+      </div>`;
+    }).join("");
     p.innerHTML = `
       <h2>Receive MHCOIN</h2>
-      <p class="sub">Share this address to receive MHC.</p>
-      <textarea id="addr" rows="3" readonly class="mono">${s.address||""}</textarea>
-      <div class="row"><button class="primary" id="copyBtn">Copy Address</button></div>
+      <p class="sub">Share an address to receive MHC. HD wallets can create more receive addresses (same seed).</p>
+      ${listHtml || `<textarea id="addr" rows="3" readonly class="mono">${s.address||""}</textarea>
+      <div class="row"><button class="primary" id="copyBtn">Copy Address</button></div>`}
+      <div class="row">
+        <button class="primary" id="newRecv" ${s.unlocked?"":"disabled"}>${s.unlocked?"New address":"Unlock to create address"}</button>
+      </div>
+      <p class="sub">New address uses the next path <span class="mono">m/84'/0'/0'/0/n</span>. Imported single-key wallets cannot derive more.</p>
       <h3>Received</h3>
-      <p class="sub">Incoming transfers + block rewards (mining) for this wallet</p>
-      <div id="recvList" class="act-list" style="max-height:42vh;overflow:auto"><p class="sub">Loading…</p></div>
+      <p class="sub">Incoming transfers + block rewards for the <b>active</b> address</p>
+      <div id="recvList" class="act-list" style="max-height:36vh;overflow:auto"><p class="sub">Loading…</p></div>
       <div class="row"><button class="sm" id="recvReload">Reload</button></div>`;
-    $("copyBtn").onclick = async () => {
-      try { await navigator.clipboard.writeText(s.address||""); flash("Address copied"); }
-      catch(e){ $("addr").select(); document.execCommand("copy"); flash("Address copied"); }
-    };
-    // Include mined: coinbase rewards are income (were only on Mining/History before).
+    document.querySelectorAll(".copyRecv").forEach(btn => {
+      btn.onclick = async () => {
+        const a = btn.getAttribute("data-addr") || "";
+        try { await navigator.clipboard.writeText(a); flash("Address copied"); }
+        catch(e){ flash("Copy failed", false); }
+      };
+    });
+    document.querySelectorAll(".useRecv").forEach(btn => {
+      btn.onclick = async () => {
+        try {
+          const wid = btn.getAttribute("data-wid") || "";
+          if (wid) await api("wallet/select", {wallet_id: wid});
+          else await api("wallet/select", {address: btn.getAttribute("data-addr")||""});
+          flash("Active receive address updated");
+          render();
+        } catch(e){ flash(e.message, false); }
+      };
+    });
+    if ($("copyBtn")) {
+      $("copyBtn").onclick = async () => {
+        try { await navigator.clipboard.writeText(s.address||""); flash("Address copied"); }
+        catch(e){ $("addr").select(); document.execCommand("copy"); flash("Address copied"); }
+      };
+    }
+    if ($("newRecv")) {
+      $("newRecv").onclick = async () => {
+        try {
+          const j = await api("wallet/new-address", {});
+          flash("New address: "+(j.address||"").slice(0,18)+"…");
+          render();
+        } catch(e){ flash(e.message, false); }
+      };
+    }
     const loadRecv = () => fillTxList(
       "recvList",
       ["received", "mined"],
@@ -2597,6 +2645,9 @@ class DesktopState:
             "wallet_path": str(c.wallet_file_path()),
             "txs": txs,
             "wallets": c.list_wallets() if c.wallet_exists() else [],
+            "receive_addrs": (
+                c.list_receive_addresses() if unlocked and c.wallet_exists() else []
+            ),
             "last_txid": c.last_txid(),
             "chain_error": info.get("chain_error"),
         }
@@ -2758,7 +2809,28 @@ def make_handler(state: DesktopState):
                         selected = c.select_wallet_by_address(addr)
                     else:
                         raise WalletError("wallet_id or address required")
-                    return {"ok": True, "address": selected}
+                    return {
+                        "ok": True,
+                        "address": selected,
+                        "receive_addrs": c.list_receive_addresses(),
+                        "wallets": c.list_wallets(),
+                    }
+                if path == "/api/wallet/new-address":
+                    created = c.new_receive_address()
+                    return {
+                        "ok": True,
+                        "address": created["address"],
+                        "wallet_id": created["wallet_id"],
+                        "path": created.get("path") or "",
+                        "receive_addrs": c.list_receive_addresses(),
+                        "wallets": c.list_wallets(),
+                    }
+                if path == "/api/wallet/addresses":
+                    return {
+                        "ok": True,
+                        "receive_addrs": c.list_receive_addresses(),
+                        "active": c.default_address(),
+                    }
                 if path == "/api/wallet/backup":
                     return c.backup_wallet()
                 if path == "/api/network/switch":

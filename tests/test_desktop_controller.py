@@ -65,3 +65,23 @@ def test_desktop_create_and_restore_seed(tmp_path: Path, monkeypatch):
     assert restored == addr
     assert ctrl2.export_seed("seed-pass-2") == seed
     ctrl2.shutdown()
+
+
+def test_desktop_multi_receive_keeps_unlock(tmp_path: Path, monkeypatch):
+    monkeypatch.setenv("MHCOIN_NETWORK", "localnet")
+    ctrl = CoreController(network="localnet", data_dir=tmp_path)
+    created = ctrl.create_hd_wallet("multi-pass")
+    root = created["address"]
+    ctrl.unlock("multi-pass")
+    nxt = ctrl.new_receive_address()
+    assert nxt["path"] == "m/84'/0'/0'/0/1"
+    assert nxt["address"] != root
+    assert ctrl.default_address() == nxt["address"]
+    rows = ctrl.list_receive_addresses()
+    assert len(rows) == 2
+    # Switch back to root without clearing session unlock.
+    back = ctrl.select_wallet_by_address(root)
+    assert back == root
+    assert ctrl._password == "multi-pass"
+    assert ctrl.default_address() == root
+    ctrl.shutdown()

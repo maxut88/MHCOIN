@@ -31,6 +31,8 @@ class WalletRecord:
     # Optional Bitcoin-style recovery metadata (older wallet.json omit these).
     derivation_path: str | None = None
     encrypted_mnemonic: str | None = None
+    # HD account grouping: root wallet_id shared by receive addresses.
+    account_id: str | None = None
 
 
 @dataclass

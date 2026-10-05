@@ -13,7 +13,7 @@ New wallets use **BIP39** + **BIP32**:
 ```
 BIP39 mnemonic (12 or 24 English words)
     → PBKDF2 seed (64 bytes)
-    → BIP32 path m/84'/0'/0'/0/0
+    → BIP32 path m/84'/0'/0'/0/n   (n = 0, 1, 2, … external receive)
     → secp256k1 private key (32 bytes)
     → compressed public key (33 bytes)
     → HASH160(pubkey)
@@ -21,8 +21,9 @@ BIP39 mnemonic (12 or 24 English words)
     → MHC address
 ```
 
-The path follows BIP84’s “first native-segwit receive address” convention so recovery
-matches common Bitcoin HD layouts; MHCOIN still encodes **`mhc1…`** addresses.
+The path follows BIP84’s external receive chain so recovery matches common Bitcoin HD
+layouts; MHCOIN still encodes **`mhc1…`** addresses. Desktop **Receive → New address**
+derives the next unused `n` under the same account (`account_id` in `wallet.json`).
 
 You can also **import** a raw key:
 
@@ -75,5 +76,11 @@ Welcome / Settings:
 - **Restore from Seed** — enter 12/24 BIP39 words + password
 - **Show Recovery Seed** (Settings) — reveal stored mnemonic (password required)
 - Unlock / Backup still use encrypted `wallet.json` + password
+
+**Receive** tab:
+
+- Lists HD receive addresses for the active account
+- **New address** — next `m/84'/0'/0'/0/n` (wallet must be unlocked; seed required)
+- **Use** — make that address active for balance / mining / send (keeps session unlock)
 
 Same data directory as CLI (`~/.mhcoin/<network>/`).

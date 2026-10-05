@@ -23,8 +23,18 @@ _N = 0xFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFEBAAEDCE6AF48A03BBFD25E8CD0364141
 # BIP84-style path for the first external address (coin_type 0' = BTC mainnet
 # slot; MHCOIN reuses the path convention so tools/docs stay familiar).
 DEFAULT_DERIVATION_PATH = "m/84'/0'/0'/0/0"
+# External (receive) chain base — index N → m/84'/0'/0'/0/N
+EXTERNAL_RECEIVE_BASE = "m/84'/0'/0'/0"
 
 HARDENED = 0x80000000
+
+
+def receive_path(index: int = 0) -> str:
+    """BIP84 external receive path ``m/84'/0'/0'/0/{index}``."""
+    i = int(index)
+    if i < 0 or i >= HARDENED:
+        raise ValueError("receive index out of range")
+    return f"{EXTERNAL_RECEIVE_BASE}/{i}"
 
 
 def _hmac_sha512(key: bytes, data: bytes) -> bytes:

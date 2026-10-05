@@ -189,8 +189,6 @@ class SoloMiner:
         self._live = (not offline) and bool(seeds)
         self._local = None
         self._hashrate = 0.0
-        self._hashrate_ema = 0.0
-        self._mine_slice_t0 = 0.0
         self._status_last_broadcast = 0.0
         if not self._live:
             self._local = LocalNode(self.data_dir, hrp=hrp, network=params.name)
@@ -329,27 +327,6 @@ class SoloMiner:
                 flush=True,
             )
 
-    def _update_hashrate(self, hps: float, *, sample_t0: float) -> float:
-        """Smooth STATUS/UI hashrate; ignore early noisy samples after tip rebuild."""
-        try:
-            raw = float(hps or 0.0)
-        except (TypeError, ValueError):
-            raw = 0.0
-        if raw <= 0:
-            return float(self._hashrate or 0.0)
-        elapsed = max(0.0, time.time() - float(sample_t0 or 0.0))
-        if elapsed < 2.0:
-            return float(self._hashrate or 0.0)
-        prev = float(getattr(self, "_hashrate_ema", 0.0) or 0.0)
-        if prev > 0 and raw > max(prev * 6.0, prev + 5_000.0):
-            raw = prev
-        if raw > 50_000:
-            raw = prev if prev > 0 else min(raw, 50_000.0)
-        ema = raw if prev <= 0 else (0.80 * prev + 0.20 * raw)
-        self._hashrate_ema = ema
-        self._hashrate = ema
-        return ema
-
     def _broadcast_miner_status(self, *, force: bool = False, mining: bool | None = None) -> None:
         """Advise peers of terminal mining hashrate (STATUS). Throttled ~10s."""
         if not self._live or self._rt is None:
@@ -358,8 +335,6 @@ class SoloMiner:
         if not force and (now - float(self._status_last_broadcast or 0.0)) < 10.0:
             return
         is_mining = (not self._stop) if mining is None else bool(mining)
-        if is_mining and float(getattr(self, "_hashrate_ema", 0.0) or 0.0) <= 0 and not force:
-            return
         rt = self._rt
         if getattr(rt, "_stopped", False):
             return
@@ -468,15 +443,15 @@ class SoloMiner:
             raise
         parent = block.header.previous_block_hash
         epoch0 = int(rt.chain.tip_epoch)
-        slice_t0 = time.time()
 
         def _progress(nonce: int, _h: bytes, hps: float) -> None:
             if self._stop:
                 raise KeyboardInterrupt("stop requested")
-            shown = self._update_hashrate(hps, sample_t0=slice_t0)
+            # 0.4.1.10-style: live measured H/s (no 50k cap / EMA lag).
+            self._hashrate = float(hps or 0.0)
             self._broadcast_miner_status()
             if nonce > 0 and nonce % 500_000 == 0:
-                print(format_mine_progress(height=height, nonce=nonce, hps=shown), flush=True)
+                print(format_mine_progress(height=height, nonce=nonce, hps=hps), flush=True)
 
         def _abort() -> bool:
             if self._stop or getattr(rt, "_stopped", False):

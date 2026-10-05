@@ -77,9 +77,10 @@ Today mainnet ships with a **small** hardcoded seed list. More independent seeds
 
 ## Wallet addresses (today)
 
-- New wallets: BIP39 + path **`m/84'/0'/0'/0/0`** → one receive `mhc1…`.
-- Desktop: Create / Restore / Show seed / file backup — **done**.
-- Multiple receive addresses (`…/0/1`, `…/0/2`, …) — **not in UI yet** (single active address).
+- New wallets: BIP39 + path **`m/84'/0'/0'/0/0`** → first receive `mhc1…`.
+- Desktop **Receive** → **New address** derives the next unused path `m/84'/0'/0'/0/n` (same seed). **Use** sets the active receive address without locking the wallet.
+- Imported single-key wallets cannot derive more addresses (no BIP39 seed).
+- Create / Restore / Show seed / file backup — **done**.
 
 ---
 

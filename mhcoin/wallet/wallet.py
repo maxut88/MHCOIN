@@ -23,7 +23,7 @@ from mhcoin.wallet.bip39 import (
     normalize_mnemonic,
     validate_mnemonic,
 )
-from mhcoin.wallet.hd import DEFAULT_DERIVATION_PATH, derive_private_key
+from mhcoin.wallet.hd import DEFAULT_DERIVATION_PATH, derive_private_key, receive_path
 from mhcoin.wallet.send import SendResult, build_send_tx, parse_amount_mhc
 from mhcoin.wallet.storage import (
     DEFAULT_SCRYPT_N,
@@ -106,6 +106,8 @@ class Wallet:
             make_default=make_default,
             mnemonic=mnemonic,
             derivation_path=DEFAULT_DERIVATION_PATH,
+            account_id=None,  # set to wallet_id after id is known
+            use_wallet_id_as_account=True,
         )
 
     def restore_from_mnemonic(
@@ -137,6 +139,8 @@ class Wallet:
             make_default=make_default,
             mnemonic=words,
             derivation_path=path,
+            account_id=None,
+            use_wallet_id_as_account=True,
         )
 
     def import_private_key(
@@ -162,6 +166,8 @@ class Wallet:
             make_default=make_default,
             mnemonic=None,
             derivation_path=None,
+            account_id=None,
+            use_wallet_id_as_account=False,
         )
 
     def export_wif(self, *, password: str | None = None, wallet_id: str | None = None) -> str:
@@ -189,12 +195,22 @@ class Wallet:
             rec = self._default_record()
         if rec is None:
             raise WalletError("unknown wallet id")
-        if not rec.encrypted_mnemonic:
+        # Derived receive addresses keep account_id of the HD root (where mnemonic lives).
+        root = rec
+        if not root.encrypted_mnemonic and root.account_id:
+            root = next(
+                (w for w in wf.wallets if w.wallet_id == root.account_id and w.encrypted_mnemonic),
+                None,
+            ) or next(
+                (w for w in wf.wallets if w.account_id == rec.account_id and w.encrypted_mnemonic),
+                None,
+            )
+        if root is None or not root.encrypted_mnemonic:
             raise WalletError("this wallet has no stored mnemonic (imported key only)")
         kdf = wf.kdf
         try:
             raw = decrypt_private_key(
-                rec.encrypted_mnemonic,
+                root.encrypted_mnemonic,
                 pwd,
                 n=int(kdf["n"]),
                 r=int(kdf["r"]),
@@ -216,6 +232,8 @@ class Wallet:
         make_default: bool,
         mnemonic: str | None,
         derivation_path: str | None,
+        account_id: str | None = None,
+        use_wallet_id_as_account: bool = False,
     ) -> WalletCreateResult:
         pub = private_key_to_public_key(private_key, compressed=True)
         address = pubkey_to_address(pub, hrp=self.paths.hrp)
@@ -226,6 +244,7 @@ class Wallet:
                 if w.address == address or w.public_key_hex == pub.hex():
                     raise WalletError(f"key already in wallet ({address})")
         wallet_id = uuid.uuid4().hex[:16]
+        acc = wallet_id if use_wallet_id_as_account else account_id
         n, r, p = DEFAULT_SCRYPT_N, DEFAULT_SCRYPT_R, DEFAULT_SCRYPT_P
         enc, _ = encrypt_private_key(private_key, password, n=n, r=r, p=p)
         enc_mnemonic = None
@@ -246,6 +265,7 @@ class Wallet:
             created_at=datetime.now(timezone.utc).isoformat(),
             derivation_path=derivation_path,
             encrypted_mnemonic=enc_mnemonic,
+            account_id=acc,
         )
         wf = existing
         if wf is None:
@@ -273,6 +293,123 @@ class Wallet:
             mnemonic=normalize_mnemonic(mnemonic) if mnemonic else None,
             derivation_path=derivation_path,
             wif=encode_wif(private_key, compressed=True),
+        )
+
+    def _account_id_for(self, rec: WalletRecord) -> str:
+        return rec.account_id or rec.wallet_id
+
+    def _parse_receive_index(self, path: str | None) -> int | None:
+        if not path:
+            return None
+        prefix = "m/84'/0'/0'/0/"
+        if not path.startswith(prefix):
+            return None
+        tail = path[len(prefix) :]
+        if not tail.isdigit():
+            return None
+        return int(tail)
+
+    def list_receive_addresses(self, *, wallet_id: str | None = None) -> list[dict]:
+        """List HD receive addresses for the active (or given) account."""
+        wf = load_wallet_file(self.paths.wallet_file)
+        if not wf or not wf.wallets:
+            return []
+        if wallet_id:
+            rec = next((w for w in wf.wallets if w.wallet_id == wallet_id), None)
+            if rec is None:
+                raise WalletError("unknown wallet id")
+        else:
+            rec = self._default_record()
+        acc = self._account_id_for(rec)
+        rows: list[dict] = []
+        for w in wf.wallets:
+            if self._account_id_for(w) != acc:
+                continue
+            # Imported keys (no path) still show as a single entry.
+            idx = self._parse_receive_index(w.derivation_path)
+            rows.append(
+                {
+                    "wallet_id": w.wallet_id,
+                    "address": w.address,
+                    "label": w.label,
+                    "path": w.derivation_path,
+                    "index": idx,
+                    "is_default": w.wallet_id == (wf.default_wallet_id or ""),
+                    "has_seed": bool(w.encrypted_mnemonic)
+                    or any(
+                        x.wallet_id == acc and x.encrypted_mnemonic for x in wf.wallets
+                    ),
+                }
+            )
+        rows.sort(key=lambda r: (r["index"] is None, r["index"] if r["index"] is not None else 0))
+        return rows
+
+    def new_receive_address(
+        self,
+        *,
+        password: str | None = None,
+        make_default: bool = True,
+    ) -> WalletCreateResult:
+        """Derive the next unused receive address for the active HD account.
+
+        Requires a BIP39 mnemonic on the account root. Imported single-key
+        wallets cannot create more addresses.
+        """
+        pwd = password or self._password
+        if not pwd:
+            raise WalletError("password required")
+        wf = load_wallet_file(self.paths.wallet_file)
+        if not wf or not wf.wallets:
+            raise WalletError("no wallet found")
+        active = self._default_record()
+        acc = self._account_id_for(active)
+        root = next(
+            (w for w in wf.wallets if w.wallet_id == acc and w.encrypted_mnemonic),
+            None,
+        )
+        if root is None:
+            root = next(
+                (w for w in wf.wallets if self._account_id_for(w) == acc and w.encrypted_mnemonic),
+                None,
+            )
+        if root is None or not root.encrypted_mnemonic:
+            raise WalletError(
+                "cannot derive addresses — this wallet has no BIP39 seed "
+                "(imported key only). Create/restore from seed to use multi-address."
+            )
+        # Backfill account_id on pre-multi-address HD roots.
+        if not root.account_id:
+            root.account_id = root.wallet_id
+            save_wallet_file(self.paths.wallet_file, wf)
+            acc = root.wallet_id
+        words = self.export_mnemonic(password=pwd, wallet_id=root.wallet_id)
+        used: set[int] = set()
+        for w in wf.wallets:
+            if self._account_id_for(w) != acc:
+                continue
+            idx = self._parse_receive_index(w.derivation_path)
+            if idx is not None:
+                used.add(idx)
+        next_i = 0
+        while next_i in used:
+            next_i += 1
+            if next_i > 100_000:
+                raise WalletError("receive index exhausted")
+        path = receive_path(next_i)
+        try:
+            seed = mnemonic_to_seed(words)
+            priv = derive_private_key(seed, path)
+        except ValueError as e:
+            raise WalletError(str(e)) from e
+        return self._persist_key(
+            private_key=priv,
+            password=pwd,
+            label=f"receive #{next_i}",
+            make_default=make_default,
+            mnemonic=None,
+            derivation_path=path,
+            account_id=acc,
+            use_wallet_id_as_account=False,
         )
 
     def set_default_wallet_id(self, wallet_id: str) -> None:
