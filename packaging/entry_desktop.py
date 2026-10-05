@@ -11,6 +11,7 @@ from __future__ import annotations
 import os
 import sys
 import threading
+from pathlib import Path
 
 
 def _prepare_env() -> None:
@@ -63,13 +64,42 @@ def _splash_html(version: str = "") -> str:
 """
 
 
-def _want_browser() -> bool:
-    return os.environ.get("MHCOIN_DESKTOP_BROWSER", "").strip().lower() in (
-        "1",
-        "true",
-        "yes",
-        "browser",
+def _find_app_icon() -> str | None:
+    """Locate mhcoin.icns/png without importing mhcoin (keeps splash fast)."""
+    names = (
+        ("mhcoin.icns", "mhcoin.png", "mhcoin-256.png")
+        if sys.platform == "darwin"
+        else ("mhcoin.png", "mhcoin-256.png", "mhcoin.ico", "mhcoin.icns")
     )
+    bases: list[Path] = []
+    if getattr(sys, "frozen", False):
+        meipass = getattr(sys, "_MEIPASS", None)
+        if meipass:
+            bases.append(Path(meipass))
+            bases.append(Path(meipass) / "mhcoin" / "desktop" / "assets")
+        exe = Path(sys.executable).resolve()
+        bases.extend(
+            [
+                exe.parent,
+                exe.parent / "assets",
+                exe.parent.parent / "Resources",
+                exe.parent.parent / "Resources" / "assets",
+            ]
+        )
+    # Source / editable install
+    here = Path(__file__).resolve()
+    bases.extend(
+        [
+            here.parent / "icons",
+            here.parent.parent / "mhcoin" / "desktop" / "assets",
+        ]
+    )
+    for base in bases:
+        for name in names:
+            p = base / name
+            if p.is_file():
+                return str(p)
+    return None
 
 
 def _run_with_early_splash() -> None:
@@ -103,14 +133,13 @@ def _run_with_early_splash() -> None:
         finally:
             ready.set()
 
-    threading.Thread(target=prepare, name="mhcoin-boot", daemon=True).start()
-
     win_title = "MHCOIN Core"
     try:
         webview.settings["ALLOW_DOWNLOADS"] = True
     except Exception:
         pass
 
+    # Create the window FIRST — do not import mhcoin before this line.
     window = webview.create_window(
         win_title,
         html=_splash_html(),
@@ -120,6 +149,8 @@ def _run_with_early_splash() -> None:
         confirm_close=False,
         background_color="#0c1210",
     )
+    # Backend boot in parallel only after the splash window object exists.
+    threading.Thread(target=prepare, name="mhcoin-boot", daemon=True).start()
 
     def _force_quit() -> None:
         import time
@@ -192,7 +223,11 @@ def _run_with_early_splash() -> None:
         threading.Thread(target=navigate, daemon=True).start()
 
     try:
-        webview.start()
+        icon = _find_app_icon()
+        if icon:
+            webview.start(icon=icon)
+        else:
+            webview.start()
     finally:
         cleanup = boot.get("cleanup")
         if callable(cleanup):

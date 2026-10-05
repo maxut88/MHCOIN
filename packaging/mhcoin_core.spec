@@ -246,8 +246,8 @@ if sys.platform == "darwin":
         info_plist={
             "CFBundleName": "MHCOIN Core",
             "CFBundleDisplayName": "MHCOIN Core",
-            "CFBundleShortVersionString": "0.4.1.4",
-            "CFBundleVersion": "0.4.1.4",
+            "CFBundleShortVersionString": "0.4.1.5",
+            "CFBundleVersion": "0.4.1.5",
             "CFBundleIconFile": "mhcoin.icns",
             "NSHighResolutionCapable": True,
             "NSAppSleepDisabled": True,
