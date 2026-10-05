@@ -373,13 +373,28 @@ class CoreController:
             raise WalletError("password required")
         return Wallet(self.paths, password=pwd).export_mnemonic(password=pwd)
 
+    def export_xpub(self, password: str | None = None) -> str:
+        """Export BIP84 account xpub (m/84'/0'/0') for watch-only use."""
+        pwd = password or self._password
+        return Wallet(self.paths, password=pwd).export_account_xpub(password=pwd)
+
+    def import_xpub(self, xpub: str, *, label: str = "watch") -> str:
+        """Import account xpub as watch-only; returns first receive address."""
+        if self._mining:
+            self.stop_mining()
+        created = Wallet(self.paths).import_account_xpub(xpub, label=label)
+        self._password = None
+        self._reset_session_wallet_stats()
+        self._refresh_balance_cache(created.address)
+        return created.address
+
     def _invalidate_balance_cache(self) -> None:
         self._balance_cache_sats = 0
         self._balance_cache_valid = False
         self._balance_cache_height = -1
 
     def _refresh_balance_cache(self, address: str | None = None) -> None:
-        """Recompute balance cache for the active (or given) address.
+        """Recompute balance cache for the active HD account (all receive+change).
 
         Prefer live NodeRuntime UTXO while the P2P node owns the datadir.
         Must run on every UI poll — otherwise Overview freezes on a stale
@@ -391,7 +406,11 @@ class CoreController:
             self._invalidate_balance_cache()
             return
         try:
-            pkh = address_to_pubkey_hash(addr, hrp=self.hrp)
+            w = Wallet(self.paths)
+            pkhs = w.account_pubkey_hashes()
+            if not pkhs:
+                pkh = address_to_pubkey_hash(addr, hrp=self.hrp)
+                pkhs = {pkh}
         except Exception:
             self._invalidate_balance_cache()
             return
@@ -404,7 +423,6 @@ class CoreController:
         if live:
             assert rt is not None
             try:
-                # Occasional UTXO heal (rate-limited inside). Never every-poll rebuild.
                 try:
                     tip_now = rt.chain.tip_hash.hex() if rt.chain.tip_hash else ""
                     last_tip = str(getattr(self, "_balance_repair_tip", "") or "")
@@ -415,24 +433,35 @@ class CoreController:
                     logger.debug("live UTXO repair skipped", exc_info=True)
                 with rt.chain._lock:
                     height = int(rt.chain.height)
-                    self._balance_cache_sats = int(rt.chain.utxo.balance_for_pubkey_hash(pkh))
+                    if hasattr(rt.chain.utxo, "balance_for_pubkey_hashes"):
+                        self._balance_cache_sats = int(
+                            rt.chain.utxo.balance_for_pubkey_hashes(pkhs)
+                        )
+                    else:
+                        self._balance_cache_sats = sum(
+                            int(rt.chain.utxo.balance_for_pubkey_hash(p)) for p in pkhs
+                        )
                 self._tip_height_hint = max(0, height)
                 self._balance_cache_height = height
                 self._balance_cache_valid = True
                 return
             except Exception:
                 logger.debug("live balance refresh failed", exc_info=True)
-                # Keep last cache — never open LocalNode while NodeRuntime is up
-                # (second sqlite = SIGSEGV / window close on macOS).
                 return
         if self._mining or self._node is not None:
-            # Datadir owned by miner / P2P node — keep last cache if any.
             return
         try:
             with self._io:
                 node = self._get_local()
                 height = int(node.chain.height)
-                self._balance_cache_sats = int(node.chain.utxo.balance_for_pubkey_hash(pkh))
+                if hasattr(node.chain.utxo, "balance_for_pubkey_hashes"):
+                    self._balance_cache_sats = int(
+                        node.chain.utxo.balance_for_pubkey_hashes(pkhs)
+                    )
+                else:
+                    self._balance_cache_sats = sum(
+                        int(node.chain.utxo.balance_for_pubkey_hash(p)) for p in pkhs
+                    )
                 self._tip_height_hint = max(0, height)
                 self._balance_cache_height = height
                 self._balance_cache_valid = True
@@ -489,9 +518,15 @@ class CoreController:
             self.stop_mining()
         pwd = self._password
         w = Wallet(self.paths, password=pwd)
+        # Watch-only rows have no private key — switch default without unlock.
+        rec = next((r for r in w.list_wallets() if r.wallet_id == wallet_id), None)
+        if rec is not None and (getattr(rec, "watch_only", False) or not rec.encrypted_private_key):
+            w.set_default_wallet_id(wallet_id)
+            self._reset_session_wallet_stats()
+            self._refresh_balance_cache(rec.address)
+            return rec.address
         w.set_default_wallet_id(wallet_id)
         self._reset_session_wallet_stats()
-        # Same-session switch (Receive multi-address): keep unlock if password known.
         if pwd:
             try:
                 addr = w.unlock_with_password(pwd, wallet_id=wallet_id)
@@ -568,13 +603,18 @@ class CoreController:
 
     def balance_sats(self) -> int:
         try:
-            addr = self.default_address()
+            w = Wallet(self.paths)
+            pkhs = w.account_pubkey_hashes()
         except WalletError:
             return 0
-        pkh = address_to_pubkey_hash(addr, hrp=self.hrp)
+        if not pkhs:
+            return 0
         with self._io:
             node = self._get_local()
-            sats = int(node.chain.utxo.balance_for_pubkey_hash(pkh))
+            if hasattr(node.chain.utxo, "balance_for_pubkey_hashes"):
+                sats = int(node.chain.utxo.balance_for_pubkey_hashes(pkhs))
+            else:
+                sats = sum(int(node.chain.utxo.balance_for_pubkey_hash(p)) for p in pkhs)
             self._balance_cache_sats = sats
             self._balance_cache_valid = True
             return sats
@@ -1230,12 +1270,14 @@ class CoreController:
         return node.chain, list(node.mempool.list_txs()), None
 
     def wallet_history(self, limit: int = 2000, *, full_chain: bool = True) -> list[TxRow]:
-        """Activity for the *active* wallet only (cache keyed by that address)."""
+        """Activity for the active HD account (all receive + change addresses)."""
         try:
             addr = self.default_address()
+            pkhs = Wallet(self.paths).account_pubkey_hashes()
+            if not pkhs:
+                pkhs = {address_to_pubkey_hash(addr, hrp=self.hrp)}
         except WalletError:
             return []
-        pkh = address_to_pubkey_hash(addr, hrp=self.hrp)
 
         # Prefer node's chain (no second sqlite). Do NOT hold chain._lock for the
         # whole scan — that starved P2P on macOS and left History with only the
@@ -1253,7 +1295,7 @@ class CoreController:
             if h < 0:
                 # Fresh datadir (no genesis yet) — mark scan complete so unlock
                 # boot is not stuck on partial forever.
-                key = ("hist-v6-empty", addr, "", 0, True, int(limit))
+                key = ("hist-v7-empty", addr, "", 0, True, int(limit))
                 self._hist_key = key
                 self._hist_rows = []
                 try:
@@ -1262,8 +1304,9 @@ class CoreController:
                     pass
                 return []
             mem_n = len(mempool_txs)
-            # Per-address cache — switching wallets must not reuse the other history.
-            key = ("hist-v6", addr, tip, mem_n, bool(full_chain), int(limit))
+            # Account-scoped cache — switching accounts must not reuse history.
+            acc_fp = ",".join(sorted(p.hex() for p in pkhs))
+            key = ("hist-v7", acc_fp, tip, mem_n, bool(full_chain), int(limit))
             # Empty rows are a valid cache hit (wallet has no sends/receives yet).
             if self._hist_key == key:
                 return list(self._hist_rows or [])[:limit]
@@ -1285,7 +1328,7 @@ class CoreController:
 
             def _out_is_active(out) -> bool:
                 try:
-                    return out.pubkey_hash() == pkh
+                    return out.pubkey_hash() in pkhs
                 except Exception:
                     return False
 

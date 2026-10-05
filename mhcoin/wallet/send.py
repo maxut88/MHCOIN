@@ -20,6 +20,7 @@ class SendResult:
     fee: int
     change: int
     status: str = "local / unbroadcast"
+    change_pubkey_hash: bytes | None = None
 
 
 def parse_amount_mhc(text: str) -> int:
@@ -73,13 +74,43 @@ def build_send_tx(
     fee_sats: int = DEFAULT_FEE_SATOSHIS,
     hrp: str = DEFAULT_ADDRESS_HRP,
     exclude_outpoints: set[str] | None = None,
+    change_pubkey_hash: bytes | None = None,
 ) -> SendResult:
+    """Single-key send (legacy). Change defaults to the spending address."""
+    return build_account_send_tx(
+        utxo=utxo,
+        keys_by_pkh={from_pubkey_hash: (private_key, public_key)},
+        to_address=to_address,
+        amount_sats=amount_sats,
+        fee_sats=fee_sats,
+        change_pubkey_hash=change_pubkey_hash or from_pubkey_hash,
+        hrp=hrp,
+        exclude_outpoints=exclude_outpoints,
+    )
+
+
+def build_account_send_tx(
+    *,
+    utxo: UTXOSet,
+    keys_by_pkh: dict[bytes, tuple[bytes, bytes]],
+    to_address: str,
+    amount_sats: int,
+    fee_sats: int = DEFAULT_FEE_SATOSHIS,
+    change_pubkey_hash: bytes,
+    hrp: str = DEFAULT_ADDRESS_HRP,
+    exclude_outpoints: set[str] | None = None,
+) -> SendResult:
+    """Spend UTXOs from any account key; send change to ``change_pubkey_hash``."""
     if amount_sats <= 0:
         raise ValueError("amount must be positive")
     if fee_sats < 0:
         raise ValueError("fee must be non-negative")
+    if not keys_by_pkh:
+        raise ValueError("no signing keys")
     to_hash = address_to_pubkey_hash(to_address, hrp=hrp)
-    available = utxo.all_for_pubkey_hash(from_pubkey_hash)
+    available: list[UTXOEntry] = []
+    for pkh in keys_by_pkh:
+        available.extend(utxo.all_for_pubkey_hash(pkh))
     if exclude_outpoints:
         available = [e for e in available if e.outpoint.key() not in exclude_outpoints]
     need = amount_sats + fee_sats
@@ -94,15 +125,23 @@ def build_send_tx(
     ]
     outputs = [TxOut.p2pkh(amount_sats, to_hash)]
     if change > 0:
-        outputs.append(TxOut.p2pkh(change, from_pubkey_hash))
+        outputs.append(TxOut.p2pkh(change, change_pubkey_hash))
 
     tx = Transaction(inputs=inputs, outputs=outputs)
     for i, coin in enumerate(coins):
+        try:
+            pkh = coin.output.pubkey_hash()
+        except Exception as e:
+            raise ValueError("unsupported input script") from e
+        pair = keys_by_pkh.get(pkh)
+        if pair is None:
+            raise ValueError("missing key for selected coin")
+        priv, pub = pair
         sign_input(
             tx,
             i,
-            private_key,
-            public_key,
+            priv,
+            pub,
             coin.output.script_pubkey,
             coin.output.value,
         )
@@ -116,4 +155,5 @@ def build_send_tx(
         fee=fee,
         change=change,
         status="local / unbroadcast",
+        change_pubkey_hash=change_pubkey_hash if change > 0 else None,
     )

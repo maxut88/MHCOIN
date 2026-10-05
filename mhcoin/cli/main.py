@@ -110,6 +110,13 @@ def wallet_create(
     show_default=True,
     help="Make restored wallet the active default.",
 )
+@click.option(
+    "--gap-limit",
+    default=20,
+    show_default=True,
+    type=int,
+    help="BIP44-style gap limit for receive+change discovery.",
+)
 def wallet_restore(
     network: str | None,
     mnemonic: str | None,
@@ -117,6 +124,7 @@ def wallet_restore(
     label: str,
     password: str | None,
     activate: bool,
+    gap_limit: int,
 ) -> None:
     """Restore a wallet from BIP39 seed words (Bitcoin-style)."""
     paths = wallet_paths(network)
@@ -130,12 +138,16 @@ def wallet_restore(
             label=label,
             make_default=bool(activate),
             passphrase=passphrase or "",
+            gap_limit=int(gap_limit),
         )
     except WalletError as e:
         raise click.ClickException(str(e)) from e
+    addrs = w.list_receive_addresses()
     click.echo("Wallet restored from mnemonic.")
     click.echo(f"Address: {created.address}")
     click.echo(f"Path:    {created.derivation_path}")
+    if len(addrs) > 1:
+        click.echo(f"Discovered {len(addrs)} receive address(es) (gap-limit={gap_limit}).")
 
 
 @wallet.command("import-key")
@@ -201,6 +213,73 @@ def wallet_export_seed(network: str | None, password: str | None) -> None:
     click.echo(words)
 
 
+@wallet.command("new-address")
+@click.option("--network", default=None)
+@click.option("--password", default=None)
+def wallet_new_address(network: str | None, password: str | None) -> None:
+    """Derive next BIP84 receive address ``m/84'/0'/0'/0/n`` for the active account."""
+    paths = wallet_paths(network)
+    pwd = password or os.environ.get("MHCOIN_WALLET_PASSWORD") or _password(create=False)
+    w = Wallet(paths, password=pwd)
+    try:
+        created = w.new_receive_address(password=pwd, make_default=True)
+    except WalletError as e:
+        raise click.ClickException(str(e)) from e
+    click.echo(f"Address: {created.address}")
+    click.echo(f"Path:    {created.derivation_path}")
+
+
+@wallet.command("list-addresses")
+@click.option("--network", default=None)
+def wallet_list_addresses(network: str | None) -> None:
+    """List HD receive addresses for the active account."""
+    paths = wallet_paths(network)
+    w = Wallet(paths)
+    try:
+        rows = w.list_receive_addresses()
+    except WalletError as e:
+        raise click.ClickException(str(e)) from e
+    if not rows:
+        raise click.ClickException("no wallet found")
+    for r in rows:
+        mark = " *" if r.get("is_default") else ""
+        path = r.get("path") or "-"
+        click.echo(f"{r['address']}  {path}{mark}")
+
+
+@wallet.command("export-xpub")
+@click.option("--network", default=None)
+@click.option("--password", default=None)
+def wallet_export_xpub(network: str | None, password: str | None) -> None:
+    """Export BIP84 account xpub (``m/84'/0'/0'``) for watch-only use."""
+    paths = wallet_paths(network)
+    pwd = password or os.environ.get("MHCOIN_WALLET_PASSWORD") or _password(create=False)
+    w = Wallet(paths, password=pwd)
+    try:
+        xpub = w.export_account_xpub(password=pwd)
+    except WalletError as e:
+        raise click.ClickException(str(e)) from e
+    click.echo(xpub)
+
+
+@wallet.command("import-xpub")
+@click.option("--network", default=None)
+@click.option("--xpub", "xpub_text", default=None, help="Account xpub (or prompt)")
+@click.option("--label", default="watch", help="Watch-only wallet label")
+def wallet_import_xpub(network: str | None, xpub_text: str | None, label: str) -> None:
+    """Import account xpub as a watch-only wallet (balance/receive; cannot send)."""
+    paths = wallet_paths(network)
+    raw = xpub_text or click.prompt("Account xpub")
+    w = Wallet(paths)
+    try:
+        created = w.import_account_xpub(raw, label=label)
+    except WalletError as e:
+        raise click.ClickException(str(e)) from e
+    click.echo("Watch-only account imported.")
+    click.echo(f"Address: {created.address}")
+    click.echo(f"Path:    {created.derivation_path}")
+
+
 @wallet.command("address")
 @click.option("--network", default=None)
 @click.option("--label", default=None, help="Wallet label (default: primary wallet)")
@@ -216,10 +295,18 @@ def wallet_address(network: str | None, label: str | None) -> None:
 
 @wallet.command("balance")
 @click.option("--network", default=None)
-@click.option("--address", default=None, help="Address to check (default: primary wallet)")
+@click.option("--address", default=None, help="Address to check (default: active HD account total)")
 @click.option("--label", default=None, help="Wallet label to check")
-def wallet_balance(network: str | None, address: str | None, label: str | None) -> None:
-    """Show balance (no password required)."""
+@click.option(
+    "--single/--account",
+    default=False,
+    show_default=True,
+    help="Sum whole HD account (default) or only one address.",
+)
+def wallet_balance(
+    network: str | None, address: str | None, label: str | None, single: bool
+) -> None:
+    """Show balance (no password required). Default = account-wide HD total."""
     paths = wallet_paths(network)
     w = Wallet(paths)
     try:
@@ -229,11 +316,13 @@ def wallet_balance(network: str | None, address: str | None, label: str | None) 
             addr = w.address_for_label(label)
         else:
             addr = w.default_address()
-        confirmed, unconfirmed = w.balance(addr)
+        confirmed, unconfirmed = w.balance(addr, account=not single)
     except WalletError as e:
         raise click.ClickException(str(e)) from e
     click.echo(f"Address: {addr}")
     click.echo(f"Balance: {format_mhc(confirmed)} MHC")
+    if not single:
+        click.echo("(HD account total — receive + change)")
     if unconfirmed:
         click.echo(f"Unconfirmed: {format_mhc(unconfirmed)} MHC")
 

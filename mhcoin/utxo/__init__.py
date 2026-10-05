@@ -472,6 +472,28 @@ class UTXOSet:
     def balance_for_pubkey_hash(self, pubkey_hash: bytes) -> int:
         return sum(e.output.value for e in self.all_for_pubkey_hash(pubkey_hash))
 
+    def balance_for_pubkey_hashes(self, pubkey_hashes: set[bytes] | list[bytes]) -> int:
+        want = set(pubkey_hashes)
+        if not want:
+            return 0
+        total = 0
+        for e in self._mem.values():
+            try:
+                if e.output.pubkey_hash() in want:
+                    total += e.output.value
+            except ValueError:
+                continue
+        return total
+
+    def pubkey_hashes_with_coins(self) -> set[bytes]:
+        out: set[bytes] = set()
+        for e in self._mem.values():
+            try:
+                out.add(e.output.pubkey_hash())
+            except ValueError:
+                continue
+        return out
+
     def count(self) -> int:
         return len(self._mem)
 

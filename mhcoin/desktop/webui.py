@@ -2340,7 +2340,7 @@ async function render(pre){
       <textarea id="dataDir" rows="2" readonly class="mono" style="user-select:text;-webkit-user-select:text">${s.data_dir}</textarea>
       <div class="row"><button id="copyDir">Copy path</button></div>
       <h3>Wallets in this datadir</h3>
-      <p class="sub">Select text or tap Copy. Shared chain; balance follows the active key only.</p>
+      <p class="sub">Select text or tap Copy. Shared chain; Overview balance is the whole HD account (receive + change).</p>
       ${wl}
       <h3>Backup</h3>
       <p class="sub">Backup = encrypted <span class="mono">wallet.json</span> + your password (password is never stored in the file).</p>
@@ -2356,6 +2356,8 @@ async function render(pre){
         <button id="newW">Create Another Wallet</button>
         <button id="restoreW">Restore from Seed</button>
         <button id="exportSeed">Show Recovery Seed</button>
+        <button id="exportXpub">Show Account xpub</button>
+        <button id="importXpub">Import xpub (watch-only)</button>
         <button id="lockBtn">Lock wallet</button>
         <button id="supportBtn">Support</button>
         <button id="quitBtn">Quit app</button>
@@ -2455,6 +2457,29 @@ async function render(pre){
           saveName: "MHCOIN-recovery-seed.txt",
           okLabel: "Done",
         });
+      } catch(e){ flash(e.message, false); }
+    };
+    if ($("exportXpub")) $("exportXpub").onclick = async () => {
+      try {
+        const p = await ask("Wallet password (optional if unlocked):");
+        const j = await api("wallet/export-xpub", {password:p||""});
+        await showModal({
+          title: "Account xpub",
+          message: "Watch-only. Can see balances/addresses — cannot spend. Safe to share with accounting tools.",
+          mode: "copy",
+          copyText: j.xpub || "",
+          saveName: "MHCOIN-account-xpub.txt",
+          okLabel: "Done",
+        });
+      } catch(e){ flash(e.message, false); }
+    };
+    if ($("importXpub")) $("importXpub").onclick = async () => {
+      try {
+        const x = await ask("Paste account xpub:");
+        if (!x) return;
+        const j = await api("wallet/import-xpub", {xpub:x, label:"watch"});
+        flash("Watch-only account: "+(j.address||"").slice(0,18)+"…");
+        render();
       } catch(e){ flash(e.message, false); }
     };
     $("lockBtn").onclick = async () => {
@@ -2779,6 +2804,20 @@ def make_handler(state: DesktopState):
                 if path == "/api/wallet/export-seed":
                     words = c.export_seed(str(body.get("password") or "") or None)
                     return {"ok": True, "mnemonic": words}
+                if path == "/api/wallet/export-xpub":
+                    xpub = c.export_xpub(str(body.get("password") or "") or None)
+                    return {"ok": True, "xpub": xpub}
+                if path == "/api/wallet/import-xpub":
+                    addr = c.import_xpub(
+                        str(body.get("xpub") or ""),
+                        label=str(body.get("label") or "watch") or "watch",
+                    )
+                    return {
+                        "ok": True,
+                        "address": addr,
+                        "wallets": c.list_wallets(),
+                        "receive_addrs": c.list_receive_addresses(),
+                    }
                 if path == "/api/wallet/unlock":
                     if not c.wallet_exists():
                         raise WalletError("no wallet found")

@@ -54,12 +54,15 @@ def test_alice_bob_supply_accounting(tmp_path: Path):
     assert node.chain.circulating_supply() == issued
     assert node.chain.issued_supply() == issued
 
-    bal_a = node.chain.utxo.balance_for_pubkey_hash(address_to_pubkey_hash(alice))
     bal_b = node.chain.utxo.balance_for_pubkey_hash(address_to_pubkey_hash(bob))
     assert bal_b == 125_000_000
-    # change + (subsidy + fee) = 48.74999 + 50.00001 = 98.75
+    # Account-wide Alice (receive + change): change + (subsidy + fee) = 98.75
+    bal_a, _ = w.balance(alice, account=True)
     assert bal_a == 9_875_000_000
     assert bal_a + bal_b == issued
+    # Change must not sit on the original receive address after BIP84 change-chain send.
+    assert res.change_pubkey_hash is not None
+    assert res.change_pubkey_hash != address_to_pubkey_hash(alice)
     # Must NOT be 148.75 MHC
     assert bal_a + bal_b != int(148.75 * SATOSHI_PER_COIN)
     node.chain.assert_supply_consistency()

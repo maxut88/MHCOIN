@@ -26,13 +26,16 @@ class WalletRecord:
     label: str
     address: str
     public_key_hex: str
-    encrypted_private_key: str  # base64 payload
+    encrypted_private_key: str  # empty string for watch-only
     created_at: str
     # Optional Bitcoin-style recovery metadata (older wallet.json omit these).
     derivation_path: str | None = None
     encrypted_mnemonic: str | None = None
-    # HD account grouping: root wallet_id shared by receive addresses.
+    # HD account grouping: root wallet_id shared by receive/change addresses.
     account_id: str | None = None
+    watch_only: bool = False
+    # BIP32 account xpub at m/84'/0'/0' (plaintext; safe to share for watch-only).
+    account_xpub: str | None = None
 
 
 @dataclass

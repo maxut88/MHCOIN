@@ -77,9 +77,10 @@ Today mainnet ships with a **small** hardcoded seed list. More independent seeds
 
 ## Wallet addresses (today)
 
-- New wallets: BIP39 + path **`m/84'/0'/0'/0/0`** → first receive `mhc1…`.
-- Desktop **Receive** → **New address** derives the next unused path `m/84'/0'/0'/0/n` (same seed). **Use** sets the active receive address without locking the wallet.
-- Imported single-key wallets cannot derive more addresses (no BIP39 seed).
+- New wallets: BIP39 + BIP84 account `m/84'/0'/0'` → receive `…/0/n`, change `…/1/n`.
+- Desktop **Receive** → **New address** / **Use** / **Copy**; Overview balance is **account-wide**.
+- **Restore** gap-scans used addresses (default gap 20). Send uses the **change** chain.
+- **xpub** export/import for watch-only. Imported single keys cannot derive more addresses.
 - Create / Restore / Show seed / file backup — **done**.
 
 ---
