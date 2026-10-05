@@ -123,7 +123,7 @@ Schema v3: `block_index` (with `file_id` / `data_pos` / `data_len`),
 `block_undo`, tip meta, and flat `blocks/blk*.dat`. Legacy height-keyed
 `blocks` tables and sqlite-embedded `raw` blobs are migrated on open.
 On UTXO/tip mismatch at startup, UTXO is rebuilt from the active chain.
-UTXO lives in LevelDB ``chainstate/`` (legacy ``utxo.sqlite`` is migrated).
+UTXO lives in LMDB ``chainstate/`` (legacy ``utxo.sqlite`` is migrated).
 
 ## CLI
 

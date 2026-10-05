@@ -1,13 +1,12 @@
-"""UTXO set: create/spend, double-spend protection, LevelDB persistence, undo/rollback.
+"""UTXO set: create/spend, double-spend protection, LMDB persistence, undo/rollback.
 
-On-disk layout (Bitcoin-style ``chainstate/`` LevelDB):
+On-disk layout (Bitcoin-role ``chainstate/`` KV store via LMDB — portable
+wheels on Linux/macOS/Windows; same key layout as a LevelDB chainstate):
+
   key ``C`` + txid(32) + vout_u32be  → coin value
   key ``M`` + utf-8 meta key         → utf-8 meta value
 
 Legacy ``utxo.sqlite`` in the same datadir is migrated once on open.
-
-Multiple ``UTXOSet`` opens of the same ``chainstate/`` path in one process share
-one LevelDB handle + memory view (refcount). LevelDB itself is single-process.
 """
 
 from __future__ import annotations
@@ -31,6 +30,9 @@ logger = logging.getLogger(__name__)
 _PREFIX_COIN = b"C"
 _PREFIX_META = b"M"
 
+# ~1 GiB map; grows as needed on most platforms.
+_DEFAULT_MAP_SIZE = 1 << 30
+
 _LIVE_LOCK = threading.Lock()
 _LIVE: dict[str, "_LiveChainstate"] = {}
 
@@ -38,10 +40,10 @@ _LIVE: dict[str, "_LiveChainstate"] = {}
 @dataclass
 class _LiveChainstate:
     path: Path
-    db: Any
+    env: Any  # lmdb.Environment
     mem: dict[str, "UTXOEntry"]
     lock: threading.RLock
-    batch: Any
+    pending: dict[bytes, bytes | None] | None  # None = not in batch; None values = deletes
     refs: int
 
 
@@ -124,31 +126,38 @@ class UTXOSet:
         self._lock_local = threading.RLock()
         self._share_key: str | None = None
         if path is not None:
+            import lmdb
+
             self.path = resolve_chainstate_dir(Path(path))
             self.path.mkdir(parents=True, exist_ok=True)
             key = str(self.path.resolve())
             with _LIVE_LOCK:
                 existing = _LIVE.get(key)
-                if existing is not None and existing.db is not None:
+                if existing is not None and existing.env is not None:
                     existing.refs += 1
                     self._live = existing
                     self._share_key = key
                     return
-                import plyvel
-
-                db = plyvel.DB(str(self.path), create_if_missing=True)
+                env = lmdb.open(
+                    str(self.path),
+                    map_size=_DEFAULT_MAP_SIZE,
+                    max_dbs=1,
+                    subdir=True,
+                    lock=True,
+                    sync=True,
+                    metasync=True,
+                )
                 live = _LiveChainstate(
                     path=self.path,
-                    db=db,
+                    env=env,
                     mem={},
                     lock=threading.RLock(),
-                    batch=None,
+                    pending=None,
                     refs=1,
                 )
                 self._live = live
                 self._share_key = key
                 _LIVE[key] = live
-            # Migrate + load outside registry lock (may take time).
             self._migrate_sqlite_if_needed(Path(path))
             self._load()
 
@@ -172,17 +181,14 @@ class UTXOSet:
         return self._lock_local
 
     @property
-    def _db(self):
-        return self._live.db if self._live is not None else None
+    def _env(self):
+        return self._live.env if self._live is not None else None
 
     @property
-    def _batch(self):
-        return self._live.batch if self._live is not None else None
-
-    @_batch.setter
-    def _batch(self, value) -> None:
-        if self._live is not None:
-            self._live.batch = value
+    def _pending(self) -> dict[bytes, bytes | None]:
+        if self._live is None or self._live.pending is None:
+            return {}
+        return self._live.pending
 
     def _legacy_sqlite_path(self, requested: Path) -> Path:
         requested = Path(requested)
@@ -192,16 +198,15 @@ class UTXOSet:
         return self.path.with_name("utxo.sqlite")
 
     def _migrate_sqlite_if_needed(self, requested: Path) -> None:
-        assert self._db is not None
+        assert self._env is not None
         legacy = self._legacy_sqlite_path(requested)
         if not legacy.is_file():
             return
-        try:
-            it = self._db.iterator(prefix=_PREFIX_COIN, include_value=False)
-            has_coin = next(it, None) is not None
-            it.close()
-        except Exception:
-            has_coin = False
+        with self._env.begin() as txn:
+            cur = txn.cursor()
+            has_coin = cur.set_range(_PREFIX_COIN) and (
+                cur.key() or b""
+            ).startswith(_PREFIX_COIN)
         if has_coin:
             logger.info(
                 "chainstate already populated; leaving %s in place", legacy.name
@@ -220,8 +225,7 @@ class UTXOSet:
         except sqlite3.Error as e:
             logger.warning("skip utxo.sqlite migrate (%s): %s", legacy, e)
             return
-        wb = self._db.write_batch(transaction=True)
-        try:
+        with self._env.begin(write=True) as txn:
             for row in rows:
                 op = OutPoint(txid=bytes(row[1]), vout=int(row[2]))
                 entry = UTXOEntry(
@@ -230,15 +234,9 @@ class UTXOSet:
                     height=int(row[5]),
                     coinbase=bool(row[6]),
                 )
-                wb.put(op.db_key(), _encode_coin(entry))
+                txn.put(op.db_key(), _encode_coin(entry))
             for k, v in meta_rows:
-                wb.put(_PREFIX_META + str(k).encode("utf-8"), str(v).encode("utf-8"))
-            wb.write()
-        finally:
-            try:
-                wb.close()
-            except Exception:
-                pass
+                txn.put(_PREFIX_META + str(k).encode("utf-8"), str(v).encode("utf-8"))
         bak = legacy.with_suffix(legacy.suffix + ".bak")
         try:
             if bak.exists():
@@ -251,14 +249,19 @@ class UTXOSet:
         )
 
     def _load(self) -> None:
-        assert self._db is not None
+        assert self._env is not None
         self._mem.clear()
-        for raw_key, raw_val in self._db.iterator(prefix=_PREFIX_COIN):
-            try:
-                op = OutPoint.from_db_key(raw_key)
-                self._mem[op.key()] = _decode_coin(op, raw_val)
-            except Exception:
-                logger.exception("skip bad chainstate coin key=%r", raw_key)
+        with self._env.begin() as txn:
+            cur = txn.cursor()
+            if cur.set_range(_PREFIX_COIN):
+                for raw_key, raw_val in cur:
+                    if not raw_key.startswith(_PREFIX_COIN):
+                        break
+                    try:
+                        op = OutPoint.from_db_key(raw_key)
+                        self._mem[op.key()] = _decode_coin(op, raw_val)
+                    except Exception:
+                        logger.exception("skip bad chainstate coin key=%r", raw_key)
 
     def get(self, outpoint: OutPoint) -> UTXOEntry | None:
         return self._mem.get(outpoint.key())
@@ -280,7 +283,6 @@ class UTXOSet:
         return out
 
     def clone_memory(self) -> UTXOSet:
-        """In-memory snapshot for side-chain validation (no shared DB)."""
         clone = UTXOSet(path=None)
         clone._mem_local = {
             k: UTXOEntry(
@@ -296,20 +298,17 @@ class UTXOSet:
     def clear_all(self) -> None:
         with self._lock:
             self._mem.clear()
-            if self._db is not None:
-                keys = list(
-                    self._db.iterator(prefix=_PREFIX_COIN, include_value=False)
-                )
-                wb = self._db.write_batch(transaction=True)
-                try:
-                    for raw_key in keys:
-                        wb.delete(raw_key)
-                    wb.write()
-                finally:
-                    try:
-                        wb.close()
-                    except Exception:
-                        pass
+            if self._env is not None:
+                with self._env.begin(write=True) as txn:
+                    cur = txn.cursor()
+                    if cur.set_range(_PREFIX_COIN):
+                        keys = []
+                        for raw_key, _ in cur:
+                            if not raw_key.startswith(_PREFIX_COIN):
+                                break
+                            keys.append(raw_key)
+                        for k in keys:
+                            txn.delete(k)
 
     def apply_transaction(self, tx: Transaction, height: int) -> None:
         with self._lock:
@@ -375,30 +374,31 @@ class UTXOSet:
                 raise
 
     def _begin(self) -> None:
-        if self._db is None:
-            self._batch = None
+        if self._live is None:
             return
-        if self._batch is not None:
+        if self._live.pending is not None:
             raise UTXOError("nested UTXO write batch")
-        self._batch = self._db.write_batch(transaction=True)
+        self._live.pending = {}
 
     def _commit(self) -> None:
-        if self._batch is not None:
-            self._batch.write()
-            try:
-                self._batch.close()
-            except Exception:
-                pass
-            self._batch = None
+        if self._live is None:
+            return
+        pending = self._live.pending
+        self._live.pending = None
+        if not pending:
+            return
+        assert self._env is not None
+        with self._env.begin(write=True) as txn:
+            for k, v in pending.items():
+                if v is None:
+                    txn.delete(k)
+                else:
+                    txn.put(k, v)
 
     def _abort(self) -> None:
-        if self._batch is not None:
-            try:
-                self._batch.close()
-            except Exception:
-                pass
-            self._batch = None
-        if self._db is not None:
+        if self._live is not None:
+            self._live.pending = None
+        if self._env is not None:
             self._mem.clear()
             self._load()
 
@@ -449,26 +449,25 @@ class UTXOSet:
     def _apply_transaction_no_commit(self, tx: Transaction, height: int) -> None:
         self._apply_transaction_collect(tx, height)
 
-    def _writer(self):
-        return self._batch if self._batch is not None else self._db
-
     def _add(self, entry: UTXOEntry) -> None:
         k = entry.outpoint.key()
         if k in self._mem:
             raise UTXOError(f"UTXO already exists {k}")
         self._mem[k] = entry
-        w = self._writer()
-        if w is not None:
-            w.put(entry.outpoint.db_key(), _encode_coin(entry))
+        if self._live is not None:
+            if self._live.pending is None:
+                raise UTXOError("UTXO write outside batch")
+            self._live.pending[entry.outpoint.db_key()] = _encode_coin(entry)
 
     def _remove(self, outpoint: OutPoint) -> None:
         k = outpoint.key()
         if k not in self._mem:
             raise UTXOError(f"missing UTXO {k}")
         del self._mem[k]
-        w = self._writer()
-        if w is not None:
-            w.delete(outpoint.db_key())
+        if self._live is not None:
+            if self._live.pending is None:
+                raise UTXOError("UTXO write outside batch")
+            self._live.pending[outpoint.db_key()] = None
 
     def balance_for_pubkey_hash(self, pubkey_hash: bytes) -> int:
         return sum(e.output.value for e in self.all_for_pubkey_hash(pubkey_hash))
@@ -477,17 +476,17 @@ class UTXOSet:
         return len(self._mem)
 
     def set_meta(self, key: str, value: str) -> None:
-        if self._db is None:
+        if self._env is None:
             return
         with self._lock:
-            self._db.put(
-                _PREFIX_META + key.encode("utf-8"), value.encode("utf-8")
-            )
+            with self._env.begin(write=True) as txn:
+                txn.put(_PREFIX_META + key.encode("utf-8"), value.encode("utf-8"))
 
     def get_meta(self, key: str) -> str | None:
-        if self._db is None:
+        if self._env is None:
             return None
-        raw = self._db.get(_PREFIX_META + key.encode("utf-8"))
+        with self._env.begin() as txn:
+            raw = txn.get(_PREFIX_META + key.encode("utf-8"))
         if raw is None:
             return None
         return raw.decode("utf-8")
@@ -503,17 +502,12 @@ class UTXOSet:
                 return
             live.refs -= 1
             if live.refs <= 0:
-                if live.batch is not None:
-                    try:
-                        live.batch.close()
-                    except Exception:
-                        pass
-                    live.batch = None
+                live.pending = None
                 try:
-                    live.db.close()
+                    live.env.close()
                 except Exception:
                     pass
-                live.db = None
+                live.env = None
                 del _LIVE[self._share_key]
             self._live = None
             self._share_key = None

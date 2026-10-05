@@ -1,4 +1,4 @@
-"""LevelDB chainstate UTXO + migration from legacy utxo.sqlite."""
+"""LMDB chainstate UTXO + migration from legacy utxo.sqlite."""
 
 from __future__ import annotations
 
@@ -16,7 +16,7 @@ def test_resolve_chainstate_dir(tmp_path: Path):
     assert resolve_chainstate_dir(tmp_path / "chainstate") == tmp_path / "chainstate"
 
 
-def test_leveldb_persist_restart(tmp_path: Path):
+def test_lmdb_persist_restart(tmp_path: Path):
     kp = generate_keypair()
     pkh = hash160(kp.public_key_compressed)
     path = tmp_path / "chainstate"
@@ -99,7 +99,7 @@ def test_migrate_utxo_sqlite_to_chainstate(tmp_path: Path):
 def test_shared_open_same_process(tmp_path: Path):
     path = tmp_path / "chainstate"
     a = UTXOSet(path)
-    b = UTXOSet(path)  # must not hit LevelDB LOCK
+    b = UTXOSet(path)  # must not hit exclusive lock
     assert a.count() == b.count() == 0
     from mhcoin.crypto.hashing import hash160
     from mhcoin.crypto.keys import generate_keypair

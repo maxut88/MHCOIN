@@ -67,7 +67,7 @@ class WalletPaths:
 
     @property
     def utxo_path(self) -> Path:
-        # LevelDB chainstate dir (legacy utxo.sqlite is migrated by UTXOSet).
+        # LMDB chainstate dir (legacy utxo.sqlite is migrated by UTXOSet).
         return self.data_dir / "chainstate"
 
 

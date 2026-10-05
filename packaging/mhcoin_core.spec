@@ -69,7 +69,7 @@ hiddenimports = [
     "click",
     "appdirs",
     "mnemonic",
-    "plyvel",
+    "lmdb",
     "tkinter",
     "_tkinter",
 ]
@@ -88,14 +88,14 @@ try:
 except Exception:
     pass
 
-# LevelDB bindings (UTXO chainstate)
+# LMDB (UTXO chainstate)
 try:
     from PyInstaller.utils.hooks import collect_all
 
-    _pl_datas, _pl_binaries, _pl_hidden = collect_all("plyvel")
-    extra_datas += _pl_datas
-    extra_binaries += _pl_binaries
-    hiddenimports += list(_pl_hidden)
+    _lm_datas, _lm_binaries, _lm_hidden = collect_all("lmdb")
+    extra_datas += _lm_datas
+    extra_binaries += _lm_binaries
+    hiddenimports += list(_lm_hidden)
 except Exception:
     pass
 
