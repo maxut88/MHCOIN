@@ -14,6 +14,7 @@ extra workers no longer increase hashrate (common on Apple Silicon).
 from __future__ import annotations
 
 import copy
+import sys
 import threading
 import time
 from typing import Callable
@@ -24,8 +25,17 @@ from mhcoin.consensus.difficulty import hash_meets_target
 # Nonce steps between abort polls. Cheap in-memory checks only — no SQLite.
 # Keep low enough that Stop feels instant (~few ms at typical Desktop rates).
 ABORT_CHECK_INTERVAL = 8_000
+# Windows Desktop hashrate per thread is often ~100–300 H/s under GIL + WebView2.
+# 8000 hashes ≈ 30–80s before Stop is noticed — Start/Stop appear stuck.
+ABORT_CHECK_INTERVAL_WIN32 = 128
 # Match classic Desktop / mine_block progress cadence.
 PROGRESS_INTERVAL = 100_000
+
+
+def _default_abort_every() -> int:
+    if sys.platform == "win32":
+        return ABORT_CHECK_INTERVAL_WIN32
+    return ABORT_CHECK_INTERVAL
 
 
 class MiningAborted(Exception):
@@ -65,7 +75,7 @@ def mine_block_cancellable(
     block: Block,
     *,
     abort_check: Callable[[], bool] | None = None,
-    abort_every: int = ABORT_CHECK_INTERVAL,
+    abort_every: int | None = None,
     progress: Callable[[int, bytes, float], None] | None = None,
     max_nonce: int = 0xFFFFFFFF,
     start_nonce: int = 0,
@@ -81,6 +91,8 @@ def mine_block_cancellable(
     ``duty_cycle`` < 1.0 inserts interruptible sleeps so wall-clock hashrate
     tracks the requested CPU load percent.
     """
+    if abort_every is None:
+        abort_every = _default_abort_every()
     if abort_every < 1:
         abort_every = 1
     step = 1 if nonce_step < 1 else int(nonce_step)
@@ -128,6 +140,7 @@ def mine_block_parallel(
     *,
     workers: int = 1,
     abort_check: Callable[[], bool] | None = None,
+    abort_every: int | None = None,
     progress: Callable[[int, bytes, float], None] | None = None,
     max_nonce: int = 0xFFFFFFFF,
     fix_merkle: bool = True,
@@ -136,12 +149,15 @@ def mine_block_parallel(
     """Mine with ``workers`` threads (nonce stride). Returns winning block copy applied to ``block``."""
     n = max(1, int(workers))
     duty = _clamp_duty(duty_cycle)
+    if abort_every is None:
+        abort_every = _default_abort_every()
     if fix_merkle:
         block.set_merkle_root()
     if n == 1:
         return mine_block_cancellable(
             block,
             abort_check=abort_check,
+            abort_every=abort_every,
             progress=progress,
             max_nonce=max_nonce,
             start_nonce=0,
@@ -163,7 +179,10 @@ def mine_block_parallel(
         def _abort() -> bool:
             if stop.is_set():
                 return True
-            return bool(abort_check and abort_check())
+            if abort_check and abort_check():
+                stop.set()  # wake sibling workers on the next abort poll
+                return True
+            return False
 
         def _prog(nonce: int, h: bytes, hps: float) -> None:
             with hps_lock:
@@ -176,6 +195,7 @@ def mine_block_parallel(
             mine_block_cancellable(
                 local,
                 abort_check=_abort,
+                abort_every=abort_every,
                 progress=_prog,
                 max_nonce=max_nonce,
                 start_nonce=wid,
@@ -188,6 +208,7 @@ def mine_block_parallel(
                     found.append(local)
                     stop.set()
         except (MiningAborted, KeyboardInterrupt):
+            stop.set()
             return
         except Exception as exc:  # noqa: BLE001
             with found_lock:

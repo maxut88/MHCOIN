@@ -1527,7 +1527,18 @@ class CoreController:
         """
         cpus = max(1, int(os.cpu_count() or 1))
         pct = clamp_mine_intensity(intensity)
-        usable = cpus - 1 if cpus >= 4 else cpus
+        if sys.platform == "win32":
+            # WebView2 + HTTP need headroom; too many PoW threads make Start/Stop
+            # stick under the GIL even though hashlib releases it during digest.
+            if cpus >= 8:
+                usable = cpus - 2
+            elif cpus >= 4:
+                usable = cpus - 1
+            else:
+                usable = cpus
+            usable = min(usable, 6)
+        else:
+            usable = cpus - 1 if cpus >= 4 else cpus
         return max(1, int(round(usable * pct / 100.0)))
 
     def _start_caffeine(self) -> None:
@@ -1625,7 +1636,10 @@ class CoreController:
         if th is not None and th.is_alive():
             if not self._miner_stop.is_set():
                 return
-            th.join(timeout=3.0)
+            # Windows: never block the HTTP/UI thread for long — Stop already
+            # signals workers; a 3s join made Start appear stuck.
+            join_t = 0.35 if sys.platform == "win32" else 3.0
+            th.join(timeout=join_t)
             if th.is_alive():
                 raise RuntimeError("miner still stopping — try Start again in a moment")
         addr = address or self.default_address()
@@ -1757,13 +1771,20 @@ class CoreController:
                             self._miner_reconfigure.clear()
                             workers = self._workers_for_intensity(100)
                             self._mine_workers = workers
-                            mine_block_parallel(
-                                block,
-                                workers=workers,
-                                progress=_prog,
-                                abort_check=_abort,
-                                duty_cycle=1.0,
-                            )
+                            # Windows: poll Stop every ~128 hashes (see abortable_pow).
+                            pow_kwargs: dict = {
+                                "workers": workers,
+                                "progress": _prog,
+                                "abort_check": _abort,
+                                "duty_cycle": 1.0,
+                            }
+                            if sys.platform == "win32":
+                                from mhcoin.mining.abortable_pow import (
+                                    ABORT_CHECK_INTERVAL_WIN32,
+                                )
+
+                                pow_kwargs["abort_every"] = ABORT_CHECK_INTERVAL_WIN32
+                            mine_block_parallel(block, **pow_kwargs)
                         except MiningAborted:
                             if self._miner_stop.is_set():
                                 break
