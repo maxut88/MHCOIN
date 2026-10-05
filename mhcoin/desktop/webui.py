@@ -2846,6 +2846,43 @@ def _prepare_desktop_http(
     return httpd, state, url, bind_port
 
 
+def start_desktop_backend(
+    network: str | None = None,
+    port: int | None = None,
+) -> tuple[str, DesktopState, Any, str]:
+    """Start HTTP API + controller (call from a background thread after splash).
+
+    Returns ``(url, state, cleanup, version)``.
+    """
+    from mhcoin.desktop.prefs import resolve_launch_network, save_preferred_network
+
+    net = resolve_launch_network(explicit=network)
+    save_preferred_network(net)
+    port = int(port or os.environ.get("MHCOIN_DESKTOP_PORT", DEFAULT_PORT))
+    httpd, state, url, _bind = _prepare_desktop_http(net, port)
+    threading.Thread(target=httpd.serve_forever, daemon=True).start()
+    print("MHCOIN Core Desktop")
+    print(f"UI: {url}")
+    print(f"Network: {net}")
+    print(f"Data: {state.ctrl.data_dir}")
+
+    def cleanup() -> None:
+        try:
+            httpd.shutdown()
+        except Exception:
+            pass
+        try:
+            state.ctrl.shutdown()
+        except Exception:
+            pass
+        try:
+            httpd.server_close()
+        except Exception:
+            pass
+
+    return url, state, cleanup, str(SOFTWARE_VERSION)
+
+
 def run_web_desktop(network: str | None = None, port: int | None = None) -> None:
     """Show a native splash window immediately, then load the full UI."""
     from mhcoin.desktop.prefs import resolve_launch_network, save_preferred_network
