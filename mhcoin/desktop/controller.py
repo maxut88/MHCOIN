@@ -35,7 +35,7 @@ from mhcoin.desktop.seeds import default_connect_peers
 from mhcoin.mempool import Mempool
 from mhcoin.mining.abortable_pow import (
     MiningAborted,
-    mine_block_cancellable,
+    mine_block_parallel,
 )
 from mhcoin.mining.miner import format_mine_plain_found
 from mhcoin.mining.block_template import build_block_template
@@ -1639,11 +1639,18 @@ class CoreController:
         self._miner_reconfigure.clear()
         self._mine_stopping = False
         self._mining = True
+        # Always full CPU — slider was removed; ignore stale low intensity prefs.
+        self._mine_intensity = 100
+        self._mine_workers = self._workers_for_intensity(100)
+        cpus = max(1, int(os.cpu_count() or 1))
         self._start_caffeine()
         self._mine_log_line(f"MHCOIN Live Miner · {self.network}")
         self._mine_log_line(f"reward  {reward_addr}")
         self._mine_log_line(f"data    {self.data_dir}")
         self._mine_log_line("mode    live node (P2P stays online)")
+        self._mine_log_line(
+            f"CPU     {self._mine_workers}/{cpus} workers (full load)"
+        )
         self._mine_log_line("────────────────────────────────")
         self._status_last_broadcast = 0.0
 
@@ -1701,15 +1708,28 @@ class CoreController:
                         def _prog(nonce: int, _h: bytes, hps: float) -> None:
                             if self._miner_stop.is_set():
                                 return
-                            self._hashrate = hps
+                            # After a tip rebuild, early averages look artificially
+                            # low — keep the previous reading until the new slice
+                            # has run long enough (stops Mac/Windows “hashrate dip”).
+                            elapsed_slice = max(time.time() - t0, 1e-9)
+                            prev = float(self._hashrate or 0.0)
+                            if (
+                                elapsed_slice < 1.0
+                                and prev > 0
+                                and float(hps) < prev * 0.55
+                            ):
+                                hps_show = prev
+                            else:
+                                hps_show = float(hps)
+                                self._hashrate = hps_show
                             self._broadcast_miner_status()
                             now = time.time()
                             if now - self._mine_log_last_prog >= 0.5:
                                 self._mine_log_last_prog = now
                                 rate = (
-                                    f"{hps/1000:.1f} kH/s"
-                                    if hps >= 1000
-                                    else f"{hps:,.0f} H/s"
+                                    f"{hps_show/1000:.1f} kH/s"
+                                    if hps_show >= 1000
+                                    else f"{hps_show:,.0f} H/s"
                                 )
                                 self._mine_log_line(
                                     f"· height {height}  nonce {nonce:,}  {rate}"
@@ -1723,7 +1743,7 @@ class CoreController:
                         self._mine_log_line(f"template #{height}  bits=0x{bits:08x}")
 
                         def _abort() -> bool:
-                            if self._miner_stop.is_set():
+                            if self._miner_stop.is_set() or self._miner_reconfigure.is_set():
                                 return True
                             # In-memory tip/epoch only — never touch SQLite here.
                             if int(rt.chain.tip_epoch) != epoch0:
@@ -1732,16 +1752,24 @@ class CoreController:
                             return tip is not None and tip != parent
 
                         try:
-                            # Stable 0.3.7.3-style PoW: tight single-lane loop,
-                            # abort_check for Stop / tip moves (no duty-cycle).
-                            mine_block_cancellable(
+                            # Multi-worker PoW (hashlib releases GIL). Full duty —
+                            # single-lane 0.4.1.2+ capped Mac/Windows ~100–150 H/s.
+                            self._miner_reconfigure.clear()
+                            workers = self._workers_for_intensity(100)
+                            self._mine_workers = workers
+                            mine_block_parallel(
                                 block,
+                                workers=workers,
                                 progress=_prog,
                                 abort_check=_abort,
+                                duty_cycle=1.0,
                             )
                         except MiningAborted:
                             if self._miner_stop.is_set():
                                 break
+                            if self._miner_reconfigure.is_set():
+                                self._miner_reconfigure.clear()
+                                continue
                             self._mine_log_line(
                                 f"stale template #{height} — tip moved, rebuilding"
                             )

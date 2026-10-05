@@ -246,8 +246,8 @@ if sys.platform == "darwin":
         info_plist={
             "CFBundleName": "MHCOIN Core",
             "CFBundleDisplayName": "MHCOIN Core",
-            "CFBundleShortVersionString": "0.4.1.7",
-            "CFBundleVersion": "0.4.1.7",
+            "CFBundleShortVersionString": "0.4.1.8",
+            "CFBundleVersion": "0.4.1.8",
             # Apple expects the basename without extension (matches build.sh).
             "CFBundleIconFile": "mhcoin",
             "NSHighResolutionCapable": True,

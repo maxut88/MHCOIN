@@ -2954,6 +2954,7 @@ def run_web_desktop(network: str | None = None, port: int | None = None) -> None
         "url": None,
         "error": None,
         "navigated": False,
+        "ui_ready": False,
     }
     ready = threading.Event()
 
@@ -3000,6 +3001,9 @@ def run_web_desktop(network: str | None = None, port: int | None = None) -> None
         pass
 
     def _on_closing() -> bool:
+        # Ignore spurious close during cold-splash → load_url (macOS/WebKit).
+        if not boot.get("ui_ready"):
+            return False
         _GUI["allow_quit"] = True
         st = _GUI.get("state") or boot.get("state")
 
@@ -3032,6 +3036,7 @@ def run_web_desktop(network: str | None = None, port: int | None = None) -> None
         boot["navigated"] = True
         err = boot.get("error")
         if err is not None:
+            boot["ui_ready"] = True
             try:
                 window.load_html(
                     "<html><body style='background:#0c1210;color:#fcc;font-family:sans-serif;"
@@ -3051,6 +3056,7 @@ def run_web_desktop(network: str | None = None, port: int | None = None) -> None
             window.load_url(url)
         except Exception as e:  # noqa: BLE001
             print(f"load_url failed: {e}", file=sys.stderr)
+        boot["ui_ready"] = True
 
     def _on_loaded() -> None:
         try:

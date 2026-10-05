@@ -179,6 +179,7 @@ def _run_with_early_splash() -> None:
         "cleanup": None,
         "state": None,
         "done": False,
+        "ui_ready": False,
     }
 
     try:
@@ -211,6 +212,10 @@ def _run_with_early_splash() -> None:
         os._exit(0)
 
     def _on_closing() -> bool:
+        # macOS/WebKit sometimes fires closing while splash → load_url runs.
+        # Cancelling until the UI is up stops the app from auto-quitting.
+        if not boot.get("ui_ready"):
+            return False
         threading.Thread(target=_force_quit, daemon=True).start()
         return True
 
@@ -239,7 +244,10 @@ def _run_with_early_splash() -> None:
                 except Exception:
                     pass
             window.load_url(url)
+            # Allow real window-close only after the main UI has been asked to load.
+            boot["ui_ready"] = True
         except Exception as e:  # noqa: BLE001
+            boot["ui_ready"] = True
             print(f"Desktop boot failed: {e}", file=sys.stderr)
             try:
                 window.load_html(
