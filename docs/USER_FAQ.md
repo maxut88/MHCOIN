@@ -39,7 +39,7 @@ Legacy wallets (pre-BIP39 key import) have **no** mnemonic — only the encrypte
 ## Mining FAQ
 
 **Desktop:** Mining tab → payout `mhc1…` → **Start mining**.  
-Log should say `CPU single-lane PoW (0.3.7.3-style)` on current builds.
+Log should show live H/s (single-lane PoW). Newer builds use a faster in-place HASH256 loop.
 
 **CLI:**
 

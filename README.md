@@ -1,161 +1,148 @@
 # MHCOIN (MHC)
 
-[![Desktop release artifacts](https://github.com/maxut88/MHCOIN/actions/workflows/desktop-release.yml/badge.svg)](https://github.com/maxut88/MHCOIN/actions/workflows/desktop-release.yml)
-[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
+[![Desktop release](https://github.com/maxut88/MHCOIN/actions/workflows/desktop-release.yml/badge.svg)](https://github.com/maxut88/MHCOIN/actions/workflows/desktop-release.yml)
 [![Latest release](https://img.shields.io/github/v/release/maxut88/MHCOIN)](https://github.com/maxut88/MHCOIN/releases/latest)
+[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 
-Independent Proof-of-Work blockchain. **Not** a Bitcoin Core fork.
+Independent Proof-of-Work cryptocurrency with a full node, encrypted wallet, and Desktop miner.  
+**Not** a Bitcoin Core fork.
+
+**[Download MHCOIN Core 0.4.1.12](https://github.com/maxut88/MHCOIN/releases/tag/v0.4.1.12)** · [User FAQ](docs/USER_FAQ.md) · [Docs](docs/README.md)
+
+---
+
+## Specs
 
 | | |
 |---|---|
-| Ticker | MHC |
-| Maximum supply | 21,000,000 MHC |
-| Decimals | 8 |
-| Initial block reward | 50 MHC |
-| Halving | every 210,000 blocks |
+| Ticker | **MHC** |
+| Max supply | 21,000,000 MHC (8 decimals) |
+| Block reward | 50 MHC → halves every 210,000 blocks |
 | PoW | HASH256 (double SHA-256) |
-| Target block time | 600 seconds (10 minutes) |
-| Difficulty | per-block retarget · window **30** · damping **1/16** |
-| Address format | `mhc1…` (bech32, HRP `mhc`) |
+| Block time | ~10 minutes (target 600 s) |
+| Difficulty | retarget every block · window 30 · damping 1/16 |
+| Addresses | `mhc1…` (bech32) |
 | Ledger | UTXO |
-| Mainnet P2P port | **8333** |
-| Mainnet magic | `4D48434E` (`MHCN`) |
+| P2P | port **8333** · magic `MHCN` |
 | Software | **0.4.1.12** |
 
-## Mainnet identity (frozen)
+### Mainnet identity (frozen)
 
 | | |
 |---|---|
 | Genesis | `62e078a7ca0dfeac4c6451e5852d5ec714c7aacbff4e48f1d8cc8aa9560a0000` |
 | Consensus fingerprint | `21f256498747b313795b65c9e26f0dd1cb23ee762813bc0d593c2c513e787ae9` |
-| Bootstrap seed | `176.38.3.168:8333` |
-
-The seed is **bootstrap only** (first P2P contact). Every node independently validates headers, PoW, difficulty (`get_next_work`), transactions, and UTXO. **Do not** copy another machine’s chain database.
-
-Verify locally:
+| Bootstrap seed | `176.38.3.168:8333` (discovery only — always validate yourself) |
 
 ```bash
 mhcoin genesis verify --network mainnet
 mhcoin audit fingerprint
-# expect 21f256498747b313795b65c9e26f0dd1cb23ee762813bc0d593c2c513e787ae9
 ```
 
-## Features
+---
 
-- Full validating node (P2P sync, mempool, orphan / reorg handling)
-- Encrypted wallet · **BIP39 seed** recovery · multi-address Receive · Send · multi-wallet
-- Bitcoin-style storage: `peers.dat` · flat `blocks/blk*.dat` · LMDB `chainstate/`
-- Solo mining (Desktop + CLI) on the live mainnet tip while P2P stays online
-- Same **MHCOIN Core** Desktop UI on **Linux**, **macOS**, and **Windows**
+## What you get
 
-## Install MHCOIN Core (users)
+- Validating full node (P2P sync, mempool, reorgs)
+- Encrypted wallet · BIP39 seed · multi-address receive · Send
+- Solo mining on the live mainnet tip (Desktop + Terminal)
+- Same **MHCOIN Core** app on **Windows**, **macOS**, and **Linux**
 
-**Current:** [MHCOIN Core 0.4.1.12](https://github.com/maxut88/MHCOIN/releases/tag/v0.4.1.12) · verify `SHA256SUMS`  
-**Previous:** [MHCOIN Core 0.4.1.10](https://github.com/maxut88/MHCOIN/releases/tag/v0.4.1.10) · [0.3.7.3](https://github.com/maxut88/MHCOIN/releases/tag/v0.3.7.3)
+---
 
-### Linux
+## Install (recommended)
 
-1. Download `MHCOIN-Core-0.4.1.12-x86_64.AppImage` **or** `MHCOIN-Core-0.4.1.12-linux-x86_64.tar.gz`.
-2. AppImage: `chmod +x MHCOIN-Core-0.4.1.12-x86_64.AppImage && ./MHCOIN-Core-0.4.1.12-x86_64.AppImage`
-3. tarball: extract and run `./MHCOIN-Core`.
-4. Allow sync from genesis, create or open a wallet, then Receive / Send / Mining.
+Download the build for your OS from the [latest release](https://github.com/maxut88/MHCOIN/releases/latest), then verify `SHA256SUMS`.
 
-If no native window opens (common on immutable desktops), the UI is at **http://127.0.0.1:18765/** in your browser — that is normal.
+| OS | File |
+|----|------|
+| **Windows** | `MHCOIN-Core-0.4.1.12-windows-x86_64.exe` (or `.zip`) |
+| **macOS** (current) | `MHCOIN-Core-0.4.1.12-macos.dmg` |
+| **macOS** (11+ / older Intel) | `MHCOIN-Core-0.4.1.12-macos110-legacy.dmg` |
+| **Linux** | `MHCOIN-Core-0.4.1.12-x86_64.AppImage` or `.tar.gz` |
 
-Optional first-peer override:
+**First run**
 
-```bash
-export MHCOIN_CONNECT=176.38.3.168:8333
-```
+1. Launch **MHCOIN Core** and let it sync from genesis.
+2. Create or open a wallet (write down the BIP39 seed offline).
+3. Use **Receive** / **Send** / **Mining**.
 
-### macOS
+Data folder: `~/.mhcoin/mainnet/` · Windows: `%USERPROFILE%\.mhcoin\mainnet\`
 
-1. Download `MHCOIN-Core-0.4.1.12-macos.dmg`.
-2. Open the DMG → install **MHCOIN Core** → sync from genesis → create/open a wallet.
-3. If Gatekeeper blocks the app: right-click → **Open**, or allow it in System Settings → Privacy & Security.
+**Tips**
 
-### Windows
+- **macOS Gatekeeper:** right-click → Open, or allow in Privacy & Security.
+- **Linux AppImage:** `chmod +x MHCOIN-Core-*.AppImage && ./MHCOIN-Core-*.AppImage`  
+  If no native window opens, open **http://127.0.0.1:18765/** in a browser (normal on some desktops).
+- **Upgrade from 0.3.7.3:** open the same data folder once — storage migrates automatically. Back up `wallet.json` first.
+- Optional peer: `export MHCOIN_CONNECT=176.38.3.168:8333`
 
-1. Download `MHCOIN-Core-0.4.1.12-windows-x86_64.exe` (or the `.zip`).
-2. Launch **MHCOIN Core**, sync from genesis, create/open a wallet.
+Older builds: [all releases](https://github.com/maxut88/MHCOIN/releases).
 
-Wallet data defaults to `~/.mhcoin/mainnet/` (Windows: `%USERPROFILE%\.mhcoin\mainnet\`).
-
-Upgrading from **0.3.7.3**: open the same data folder once — storage migrates automatically (`utxo.sqlite` → `chainstate/`, blocks → `blk*.dat`). Keep a backup of `wallet.json` first.
+---
 
 ## Mining
 
-Desktop and terminal miners race the **same live mainnet tip** (P2P sync + block broadcast).
+Desktop and Terminal miners race the **same** live mainnet tip.
 
-**Desktop:** Mining tab → payout `mhc1…` → **Start mining**.  
-Open **Instructions** for copy-paste terminal commands.
-
-**CLI (live on mainnet):**
+1. **Desktop:** Mining → paste payout `mhc1…` → **Start mining**.
+2. Open **Instructions** for copy-paste Terminal commands (Mac/Windows/Linux).
 
 ```bash
 mhcoin mining start --network mainnet --address mhc1…
-# OK: MHCOIN Live Miner / mode live / synced to network tip #…
 ```
 
 Helpers: `packaging/mine_mainnet.sh` · `.bat` · `.ps1`
 
-Notes:
+- Stop Desktop mining (or Quit) before Terminal mining on the **same** data folder.
+- Finding a block is probabilistic (~10 min average for the **network**, not per miner).
+- Only blocks on the active chain pay; stale/side blocks do not.
 
-- Stop Desktop mining (or Quit) before using the terminal on the **same** data folder.
-- Mainnet CLI is **online** by default (`--offline` is for local tests only).
-- On Mac, if `cryptography` fails to build: `brew install openssl@3 pkgconf`, then retry `pip install -e .` (see Desktop → Instructions).
-- Block discovery is probabilistic; the network targets ~600 s **on average**.
-- Difficulty adjusts every block (window 30, damping 1/16).
-- Only **canonical** (active-chain) coinbases pay; stale/side blocks do not.
+---
 
-## Install from source (developers)
+## Build from source
 
 ```bash
 git clone https://github.com/maxut88/MHCOIN.git
 cd MHCOIN
 python3 -m venv .venv
-source .venv/bin/activate   # Windows: .venv\Scripts\activate
-pip install -U pip wheel
-pip install -e ".[dev]"
-pip install -e ".[desktop]"   # Desktop UI
+source .venv/bin/activate          # Windows: .venv\Scripts\activate
+python -m pip install -U pip wheel setuptools
+python -m pip install -e ".[dev,desktop]"
 pytest -q
-```
-
-Run Desktop from source:
-
-```bash
 python -m mhcoin.desktop --network mainnet
 ```
 
-Build installers **on the target OS**:
+Mac note: if `cryptography` fails, install OpenSSL (`brew install openssl@3 pkgconf`) or use `pip install "cryptography>=42" --only-binary=:all:` — see Desktop → **Instructions**.
 
-```bash
-bash packaging/build.sh                 # Linux / macOS
-powershell -File packaging/build.ps1    # Windows
-```
+Packagers: `packaging/build.sh` (Linux/macOS) · `packaging/build.ps1` (Windows) · CI builds on tag `v*`.
 
-CI: [`.github/workflows/desktop-release.yml`](.github/workflows/desktop-release.yml) (Linux, macOS-14, Windows).
+---
 
-## Mainnet node (operators)
+## Run a node
 
 ```bash
 mhcoin node start --network mainnet --host 0.0.0.0 --port 8333
 ```
 
-Peer discovery: hardcoded/DNS seeds, then ADDR gossip ([docs/DISCOVERY.md](docs/DISCOVERY.md)). No central block server.
+Peer discovery: seeds → `peers.dat` → ADDR gossip. Details: [docs/DISCOVERY.md](docs/DISCOVERY.md).
+
+---
 
 ## Documentation
 
-- [Consensus](docs/CONSENSUS.md) — frozen parameters & fingerprint
-- [Genesis](docs/GENESIS.md)
-- [Storage](docs/STORAGE.md) — peers · flat blocks · LMDB chainstate
-- [Wallet](docs/WALLET.md) — BIP39 / BIP32 · `mhc1…`
-- [User FAQ](docs/USER_FAQ.md) — upgrade · backup · mining · peers
-- [Node](docs/NODE.md)
-- [P2P protocol](docs/NETWORK_PROTOCOL.md)
-- [Desktop](docs/DESKTOP.md)
-- [CLI quickstart](docs/USER_QUICKSTART.md)
-- [Security](SECURITY.md)
+| | |
+|---|---|
+| [User FAQ](docs/USER_FAQ.md) | Upgrade · backup · mining · peers |
+| [CLI quickstart](docs/USER_QUICKSTART.md) | Wallet · mine · send |
+| [Desktop](docs/DESKTOP.md) | App notes |
+| [Wallet](docs/WALLET.md) | BIP39 / BIP84 · `mhc1…` |
+| [Consensus](docs/CONSENSUS.md) · [Genesis](docs/GENESIS.md) | Frozen parameters |
+| [Storage](docs/STORAGE.md) · [Node](docs/NODE.md) · [P2P](docs/NETWORK_PROTOCOL.md) | Internals |
+| [Security](SECURITY.md) | Reporting & wallet safety |
+| [Full index](docs/README.md) | All docs |
+
+---
 
 ## License
 
