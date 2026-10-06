@@ -757,10 +757,56 @@ def _page(title: str, body: str, *, tip: int | None = None, hero: bool = False) 
   .ok {{ color: #0f766e; font-weight: 650; }}
   .kv {{ display: grid; grid-template-columns: 150px 1fr; gap: .4rem .85rem; font-size: .93rem; }}
   .kv div:nth-child(odd) {{ color: var(--muted); }}
-  .stats {{ display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: .75rem; }}
-  .stat {{ background: var(--soft); border: 1px solid var(--line); border-radius: 12px; padding: .85rem .9rem; }}
-  .stat .lbl {{ color: var(--muted); font-size: .72rem; font-weight: 650; text-transform: uppercase; letter-spacing: .05em; }}
-  .stat .val {{ font-size: 1.15rem; font-weight: 750; margin-top: .25rem; letter-spacing: -.02em; }}
+  .stats {{
+    display: grid; gap: .55rem;
+    grid-template-columns: repeat(auto-fit, minmax(132px, 1fr));
+    container-type: inline-size; container-name: stats;
+  }}
+  .stat {{
+    background: var(--soft); border: 1px solid var(--line); border-radius: 10px;
+    padding: .7rem .75rem; min-width: 0;
+  }}
+  .stat .lbl {{
+    color: var(--muted); font-size: .68rem; font-weight: 650;
+    text-transform: uppercase; letter-spacing: .04em; line-height: 1.2;
+  }}
+  .stat .val {{
+    font-size: 1.02rem; font-weight: 750; margin-top: .2rem; letter-spacing: -.02em;
+    font-variant-numeric: tabular-nums; line-height: 1.25; word-break: break-word;
+  }}
+  .stat .val .unit {{
+    font-size: .72em; font-weight: 600; color: var(--muted); margin-left: .2rem;
+  }}
+  /* Dense when many tiles share one wide row */
+  .stats.stats-compact {{
+    grid-template-columns: repeat(auto-fit, minmax(108px, 1fr));
+    gap: .45rem;
+  }}
+  .stats.stats-compact .stat {{ padding: .5rem .55rem; border-radius: 8px; }}
+  .stats.stats-compact .stat .lbl {{ font-size: .58rem; letter-spacing: .03em; }}
+  .stats.stats-compact .stat .val {{ font-size: .84rem; margin-top: .12rem; }}
+  .stats.stats-compact .stat .val .unit {{ font-size: .68em; }}
+  .stats.stats-primary {{
+    grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+    margin-bottom: .55rem;
+  }}
+  .stats.stats-primary .stat {{
+    padding: .8rem .85rem; border-color: color-mix(in srgb, var(--line) 70%, #16a34a 30%);
+  }}
+  .stats.stats-primary .stat .val {{ font-size: 1.2rem; }}
+  .stats.stats-primary .stat.s-fee .val {{ color: #b45309; }}
+  [data-theme="dark"] .stats.stats-primary .stat.s-fee .val {{ color: #fbbf24; }}
+  @container stats (min-width: 980px) {{
+    .stats.stats-compact .stat .lbl {{ font-size: .55rem; }}
+    .stats.stats-compact .stat .val {{ font-size: .78rem; }}
+  }}
+  details.io-more {{ margin-top: .35rem; }}
+  details.io-more > summary {{
+    cursor: pointer; color: var(--muted); font-size: .85rem; font-weight: 650;
+    list-style: none; user-select: none; padding: .35rem 0;
+  }}
+  details.io-more > summary::-webkit-details-marker {{ display: none; }}
+  details.io-more > summary:hover {{ color: var(--text); }}
   .pager {{ display: flex; flex-wrap: wrap; gap: .65rem; align-items: center; margin: .75rem 0 0; }}
   .pager a {{
     padding: .35rem .75rem; border-radius: 8px; border: 1px solid var(--line);
@@ -2287,6 +2333,18 @@ def _render_block(b: dict[str, Any]) -> bytes:
     return _page(f"Block {h}", body, tip=tip)
 
 
+def _stat_val(value: Any, *, unit: str | None = None, css: str = "") -> str:
+    """Compact value + optional muted unit suffix for dense stat tiles."""
+    if value is None or value == "":
+        inner = "—"
+    else:
+        inner = _esc(value)
+        if unit:
+            inner += f'<span class="unit">{_esc(unit)}</span>'
+    classes = "val" + (f" {css}" if css else "")
+    return f'<div class="{classes}">{inner}</div>'
+
+
 def _render_tx(t: dict[str, Any]) -> bytes:
     coinbase = bool(t.get("coinbase"))
     ins = []
@@ -2301,7 +2359,7 @@ def _render_tx(t: dict[str, Any]) -> bytes:
             src_h = i.get("source_height")
             src_meta = (
                 f'<span class="muted">vout {_esc(vout)}'
-                + (f' · from block #{_esc(src_h)}' if src_h is not None else "")
+                + (f' · block <a href="/block/{_esc(src_h)}">#{_esc(src_h)}</a>' if src_h is not None else "")
                 + "</span>"
             )
             ins.append(
@@ -2310,7 +2368,7 @@ def _render_tx(t: dict[str, Any]) -> bytes:
                 + f"<div class='io-meta'>{src_meta} → "
                 + _copyable(addr, href=f"/address/{addr}", short=False)
                 + "</div></div>"
-                + f'<div class="io-amt"><strong>{_esc(val)} MHC</strong></div></li>'
+                + f'<div class="io-amt"><strong>{_esc(val)}</strong><span class="unit"> MHC</span></div></li>'
             )
     # Sender = first non-coinbase input address (for change labeling).
     from_addr = None
@@ -2332,8 +2390,22 @@ def _render_tx(t: dict[str, Any]) -> bytes:
             '<li class="io-row"><div class="io-main">'
             + _copyable(addr, href=f"/address/{addr}", short=False)
             + f"{tag}</div>"
-            + f'<div class="io-amt"><strong class="reward">{_esc(o.get("value_mhc"))} MHC</strong></div></li>'
+            + f'<div class="io-amt"><strong class="reward">{_esc(o.get("value_mhc"))}</strong>'
+            + '<span class="unit"> MHC</span></div></li>'
         )
+    # Collapse long From lists (multi-input payments).
+    show_n = 6
+    if len(ins) > show_n + 1:
+        hidden = len(ins) - show_n
+        ins_html = (
+            "".join(ins[:show_n])
+            + f'<details class="io-more"><summary>Show {hidden} more inputs</summary>'
+            + "".join(ins[show_n:])
+            + "</details>"
+        )
+    else:
+        ins_html = "".join(ins) or "<li class='muted'>—</li>"
+
     conf = t.get("confirmations")
     badge = f'<span class="badge">{conf} confirmations</span>' if conf else ""
     height = t.get("block_height")
@@ -2342,25 +2414,9 @@ def _render_tx(t: dict[str, Any]) -> bytes:
         if height is not None
         else '<span class="muted">Unconfirmed</span>'
     )
-    fee_row = ""
-    if not coinbase:
-        fee_row = f"""
-        <div class="stat"><div class="lbl">Fee</div>
-          <div class="val">{_esc(t.get("fee_mhc") or "—")} MHC</div></div>
-        <div class="stat"><div class="lbl">Fee rate</div>
-          <div class="val">{_esc(t.get("fee_rate") or "—")}</div></div>
-        <div class="stat"><div class="lbl">Inputs total</div>
-          <div class="val">{_esc(t.get("input_value_mhc") or "—")} MHC</div></div>
-        <div class="stat"><div class="lbl">Outputs total</div>
-          <div class="val">{_esc(t.get("output_value_mhc") or "—")} MHC</div></div>
-"""
-        if change_mhc is not None:
-            fee_row += f"""
-        <div class="stat"><div class="lbl">Change back</div>
-          <div class="val">{_esc(change_mhc)} MHC</div></div>
-"""
     tip = _inferred_tip(height, conf)
-    amt_lbl = "Reward" if coinbase else "Sent to recipient"
+    amt_lbl = "Reward" if coinbase else "Payment"
+    amt = t.get("amount_mhc") or t.get("output_value_mhc")
     in_n = t.get("input_count") if t.get("input_count") is not None else len(t.get("inputs") or [])
     out_n = t.get("output_count") if t.get("output_count") is not None else len(t.get("outputs") or [])
     in_lbl = f'{_esc(in_n)} input{"s" if int(in_n or 0) != 1 else ""}'
@@ -2369,6 +2425,50 @@ def _render_tx(t: dict[str, Any]) -> bytes:
     out_lbl = f'{_esc(out_n)} output{"s" if int(out_n or 0) != 1 else ""}'
     if t.get("output_value_mhc"):
         out_lbl += f' · {_esc(t.get("output_value_mhc"))} MHC'
+
+    primary = f"""
+      <div class="stats stats-primary">
+        <div class="stat s-amt"><div class="lbl">{amt_lbl}</div>
+          {_stat_val(amt, unit="MHC", css="reward")}</div>
+"""
+    if not coinbase:
+        primary += f"""
+        <div class="stat s-fee"><div class="lbl">Fee</div>
+          {_stat_val(t.get("fee_mhc"), unit="MHC")}</div>
+        <div class="stat"><div class="lbl">Confirmations</div>
+          {_stat_val(conf if conf is not None else "—")}</div>
+"""
+    else:
+        primary += f"""
+        <div class="stat"><div class="lbl">Confirmations</div>
+          {_stat_val(conf if conf is not None else "—")}</div>
+"""
+    primary += "</div>"
+
+    meta_tiles = []
+    if not coinbase:
+        meta_tiles.append(
+            f'<div class="stat"><div class="lbl">Fee rate</div>{_stat_val(t.get("fee_rate") or "—")}</div>'
+        )
+        meta_tiles.append(
+            f'<div class="stat"><div class="lbl">Inputs Σ</div>{_stat_val(t.get("input_value_mhc"), unit="MHC")}</div>'
+        )
+        meta_tiles.append(
+            f'<div class="stat"><div class="lbl">Outputs Σ</div>{_stat_val(t.get("output_value_mhc"), unit="MHC")}</div>'
+        )
+        if change_mhc is not None:
+            meta_tiles.append(
+                f'<div class="stat"><div class="lbl">Change</div>{_stat_val(change_mhc, unit="MHC")}</div>'
+            )
+    meta_tiles.extend(
+        [
+            f'<div class="stat"><div class="lbl">Age</div>{_stat_val(t.get("age") or "—")}</div>',
+            f'<div class="stat"><div class="lbl">Size</div>{_stat_val(t.get("size_bytes"), unit="B")}</div>',
+            f'<div class="stat"><div class="lbl">In / Out</div>{_stat_val(f"{in_n} / {out_n}")}</div>',
+        ]
+    )
+    meta = f'<div class="stats stats-compact">{"".join(meta_tiles)}</div>'
+
     raw_hex = t.get("raw_hex") or ""
     decode_obj = {
         "txid": t.get("txid"),
@@ -2390,22 +2490,11 @@ def _render_tx(t: dict[str, Any]) -> bytes:
         <h1>{_type_pill(coinbase)} {badge}</h1>
         <span class="muted">{included}</span>
       </div>
-      <div class="stats">
-        <div class="stat"><div class="lbl">{amt_lbl}</div>
-          <div class="val"><strong class="reward">{_esc(t.get("amount_mhc") or t.get("output_value_mhc"))} MHC</strong></div></div>
-        {fee_row}
-        <div class="stat"><div class="lbl">Confirmations</div>
-          <div class="val">{_esc(conf if conf is not None else "—")}</div></div>
-        <div class="stat"><div class="lbl">Age</div>
-          <div class="val">{_esc(t.get("age") or "—")}</div></div>
-        <div class="stat"><div class="lbl">Size</div>
-          <div class="val">{_esc(t.get("size_bytes"))} bytes</div></div>
-        <div class="stat"><div class="lbl">In / Out</div>
-          <div class="val">{_esc(in_n)} / {_esc(out_n)}</div></div>
-      </div>
+      {primary}
+      {meta}
       <p class="muted" style="margin:.75rem 0 0;font-size:.85rem">
         {"Block reward credited to miner." if coinbase else
-         "Payment goes to the recipient. Change returns to the sender. Fee = inputs − outputs."}
+         "Payment → recipient · change → sender · fee = inputs − outputs."}
       </p>
       <div class="kv" style="margin-top:1rem">
         <div>Txid</div><div>{_copyable(t.get("txid"), short=False)}</div>
@@ -2418,7 +2507,7 @@ def _render_tx(t: dict[str, Any]) -> bytes:
         <h1>From</h1>
         <span class="muted">{in_lbl}</span>
       </div>
-      <ul class="plain">{"".join(ins) or "<li class='muted'>—</li>"}</ul>
+      <ul class="plain">{ins_html}</ul>
     </div>
     <div class="card">
       <div class="card-head">
