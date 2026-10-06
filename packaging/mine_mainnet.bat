@@ -32,6 +32,17 @@ if "%ADDR%"=="" (
   exit /b 1
 )
 
+"%PY%" -c "import click, cryptography, lmdb, mhcoin" >nul 2>&1
+if errorlevel 1 (
+  echo Missing Python deps in: %PY%
+  echo From repo root ^(folder with packaging^\):
+  echo   python -m venv .venv
+  echo   .venv\Scripts\activate
+  echo   python -m pip install -U pip setuptools wheel
+  echo   python -m pip install -e .
+  exit /b 1
+)
+
 echo.
 echo Starting live miner...
 echo   network: %MHCOIN_NETWORK%

@@ -94,7 +94,7 @@ Open **Instructions** for copy-paste terminal commands.
 
 ```bash
 mhcoin mining start --network mainnet --address mhc1…
-# expect: MHCOIN Live Miner · mode live · synced to network tip
+# OK: MHCOIN Live Miner / mode live / synced to network tip #…
 ```
 
 Helpers: `packaging/mine_mainnet.sh` · `.bat` · `.ps1`
@@ -103,6 +103,7 @@ Notes:
 
 - Stop Desktop mining (or Quit) before using the terminal on the **same** data folder.
 - Mainnet CLI is **online** by default (`--offline` is for local tests only).
+- On Mac, if `cryptography` fails to build: `brew install openssl@3 pkgconf`, then retry `pip install -e .` (see Desktop → Instructions).
 - Block discovery is probabilistic; the network targets ~600 s **on average**.
 - Difficulty adjusts every block (window 30, damping 1/16).
 - Only **canonical** (active-chain) coinbases pay; stale/side blocks do not.

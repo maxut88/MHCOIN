@@ -69,10 +69,17 @@ def _mint_mark(*, title: str = "MHC Mined") -> str:
 
 
 def _type_pill(coinbase: bool) -> str:
-    """Site-wide type badge — green MHC Mined (Live Blocks green) or wrapped Transfer."""
+    """Site-wide type badge — soft sky MHC Mined or teal Transfer."""
     if coinbase:
         return '<span class="pill minted">MHC Mined</span>'
     return '<span class="pill xfer">Transfer</span>'
+
+
+def _flow_pill(*, received: bool) -> str:
+    """Address flow badge — green Received / red Sent."""
+    if received:
+        return '<span class="pill recv">Received</span>'
+    return '<span class="pill sent">Sent</span>'
 
 
 def _short_addr(addr: str | None, n: int = 10) -> str:
@@ -405,7 +412,7 @@ def _page(title: str, body: str, *, tip: int | None = None, hero: bool = False) 
   .kpi .stat.k-peers {{ --accent: #7c3aed; --accent-soft: rgba(124,58,237,.10); }}
   .kpi .stat.k-blocks {{ --accent: #475569; --accent-soft: rgba(71,85,105,.10); }}
   .kpi .stat.k-txs {{ --accent: #4f46e5; --accent-soft: rgba(79,70,229,.10); }}
-  .kpi .stat.k-mint {{ --accent: #059669; --accent-soft: rgba(5,150,105,.11); }}
+  .kpi .stat.k-mint {{ --accent: #38bdf8; --accent-soft: rgba(56,189,248,.14); }}
   .kpi .stat.k-supply {{ --accent: #0f766e; --accent-soft: rgba(15,118,110,.10); }}
   .kpi .stat.k-halving {{ --accent: #b45309; --accent-soft: rgba(180,83,9,.10); }}
   .kpi .lbl {{
@@ -668,9 +675,18 @@ def _page(title: str, body: str, *, tip: int | None = None, hero: bool = False) 
     font-size: .72rem; font-weight: 800; color: #fff; white-space: nowrap;
     letter-spacing: .02em;
   }}
-  /* Same green as Live Blocks (.found .title / .reward) */
-  .pill.minted {{ background: #16a34a; box-shadow: 0 0 0 1px rgba(22,163,74,.25); }}
+  /* Mined = soft sky; Received = green; Sent = red; Transfer = teal */
+  .pill.minted {{
+    background: #e0f2fe; color: #0369a1;
+    box-shadow: 0 0 0 1px rgba(2,132,199,.22);
+  }}
   .pill.xfer {{ background: #0f766e; box-shadow: 0 0 0 1px rgba(15,118,110,.22); }}
+  .pill.recv {{ background: #16a34a; box-shadow: 0 0 0 1px rgba(22,163,74,.25); }}
+  .pill.sent {{ background: #dc2626; box-shadow: 0 0 0 1px rgba(220,38,38,.28); }}
+  [data-theme="dark"] .pill.minted {{
+    background: rgba(56,189,248,.18); color: #7dd3fc;
+    box-shadow: 0 0 0 1px rgba(56,189,248,.28);
+  }}
   .alert {{
     border: 1px solid #fcd34d; background: #fffbeb; color: #92400e;
     border-radius: 12px; padding: .85rem 1rem; margin: 0 0 1rem; font-size: .92rem;
@@ -696,7 +712,7 @@ def _page(title: str, body: str, *, tip: int | None = None, hero: bool = False) 
   .term-feed {{ display: flex; flex-direction: column; gap: .15rem; }}
   .found {{ border-top: 1px solid var(--line); padding-top: .65rem; }}
   .found:first-child {{ border-top: 0; padding-top: 0; }}
-  .found .title {{ color: #16a34a; font-weight: 800; }}
+  .found .title {{ color: #0ea5e9; font-weight: 800; }}
   .found .k {{ color: #9ca3af; }}
   .found .hash, .found .hash a {{
     color: #ca8a04; text-decoration: none;
@@ -704,7 +720,9 @@ def _page(title: str, body: str, *, tip: int | None = None, hero: bool = False) 
     white-space: nowrap; word-break: normal;
   }}
   .found .hash a:hover {{ color: #a16207; text-decoration: underline; }}
-  .found .reward {{ color: #16a34a; font-weight: 700; }}
+  .found .reward {{ color: #0ea5e9; font-weight: 700; }}
+  [data-theme="dark"] .found .title,
+  [data-theme="dark"] .found .reward {{ color: #7dd3fc; }}
   table .reward, .kv .reward, .stat .reward {{ color: #16a34a; font-weight: 700; }}
   /* Terminal-style accents (light panel, same roles as Desktop mine log). */
   .found .h, .found .h a {{ color: #0891b2; font-weight: 700; text-decoration: none; }}
@@ -2432,9 +2450,9 @@ def _render_address(a: dict[str, Any]) -> bytes:
         <div>Address</div><div>{_copyable(addr, short=False)}</div>
         <div>Balance</div><div><strong class="reward">{_esc(a.get("balance_mhc") or "0")} MHC</strong>
           <span class="muted">({_esc(a.get("utxo_count") or 0)} UTXO)</span></div>
-        <div>Received</div><div>{_esc(a.get("total_received_mhc") or "0")} MHC
+        <div>{_flow_pill(received=True)}</div><div>{_esc(a.get("total_received_mhc") or "0")} MHC
           <span class="muted"> · mining + incoming (no change)</span></div>
-        <div>Sent to others</div><div><strong>{_esc(a.get("total_sent_mhc") or "0")}</strong> MHC
+        <div>{_flow_pill(received=False)}</div><div><strong>{_esc(a.get("total_sent_mhc") or "0")}</strong> MHC
           <span class="muted"> · payments only</span></div>
         <div>Network fees</div><div>{_esc(a.get("total_fees_mhc") or "0")} MHC</div>
         <div>Outputs</div><div>{_esc(a.get("received_count"))}{_esc(" (truncated)" if a.get("truncated") else "")}</div>
@@ -2469,7 +2487,8 @@ def _render_richlist(data: dict[str, Any]) -> bytes:
             "<tr>"
             f'<td class="num">{_esc(r.get("rank"))}</td>'
             f'<td>{_copyable(addr, href="/address/" + str(addr), short=False)}</td>'
-            f'<td class="num"><strong class="reward">{_esc(r.get("balance_mhc"))}</strong></td>'
+            f'<td class="num"><span class="row-ico">{_mint_mark(title="Balance")}'
+            f'<strong class="reward">{_esc(r.get("balance_mhc"))}</strong></span></td>'
             f'<td class="num">{_esc(r.get("utxo_count"))}</td>'
             f'<td class="num">{_esc(r.get("share_pct"))}%</td>'
             "</tr>"
@@ -2482,7 +2501,9 @@ def _render_richlist(data: dict[str, Any]) -> bytes:
           <span class="muted">top {_esc(data.get("limit"))} by UTXO balance · {_esc(data.get("source"))}</span>
         </div>
         <p class="muted" style="margin:0 0 .75rem;font-size:.85rem">
-          Circulating in UTXO set: <strong>{_esc(data.get("total_supply_mhc"))} MHC</strong>
+          Circulating in UTXO set:
+          <span class="row-ico">{_mint_mark(title="Supply")}
+          <strong class="reward">{_esc(data.get("total_supply_mhc"))} MHC</strong></span>
           · {_esc(data.get("total_utxos"))} UTXOs
         </p>
         <div class="table-wrap"><table class="data-table">

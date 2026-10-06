@@ -22,6 +22,17 @@ if (-not $Addr) {
 $Addr = ($Addr -replace "\s+", "")
 if (-not $Addr) { throw "No address — abort." }
 
+& $Py -c "import click, cryptography, lmdb, mhcoin" 2>$null
+if ($LASTEXITCODE -ne 0) {
+  Write-Host "Missing Python deps in: $Py" -ForegroundColor Red
+  Write-Host "From repo root (folder with packaging/):"
+  Write-Host "  python -m venv .venv"
+  Write-Host "  .\.venv\Scripts\Activate.ps1"
+  Write-Host "  python -m pip install -U pip setuptools wheel"
+  Write-Host "  python -m pip install -e ."
+  throw "Install deps first."
+}
+
 Write-Host "`nStarting live miner…"
 Write-Host "  network: $($env:MHCOIN_NETWORK)"
 Write-Host "  address: $Addr"

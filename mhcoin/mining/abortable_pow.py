@@ -4,28 +4,37 @@ Same HASH256 / target check as ``mine_block``, with cheap in-memory
 ``abort_check`` polls. Does **not** chunk via ``mine_block`` + RuntimeError
 (that cut Mac CLI hashrate ~1.5× vs a tight PoW loop / Desktop).
 
-Desktop target: match **0.3.7.3** single-lane throughput (proven max + stable).
-Multi-worker search remains available for experiments; GIL thrashing on many
-machines made parallel Desktop mining show high CPU with *lower* H/s.
+Hot path: mutate an 80-byte header buffer in place (nonce @ offset 76) and
+double-SHA256 without re-serializing the header each attempt. Final
+``header.nonce`` / ``header.block_hash()`` stay consensus-identical.
+
+Desktop default: single-lane. Multi-worker search remains for experiments;
+GIL thrashing on many machines made parallel Desktop mining show high CPU
+with *lower* H/s.
 """
 
 from __future__ import annotations
 
 import copy
+import hashlib
+import struct
 import sys
 import threading
 import time
 from typing import Callable
 
 from mhcoin.blockchain.block import Block
-from mhcoin.consensus.difficulty import hash_meets_target
+from mhcoin.consensus.difficulty import bits_to_target
 
-# 0.3.7.3 default — rare polls keep the PoW loop tight.
+# Rare polls keep the PoW loop tight (macOS / Linux).
 ABORT_CHECK_INTERVAL = 25_000
-# Windows Desktop: slightly more frequent so Start/Stop stay responsive without
-# the 128-hash tax that cut hashrate in 0.4.1.9.
-ABORT_CHECK_INTERVAL_WIN32 = 2_000
+# Windows: balance Stop/Start responsiveness vs hashrate. 2_000 was safe but
+# taxed older CPUs; 12_000 ≈ 50–80 ms latency at ~150–250 kH/s.
+ABORT_CHECK_INTERVAL_WIN32 = 12_000
 PROGRESS_INTERVAL = 100_000
+
+_HEADER_LEN = 80
+_NONCE_OFF = 76
 
 
 def _default_abort_every() -> int:
@@ -66,6 +75,14 @@ def _interruptible_sleep(
         time.sleep(min(0.05, left))
 
 
+def _header_work_buf(block: Block) -> tuple[bytearray, int]:
+    """Return mutable 80-byte header + integer target for the hot PoW loop."""
+    raw = bytearray(block.header.serialize())
+    if len(raw) != _HEADER_LEN:
+        raise ValueError(f"bad header length {len(raw)}")
+    return raw, bits_to_target(block.header.bits)
+
+
 def mine_block_cancellable(
     block: Block,
     *,
@@ -80,7 +97,7 @@ def mine_block_cancellable(
 ) -> Block:
     """Mine with periodic ``abort_check``; raises ``MiningAborted`` if True.
 
-    Default path (step=1, duty=1) matches the **0.3.7.3** tight single-lane loop.
+    Default path (step=1, duty=1) is the tight single-lane loop.
     """
     if abort_every is None:
         abort_every = _default_abort_every()
@@ -91,29 +108,35 @@ def mine_block_cancellable(
     if fix_merkle:
         block.set_merkle_root()
 
-    # —— Fast path: identical structure to 0.3.7.3 (max hashrate) ——
+    buf, target = _header_work_buf(block)
+    pack_nonce = struct.pack_into
+    sha256 = hashlib.sha256
+
+    # —— Fast path: in-place nonce + HASH256 (Windows / old Mac friendly) ——
     if step == 1 and duty >= 1.0:
         t0 = time.time()
-        for nonce in range(int(start_nonce), int(max_nonce) + 1):
+        start = int(start_nonce)
+        for nonce in range(start, int(max_nonce) + 1):
             if abort_check is not None and (
-                nonce == start_nonce or (nonce - start_nonce) % abort_every == 0
+                nonce == start or (nonce - start) % abort_every == 0
             ):
                 if abort_check():
                     raise MiningAborted("mining aborted")
-            block.header.nonce = nonce
-            h = block.header.block_hash()
-            if hash_meets_target(h, block.header.bits):
+            pack_nonce("<I", buf, _NONCE_OFF, nonce)
+            h = sha256(sha256(buf).digest()).digest()
+            if int.from_bytes(h, "little") <= target:
+                block.header.nonce = nonce
                 if progress is not None:
                     elapsed = max(time.time() - t0, 1e-9)
-                    progress(nonce, h, (nonce - start_nonce + 1) / elapsed)
+                    progress(nonce, h, (nonce - start + 1) / elapsed)
                 return block
             if (
                 progress is not None
                 and nonce % PROGRESS_INTERVAL == 0
-                and nonce != start_nonce
+                and nonce != start
             ):
                 elapsed = max(time.time() - t0, 1e-9)
-                progress(nonce, h, (nonce - start_nonce + 1) / elapsed)
+                progress(nonce, h, (nonce - start + 1) / elapsed)
         raise RuntimeError("nonce space exhausted without finding PoW")
 
     # —— Stride / duty-cycle path (parallel workers or CPU throttle) ——
@@ -129,10 +152,11 @@ def mine_block_cancellable(
                 if worked > 0:
                     _interruptible_sleep(worked * (1.0 - duty) / duty, abort_check)
                 chunk_t0 = time.perf_counter()
-        block.header.nonce = nonce
-        h = block.header.block_hash()
+        pack_nonce("<I", buf, _NONCE_OFF, nonce)
+        h = sha256(sha256(buf).digest()).digest()
         hashes += 1
-        if hash_meets_target(h, block.header.bits):
+        if int.from_bytes(h, "little") <= target:
+            block.header.nonce = nonce
             if progress is not None:
                 elapsed = max(time.time() - t0, 1e-9)
                 progress(nonce, h, hashes / elapsed)

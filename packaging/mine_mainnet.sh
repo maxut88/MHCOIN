@@ -39,6 +39,15 @@ if [[ -z "${ADDR}" ]]; then
   exit 1
 fi
 
+if ! "${PY}" -c "import click, cryptography, lmdb, mhcoin" >/dev/null 2>&1; then
+  echo "Missing Python deps in: ${PY}" >&2
+  echo "From repo root (folder with packaging/):" >&2
+  echo "  python3 -m venv .venv && source .venv/bin/activate" >&2
+  echo "  python -m pip install -U pip setuptools wheel && python -m pip install -e ." >&2
+  echo "Mac cryptography fail → brew install openssl@3 pkgconf, then retry (see Desktop → Instructions)." >&2
+  exit 1
+fi
+
 echo
 echo "Starting live miner…"
 echo "  network: ${MHCOIN_NETWORK}"

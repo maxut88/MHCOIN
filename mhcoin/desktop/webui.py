@@ -1294,73 +1294,75 @@ async function showMineTerminalHelp(address, network){
   const net = network || "mainnet";
   const addr = (address || "").trim() || "mhc1YOUR_ADDRESS";
   const text =
-`MHCOIN — live mining from Terminal
+`MHCOIN — Terminal miner (same chain as Desktop)
 
-Same mainnet as Desktop: sync tip → mine → broadcast blocks to peers.
-Explorer Connected peers shows your STATUS (MINING yes + H/s).
+1) Quit Desktop mining first (or Quit the app).
+   Only ONE process may write the data folder:
+   ~/.mhcoin/${net}
+   Windows: %USERPROFILE%\\.mhcoin\\${net}
 
-IMPORTANT
-• Stop mining in this app first (or Quit) — only ONE writer per data folder.
-• Do not run Desktop miner and Terminal miner on the same data-dir together.
-• Rewards go to the address below.
-• Stop anytime with Ctrl+C.
-
-Your reward address:
+2) Reward address:
 ${addr}
 
-Network: ${net}
-Data folder: ~/.mhcoin/${net}   (Windows: %USERPROFILE%\\.mhcoin\\${net})
-
 ────────────────────────────────
-1) Get MHCOIN code
+A) Setup once (repo root = folder with packaging/)
 ────────────────────────────────
-git clone -b build/windows-status-hashrate https://github.com/maxut88/MHCOIN.git
+git clone https://github.com/maxut88/MHCOIN.git
 cd MHCOIN
 python3 -m venv .venv
-source .venv/bin/activate          # Windows: .venv\\Scripts\\activate
-pip install -U pip wheel
-pip install -e .
+
+# Do NOT clone into an existing MHCOIN folder (avoid …/MHCOIN/MHCOIN/).
+
+── macOS / Linux ──
+source .venv/bin/activate
+python -m pip install -U pip setuptools wheel
+python -m pip install -e .
+python -c "import click, cryptography, lmdb, mhcoin; print('ok')"
+
+# Mac only — if cryptography fails (OpenSSL / pkg-config):
+brew install openssl@3 pkgconf
+export OPENSSL_DIR="$(brew --prefix openssl@3)"
+export PKG_CONFIG_PATH="$OPENSSL_DIR/lib/pkgconfig"
+python -m pip install "cryptography>=42" --only-binary=:all:
+python -m pip install -e .
+
+── Windows (PowerShell) ──
+.\\.venv\\Scripts\\Activate.ps1
+python -m pip install -U pip setuptools wheel
+python -m pip install -e .
+python -c "import click, cryptography, lmdb, mhcoin; print('ok')"
 
 ────────────────────────────────
-2) Start miner — macOS / Linux
+B) Start miner (from repo root, venv active)
 ────────────────────────────────
+# macOS / Linux
 chmod +x packaging/mine_mainnet.sh
 ./packaging/mine_mainnet.sh ${addr}
 
-# or:
-mhcoin mining start --network ${net} --address ${addr}
-
-You should see: MHCOIN Live Miner · mode live · synced to network tip
-
-────────────────────────────────
-3) Start miner — Windows (CMD)
-────────────────────────────────
-cd %USERPROFILE%\\MHCOIN
+# Windows CMD
 packaging\\mine_mainnet.bat ${addr}
 
-# or:
-mhcoin mining start --network ${net} --address ${addr}
-
-────────────────────────────────
-4) Start miner — Windows (PowerShell)
-────────────────────────────────
-cd ~\\MHCOIN
+# Windows PowerShell
 .\\packaging\\mine_mainnet.ps1 ${addr}
 
-────────────────────────────────
-Notes
-────────────────────────────────
-• Mainnet terminal mining is ONLINE (P2P) — not a private local chain.
-• Use --offline only for local tests; not for mainnet competition.
-• Solo PoW today — not a stratum / ASIC pool yet.
-• Desktop Mining tab → Start mining also races the same live tip.
+# any OS
+mhcoin mining start --network ${net} --address ${addr}
+
+OK when you see:
+  MHCOIN Live Miner
+  mode     live
+  synced to network tip #…
+
+Stop: Ctrl+C
+
+Notes: online P2P · solo PoW (no pool) · Explorer peers show MINING + H/s
 `;
   const copyArea = $("modalCopy");
   copyArea.classList.add("tall");
   try {
     await showModal({
       title: "Terminal mining",
-      message: "Copy commands → paste into Terminal.",
+      message: "Copy → paste into Terminal. Stop Desktop mining first.",
       mode: "copy",
       okLabel: "Done",
       copyText: text,
