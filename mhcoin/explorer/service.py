@@ -828,16 +828,26 @@ def _page(title: str, body: str, *, tip: int | None = None, hero: bool = False) 
   }}
   .tx-sticky {{
     position: sticky; top: 3.6rem; z-index: 15;
-    display: flex; flex-wrap: wrap; gap: .45rem .75rem; align-items: center;
-    padding: .55rem .75rem; margin: 0 0 .85rem;
-    background: color-mix(in srgb, var(--bg) 88%, transparent);
+    display: flex; flex-wrap: wrap; gap: .4rem .65rem; align-items: center;
+    padding: .45rem .7rem; margin: 0 0 .75rem;
+    background: color-mix(in srgb, var(--bg) 90%, transparent);
     backdrop-filter: blur(10px); -webkit-backdrop-filter: blur(10px);
     border: 1px solid var(--line); border-radius: 10px;
     box-shadow: 0 6px 18px rgba(15,23,42,.06);
+    /* Hidden at top of page — shown only after summary scrolls away (no double header). */
+    opacity: 0; pointer-events: none; max-height: 0; margin-bottom: 0; padding-top: 0; padding-bottom: 0;
+    border-width: 0; overflow: hidden; transition: opacity .15s ease;
+  }}
+  .tx-sticky.is-on {{
+    opacity: 1; pointer-events: auto; max-height: 6rem;
+    margin-bottom: .75rem; padding: .45rem .7rem; border-width: 1px;
   }}
   [data-theme="dark"] .tx-sticky {{ box-shadow: 0 6px 18px rgba(0,0,0,.25); }}
   .tx-sticky .tx-sticky-id {{ min-width: 0; flex: 1 1 220px; }}
-  .tx-sticky .tx-sticky-meta {{ display: flex; flex-wrap: wrap; gap: .35rem .65rem; align-items: center; font-size: .82rem; }}
+  .tx-sticky .tx-sticky-meta {{
+    display: flex; flex-wrap: wrap; gap: .3rem .55rem; align-items: center; font-size: .8rem;
+  }}
+  .tx-sticky .tx-sticky-meta .badge {{ font-size: .68rem; }}
   .flow-bars {{ display: grid; gap: .45rem; margin: .85rem 0 0; }}
   .flow-row {{ display: grid; grid-template-columns: 72px 1fr auto; gap: .5rem; align-items: center; font-size: .85rem; }}
   .flow-row .flow-lbl {{ color: var(--muted); font-weight: 650; }}
@@ -2528,8 +2538,9 @@ def _render_tx(t: dict[str, Any]) -> bytes:
     if t.get("output_value_mhc"):
         out_lbl += f' · {_esc(t.get("output_value_mhc"))} MHC'
 
+    # Primary = money only (confirmations live in the card-head badge — no duplicate tile).
     primary = f"""
-      <div class="stats stats-primary">
+      <div class="stats stats-primary" id="txSummary">
         <div class="stat s-amt"><div class="lbl">{amt_lbl}</div>
           {_stat_val(amt, unit="MHC", css="reward")}</div>
 """
@@ -2537,13 +2548,6 @@ def _render_tx(t: dict[str, Any]) -> bytes:
         primary += f"""
         <div class="stat s-fee"><div class="lbl">Fee</div>
           {_stat_val(t.get("fee_mhc"), unit="MHC")}</div>
-        <div class="stat"><div class="lbl">Confirmations</div>
-          {_stat_val(conf if conf is not None else "—")}</div>
-"""
-    else:
-        primary += f"""
-        <div class="stat"><div class="lbl">Confirmations</div>
-          {_stat_val(conf if conf is not None else "—")}</div>
 """
     primary += "</div>"
 
@@ -2579,15 +2583,14 @@ def _render_tx(t: dict[str, Any]) -> bytes:
             f'<span class="pill-unspent">you</span> marks this wallet on the page.</p>'
         )
 
+    # Compact sticky: only after scroll (see JS). Avoid repeating Payment/Fee/Age from tiles.
     sticky = f"""
-    <div class="tx-sticky">
-      <div class="tx-sticky-id">{_copyable(t.get("txid"), short=False)}</div>
+    <div class="tx-sticky" id="txSticky" aria-hidden="true">
+      <div class="tx-sticky-id">{_copyable(t.get("txid"), short=True)}</div>
       <div class="tx-sticky-meta">
-        {_type_pill(coinbase)} {badge}
-        <span class="muted">{amt_lbl}</span>
-        <strong class="reward">{_esc(amt)} MHC</strong>
-        {("· fee <strong>"+_esc(t.get("fee_mhc") or "—")+"</strong> MHC") if not coinbase else ""}
-        · {_esc(t.get("age") or "—")}
+        {_type_pill(coinbase)}
+        <strong class="reward">{_esc(amt)}</strong><span class="unit"> MHC</span>
+        {badge}
       </div>
     </div>
 """
@@ -2671,6 +2674,16 @@ def _render_tx(t: dict[str, Any]) -> bytes:
           }}
         }});
       }});
+      var sticky = document.getElementById('txSticky');
+      var summary = document.getElementById('txSummary');
+      if (sticky && summary && 'IntersectionObserver' in window) {{
+        var io = new IntersectionObserver(function(entries) {{
+          var on = entries[0] && !entries[0].isIntersecting;
+          sticky.classList.toggle('is-on', on);
+          sticky.setAttribute('aria-hidden', on ? 'false' : 'true');
+        }}, {{ rootMargin: '-4.2rem 0px 0px 0px', threshold: 0 }});
+        io.observe(summary);
+      }}
     }})();
     </script>
     """
