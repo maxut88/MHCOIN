@@ -537,14 +537,29 @@ def _txid_index(
     chain: ReadOnlyChain, tip: int
 ) -> dict[bytes, tuple[Transaction, int]]:
     """Map txid → (tx, height) for the active chain tip-down range ``0..tip``."""
+    idx, _spent = _chain_lookup(chain, tip)
+    return idx
+
+
+def _chain_lookup(
+    chain: ReadOnlyChain, tip: int
+) -> tuple[dict[bytes, tuple[Transaction, int]], set[tuple[str, int]]]:
+    """One tip scan: txid index + spent outpoints ``(txid_hex, vout)``."""
     idx: dict[bytes, tuple[Transaction, int]] = {}
+    spent: set[tuple[str, int]] = set()
     for h in range(0, tip + 1):
         block = chain.get_block_by_height(h)
         if block is None:
             continue
         for tx in block.transactions:
             idx[tx.txid()] = (tx, h)
-    return idx
+            if tx.is_coinbase():
+                continue
+            for tin in tx.inputs:
+                if tin.is_coinbase():
+                    continue
+                spent.add((tin.prev_txid.hex(), int(tin.prev_vout)))
+    return idx, spent
 
 
 def _prev_from_index(
@@ -630,7 +645,8 @@ def summarize_tx(
     coinbase = tx.is_coinbase()
     raw = tx.serialize()
     size = len(raw)
-    tx_idx = None if coinbase else _txid_index(chain, tip)
+    tx_idx, spent_ops = _chain_lookup(chain, tip)
+    this_txid = txid_hex(tx)
 
     inputs: list[dict[str, Any]] = []
     in_value = 0
@@ -638,11 +654,7 @@ def summarize_tx(
         if tin.is_coinbase():
             inputs.append({"coinbase": True, "script_sig_hex": tin.script_sig.hex()})
             continue
-        prev = (
-            _prev_from_index(tx_idx, tin.prev_txid, tin.prev_vout)
-            if tx_idx is not None
-            else _prev_output(chain, tin.prev_txid, tin.prev_vout)
-        )
+        prev = _prev_from_index(tx_idx, tin.prev_txid, tin.prev_vout)
         entry: dict[str, Any] = {
             "coinbase": False,
             "prev_txid": tin.prev_txid.hex(),
@@ -663,6 +675,7 @@ def summarize_tx(
     out_value = 0
     for i, tout in enumerate(tx.outputs):
         out_value += int(tout.value)
+        is_spent = (this_txid, i) in spent_ops
         outputs.append(
             {
                 "n": i,
@@ -670,6 +683,8 @@ def summarize_tx(
                 "value_mhc": format_mhc(int(tout.value)),
                 "address": out_address(tout, hrp=hrp),
                 "script_pubkey_hex": tout.script_pubkey.hex(),
+                "spent": is_spent,
+                "status": "spent" if is_spent else "unspent",
             }
         )
 
@@ -839,12 +854,15 @@ def address_history(
     total_fees_paid = 0  # network fees when we fully funded the tx
     tip = chain.height
     now = int(time.time())
+    # Balance after each block that touches this address (sparkline).
+    balance_series: list[int] = []
     for h in range(0, tip + 1):
         block = chain.get_block_by_height(h)
         if block is None:
             continue
         bh = block.block_hash().hex()
         ts = int(block.header.timestamp)
+        touched = False
         for tx in block.transactions:
             txh = txid_hex(tx)
             spent_here = 0
@@ -853,6 +871,7 @@ def address_history(
                     key = (tin.prev_txid.hex(), int(tin.prev_vout))
                     if key in owned:
                         spent_here += owned.pop(key)
+                        touched = True
                 if spent_here:
                     total_spent_inputs += spent_here
                     paid_ext = 0
@@ -880,6 +899,7 @@ def address_history(
                 if not is_change:
                     total_in += val
                 owned[(txh, n)] = val
+                touched = True
                 received.append(
                     {
                         "height": h,
@@ -896,8 +916,21 @@ def address_history(
                         "confirmations": confirmations(tip, h),
                     }
                 )
+        if touched:
+            balance_series.append(sum(owned.values()))
     balance = sum(owned.values())
+    for row in received:
+        key = (row["txid"], int(row["vout"]))
+        is_spent = key not in owned
+        row["spent"] = is_spent
+        row["status"] = "spent" if is_spent else "unspent"
     received.reverse()  # newest first
+    series = balance_series
+    if len(series) > 120:
+        step = max(1, len(series) // 120)
+        series = series[::step]
+        if series and series[-1] != balance_series[-1]:
+            series.append(balance_series[-1])
     return {
         "address": address,
         "received_count": len(received),
@@ -916,6 +949,13 @@ def address_history(
         "tip_height": tip,
         "outputs": received[:limit],
         "truncated": len(received) > limit,
+        "balance_series_sats": series,
+        "flow": {
+            "received_sats": total_in,
+            "sent_sats": total_paid_external,
+            "fees_sats": total_fees_paid,
+            "balance_sats": balance,
+        },
     }
 
 

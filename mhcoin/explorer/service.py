@@ -19,6 +19,7 @@ from urllib.parse import parse_qs, unquote, urlparse
 from mhcoin.blockchain.readonly_chain import ReadOnlyChain
 from mhcoin.explorer import decode as D
 from mhcoin.wallet.addresses import validate_address
+from mhcoin.wallet.send import format_mhc
 
 logger = logging.getLogger("mhcoin.explorer")
 
@@ -807,6 +808,48 @@ def _page(title: str, body: str, *, tip: int | None = None, hero: bool = False) 
   }}
   details.io-more > summary::-webkit-details-marker {{ display: none; }}
   details.io-more > summary:hover {{ color: var(--text); }}
+
+  .pill-spent, .pill-unspent {{
+    display: inline-block; padding: .12rem .45rem; border-radius: 999px;
+    font-size: .68rem; font-weight: 700; letter-spacing: .03em; text-transform: uppercase;
+    vertical-align: middle; white-space: nowrap;
+  }}
+  .pill-unspent {{ background: #dcfce7; color: #166534; }}
+  .pill-spent {{ background: #e5e7eb; color: #4b5563; }}
+  [data-theme="dark"] .pill-unspent {{ background: rgba(22,163,74,.22); color: #86efac; }}
+  [data-theme="dark"] .pill-spent {{ background: rgba(148,163,184,.18); color: #94a3b8; }}
+  .io-row.focus-addr, li.focus-addr {{
+    background: color-mix(in srgb, #16a34a 12%, transparent);
+    box-shadow: inset 3px 0 0 #16a34a;
+    border-radius: 8px; padding-left: .45rem !important;
+  }}
+  [data-theme="dark"] .io-row.focus-addr, [data-theme="dark"] li.focus-addr {{
+    background: color-mix(in srgb, #16a34a 18%, transparent);
+  }}
+  .tx-sticky {{
+    position: sticky; top: 3.6rem; z-index: 15;
+    display: flex; flex-wrap: wrap; gap: .45rem .75rem; align-items: center;
+    padding: .55rem .75rem; margin: 0 0 .85rem;
+    background: color-mix(in srgb, var(--bg) 88%, transparent);
+    backdrop-filter: blur(10px); -webkit-backdrop-filter: blur(10px);
+    border: 1px solid var(--line); border-radius: 10px;
+    box-shadow: 0 6px 18px rgba(15,23,42,.06);
+  }}
+  [data-theme="dark"] .tx-sticky {{ box-shadow: 0 6px 18px rgba(0,0,0,.25); }}
+  .tx-sticky .tx-sticky-id {{ min-width: 0; flex: 1 1 220px; }}
+  .tx-sticky .tx-sticky-meta {{ display: flex; flex-wrap: wrap; gap: .35rem .65rem; align-items: center; font-size: .82rem; }}
+  .flow-bars {{ display: grid; gap: .45rem; margin: .85rem 0 0; }}
+  .flow-row {{ display: grid; grid-template-columns: 72px 1fr auto; gap: .5rem; align-items: center; font-size: .85rem; }}
+  .flow-row .flow-lbl {{ color: var(--muted); font-weight: 650; }}
+  .flow-row .flow-track {{ height: 8px; background: var(--soft); border: 1px solid var(--line); border-radius: 999px; overflow: hidden; }}
+  .flow-row .flow-fill {{ height: 100%; border-radius: 999px; }}
+  .flow-row.f-recv .flow-fill {{ background: #16a34a; }}
+  .flow-row.f-sent .flow-fill {{ background: #dc2626; }}
+  .flow-row.f-fee .flow-fill {{ background: #b45309; }}
+  .flow-row.f-bal .flow-fill {{ background: #2563eb; }}
+  .flow-row .flow-amt {{ font-variant-numeric: tabular-nums; font-weight: 650; white-space: nowrap; }}
+  .bal-spark {{ margin-top: .85rem; }}
+  .bal-spark .spark {{ max-width: 100%; width: 100%; height: 56px; }}
   .pager {{ display: flex; flex-wrap: wrap; gap: .65rem; align-items: center; margin: .75rem 0 0; }}
   .pager a {{
     padding: .35rem .75rem; border-radius: 8px; border: 1px solid var(--line);
@@ -2333,6 +2376,43 @@ def _render_block(b: dict[str, Any]) -> bytes:
     return _page(f"Block {h}", body, tip=tip)
 
 
+
+def _status_pill(spent: bool | None) -> str:
+    if spent is True:
+        return '<span class="pill-spent">spent</span>'
+    if spent is False:
+        return '<span class="pill-unspent">unspent</span>'
+    return '<span class="muted">—</span>'
+
+
+def _flow_bars(flow: dict[str, Any] | None) -> str:
+    """Horizontal received / sent / fees / balance comparison."""
+    if not flow:
+        return ""
+    recv = int(flow.get("received_sats") or 0)
+    sent = int(flow.get("sent_sats") or 0)
+    fees = int(flow.get("fees_sats") or 0)
+    bal = int(flow.get("balance_sats") or 0)
+    peak = max(recv, sent, fees, bal, 1)
+
+    def row(cls: str, label: str, sats: int) -> str:
+        pct = max(2.0, min(100.0, 100.0 * sats / peak)) if sats else 0.0
+        return (
+            f'<div class="flow-row {cls}"><div class="flow-lbl">{_esc(label)}</div>'
+            f'<div class="flow-track"><div class="flow-fill" style="width:{pct:.1f}%"></div></div>'
+            f'<div class="flow-amt">{_esc(format_mhc(sats))} MHC</div></div>'
+        )
+
+    return (
+        '<div class="flow-bars">'
+        + row("f-recv", "Received", recv)
+        + row("f-sent", "Sent", sent)
+        + row("f-fee", "Fees", fees)
+        + row("f-bal", "Balance", bal)
+        + "</div>"
+    )
+
+
 def _stat_val(value: Any, *, unit: str | None = None, css: str = "") -> str:
     """Compact value + optional muted unit suffix for dense stat tiles."""
     if value is None or value == "":
@@ -2347,29 +2427,45 @@ def _stat_val(value: Any, *, unit: str | None = None, css: str = "") -> str:
 
 def _render_tx(t: dict[str, Any]) -> bytes:
     coinbase = bool(t.get("coinbase"))
+    focus = (t.get("focus_address") or "").strip()
+    focus_l = focus.lower() if focus else ""
+
+    def _is_focus(addr: str | None) -> bool:
+        return bool(focus_l and addr and str(addr).lower() == focus_l)
+
+    def _tx_href(txid: str | None) -> str | None:
+        if not txid:
+            return None
+        href = f"/tx/{txid}"
+        if focus:
+            href += f"?addr={focus}"
+        return href
+
     ins = []
     for i in t.get("inputs") or []:
         if i.get("coinbase"):
             ins.append("<li><span class='muted'>New coins (block reward)</span></li>")
-        else:
-            addr = i.get("address") or "?"
-            val = i.get("value_mhc") or "?"
-            prev = i.get("prev_txid")
-            vout = i.get("prev_vout")
-            src_h = i.get("source_height")
-            src_meta = (
-                f'<span class="muted">vout {_esc(vout)}'
-                + (f' · block <a href="/block/{_esc(src_h)}">#{_esc(src_h)}</a>' if src_h is not None else "")
-                + "</span>"
-            )
-            ins.append(
-                '<li class="io-row"><div class="io-main">'
-                + _copyable(prev, href=f"/tx/{prev}", short=False)
-                + f"<div class='io-meta'>{src_meta} → "
-                + _copyable(addr, href=f"/address/{addr}", short=False)
-                + "</div></div>"
-                + f'<div class="io-amt"><strong>{_esc(val)}</strong><span class="unit"> MHC</span></div></li>'
-            )
+            continue
+        addr = i.get("address") or "?"
+        val = i.get("value_mhc") or "?"
+        prev = i.get("prev_txid")
+        vout = i.get("prev_vout")
+        src_h = i.get("source_height")
+        src_meta = (
+            f'<span class="muted">vout {_esc(vout)}'
+            + (f' · block <a href="/block/{_esc(src_h)}">#{_esc(src_h)}</a>' if src_h is not None else "")
+            + "</span>"
+        )
+        focus_cls = " focus-addr" if _is_focus(addr) else ""
+        ins.append(
+            f'<li class="io-row{focus_cls}"><div class="io-main">'
+            + _copyable(prev, href=_tx_href(prev), short=False)
+            + f"<div class='io-meta'>{src_meta} → "
+            + _copyable(addr, href=f"/address/{addr}", short=False)
+            + (" <span class='pill-unspent'>you</span>" if _is_focus(addr) else "")
+            + "</div></div>"
+            + f'<div class="io-amt"><strong>{_esc(val)}</strong><span class="unit"> MHC</span></div></li>'
+        )
     # Sender = first non-coinbase input address (for change labeling).
     from_addr = None
     for i in t.get("inputs") or []:
@@ -2386,10 +2482,16 @@ def _render_tx(t: dict[str, Any]) -> bytes:
             change_mhc = o.get("value_mhc")
         elif not coinbase and from_addr and addr != from_addr:
             tag = " <span class='muted'>(payment)</span>"
+        spent = o.get("spent")
+        if spent is None and o.get("status") in ("spent", "unspent"):
+            spent = o.get("status") == "spent"
+        focus_cls = " focus-addr" if _is_focus(addr) else ""
         outs.append(
-            '<li class="io-row"><div class="io-main">'
+            f'<li class="io-row{focus_cls}"><div class="io-main">'
             + _copyable(addr, href=f"/address/{addr}", short=False)
-            + f"{tag}</div>"
+            + f"{tag}"
+            + (" <span class='pill-unspent'>you</span>" if _is_focus(addr) else "")
+            + f" {_status_pill(spent)}</div>"
             + f'<div class="io-amt"><strong class="reward">{_esc(o.get("value_mhc"))}</strong>'
             + '<span class="unit"> MHC</span></div></li>'
         )
@@ -2469,6 +2571,27 @@ def _render_tx(t: dict[str, Any]) -> bytes:
     )
     meta = f'<div class="stats stats-compact">{"".join(meta_tiles)}</div>'
 
+    focus_banner = ""
+    if focus:
+        focus_banner = (
+            f'<p class="muted" style="margin:0 0 .65rem;font-size:.85rem">'
+            f'Highlighting <a href="/address/{_esc(focus)}">{_esc(focus)}</a> · '
+            f'<span class="pill-unspent">you</span> marks this wallet on the page.</p>'
+        )
+
+    sticky = f"""
+    <div class="tx-sticky">
+      <div class="tx-sticky-id">{_copyable(t.get("txid"), short=False)}</div>
+      <div class="tx-sticky-meta">
+        {_type_pill(coinbase)} {badge}
+        <span class="muted">{amt_lbl}</span>
+        <strong class="reward">{_esc(amt)} MHC</strong>
+        {("· fee <strong>"+_esc(t.get("fee_mhc") or "—")+"</strong> MHC") if not coinbase else ""}
+        · {_esc(t.get("age") or "—")}
+      </div>
+    </div>
+"""
+
     raw_hex = t.get("raw_hex") or ""
     decode_obj = {
         "txid": t.get("txid"),
@@ -2481,10 +2604,13 @@ def _render_tx(t: dict[str, Any]) -> bytes:
         "input_value_mhc": t.get("input_value_mhc"),
         "output_value_mhc": t.get("output_value_mhc"),
         "fee_mhc": t.get("fee_mhc"),
+        "focus_address": focus or None,
     }
     decode_pre = _esc(json.dumps(decode_obj, indent=2, sort_keys=True, default=str))
     body = f"""
     <div class="shell">
+    {sticky}
+    {focus_banner}
     <div class="card">
       <div class="card-head">
         <h1>{_type_pill(coinbase)} {badge}</h1>
@@ -2552,23 +2678,34 @@ def _render_tx(t: dict[str, Any]) -> bytes:
 
 
 def _render_address(a: dict[str, Any]) -> bytes:
+    addr = a.get("address")
     rows = []
     for o in a.get("outputs") or []:
+        spent = o.get("spent")
+        if spent is None and o.get("status") in ("spent", "unspent"):
+            spent = o.get("status") == "spent"
+        txid = o.get("txid") or ""
+        tx_href = f"/tx/{txid}?addr={addr}" if addr and txid else (f"/tx/{txid}" if txid else None)
         rows.append(
             "<tr>"
             f'<td class="num"><span class="row-ico">{_mint_mark(title="MHC Mined" if o.get("coinbase") else "Transfer")}'
             f'<a href="/block/{o.get("height")}">{o.get("height")}</a></span></td>'
-            f'<td class="hash-col">{_copyable(o.get("txid"), short=False, href="/tx/" + str(o.get("txid")))}</td>'
+            f'<td class="hash-col">{_copyable(txid, short=False, href=tx_href)}</td>'
             f'<td class="num">{o.get("vout")}</td>'
             f'<td class="num"><strong class="reward">{_esc(o.get("value_mhc"))}</strong></td>'
+            f'<td>{_status_pill(spent)}</td>'
             f'<td class="muted nowrap num">{_esc(o.get("age") or "")}</td>'
             f'<td class="num-conf">{_esc(o.get("confirmations"))}</td>'
             f"<td>{_type_pill(bool(o.get('coinbase')))}</td>"
             "</tr>"
         )
-    addr = a.get("address")
     tip = a.get("tip_height")
     qr_svg = D.qr_svg(str(addr)) if addr else ""
+    series = a.get("balance_series_sats") or []
+    # sparkline expects MHC-scale floats for nicer Y axis — use MHC units
+    series_mhc = [s / 100_000_000 for s in series] if series else []
+    spark = _sparkline(series_mhc, width=420, height=56) if series_mhc else ""
+    flow_html = _flow_bars(a.get("flow"))
     body = f"""
     <div class="shell">
     <div class="card">
@@ -2587,9 +2724,14 @@ def _render_address(a: dict[str, Any]) -> bytes:
         <div>Outputs</div><div>{_esc(a.get("received_count"))}{_esc(" (truncated)" if a.get("truncated") else "")}</div>
         </div>
       </div>
+      {flow_html}
+      <div class="bal-spark">
+        <div class="muted" style="font-size:.72rem;font-weight:650;text-transform:uppercase;letter-spacing:.04em;margin-bottom:.25rem">Balance over activity</div>
+        {spark or '<span class="muted">No balance history yet.</span>'}
+      </div>
       <p class="muted" style="margin:.75rem 0 0;font-size:.85rem">
         Balance ≈ Received − Sent − Fees.
-        A send spends a larger UTXO, pays the recipient, and returns change to you — change is not “Sent”.
+        Open a tx from this page to highlight this address on From/To.
       </p>
     </div>
     <div class="card">
@@ -2599,8 +2741,8 @@ def _render_address(a: dict[str, Any]) -> bytes:
       </div>
       <div class="table-wrap"><table class="data-table">
         <tr><th class="num">Height</th><th class="hash-col">Txid</th><th class="num">vout</th><th class="num">MHC</th>
-            <th class="num">Age</th><th class="num-conf">Confirmations</th><th>Type</th></tr>
-        {"".join(rows) or '<tr><td colspan="7" class="muted">No outputs</td></tr>'}
+            <th>Status</th><th class="num">Age</th><th class="num-conf">Confirmations</th><th>Type</th></tr>
+        {"".join(rows) or '<tr><td colspan="8" class="muted">No outputs</td></tr>'}
       </table></div>
     </div>
     </div>
@@ -3190,6 +3332,10 @@ def make_handler(app: ExplorerApp):
                     if data is None:
                         self._error(404, "Transaction not found.", want_json=want_json)
                         return
+                    focus = ((qs.get("addr") or qs.get("focus") or [""])[0] or "").strip()
+                    if focus and validate_address(focus, hrp=app.hrp):
+                        data = dict(data)
+                        data["focus_address"] = focus
                     if want_json:
                         self._json(200, data)
                     else:
