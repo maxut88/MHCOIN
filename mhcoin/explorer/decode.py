@@ -453,31 +453,12 @@ def summarize_block(
             if tx.outputs:
                 miner = out_address(tx.outputs[0], hrp=hrp)
         if include_tx_summaries:
-            fee_sats = None
             fee_per_byte = None
-            from_a = "coinbase" if tx.is_coinbase() else None
-            to_a = out_address(tx.outputs[0], hrp=hrp) if tx.outputs else None
-            if not tx.is_coinbase() and tx.inputs:
-                tin = tx.inputs[0]
-                prev = _prev_output(chain, tin.prev_txid, tin.prev_vout)
-                if prev is not None:
-                    tout, _ = prev
-                    from_a = out_address(tout, hrp=hrp)
-                    # approx fee when single-input
-                    if len(tx.inputs) == 1 and int(tout.value) >= out_v:
-                        fee_sats = int(tout.value) - out_v
-                        sz = len(tx.serialize())
-                        if sz > 0:
-                            fee_per_byte = round(fee_sats / sz, 3)
-                if tx.outputs:
-                    to_a = None
-                    for tout in tx.outputs:
-                        cand = out_address(tout, hrp=hrp)
-                        if cand and cand != from_a:
-                            to_a = cand
-                            break
-                    if to_a is None:
-                        to_a = out_address(tx.outputs[0], hrp=hrp)
+            from_a, to_a, fee_sats, _in_v = _transfer_endpoints(chain, tx, hrp=hrp)
+            if fee_sats is not None:
+                sz = len(tx.serialize())
+                if sz > 0:
+                    fee_per_byte = round(fee_sats / sz, 3)
             pay_sats = payment_amount_sats(tx, from_addr=from_a, hrp=hrp)
             tx_rows.append(
                 {
@@ -552,6 +533,88 @@ def _prev_output(chain: ReadOnlyChain, prev_txid: bytes, prev_vout: int):
     return None
 
 
+def _txid_index(
+    chain: ReadOnlyChain, tip: int
+) -> dict[bytes, tuple[Transaction, int]]:
+    """Map txid → (tx, height) for the active chain tip-down range ``0..tip``."""
+    idx: dict[bytes, tuple[Transaction, int]] = {}
+    for h in range(0, tip + 1):
+        block = chain.get_block_by_height(h)
+        if block is None:
+            continue
+        for tx in block.transactions:
+            idx[tx.txid()] = (tx, h)
+    return idx
+
+
+def _prev_from_index(
+    idx: dict[bytes, tuple[Transaction, int]], prev_txid: bytes, prev_vout: int
+):
+    if prev_txid == b"\x00" * 32:
+        return None
+    hit = idx.get(prev_txid)
+    if hit is None:
+        return None
+    tx, height = hit
+    if 0 <= prev_vout < len(tx.outputs):
+        return tx.outputs[prev_vout], height
+    return None
+
+
+def _transfer_endpoints(
+    chain: ReadOnlyChain,
+    tx: Transaction,
+    *,
+    hrp: str = DEFAULT_HRP,
+    idx: dict[bytes, tuple[Transaction, int]] | None = None,
+) -> tuple[str | None, str | None, int | None, int | None]:
+    """Return ``(from_addr, to_addr, fee_sats, input_value_sats)`` for a non-coinbase tx.
+
+    Fee = sum(resolved inputs) − sum(outputs). Requires every prevout to resolve;
+    otherwise fee is ``None`` (shown as — in the UI).
+    """
+    if tx.is_coinbase():
+        to_addr = out_address(tx.outputs[0], hrp=hrp) if tx.outputs else None
+        return "coinbase", to_addr, None, None
+
+    out_v = int(tx.output_value())
+    in_sum = 0
+    resolved = 0
+    from_addr: str | None = None
+    for tin in tx.inputs:
+        if tin.is_coinbase():
+            continue
+        prev = (
+            _prev_from_index(idx, tin.prev_txid, tin.prev_vout)
+            if idx is not None
+            else _prev_output(chain, tin.prev_txid, tin.prev_vout)
+        )
+        if prev is None:
+            continue
+        tout, _ = prev
+        resolved += 1
+        in_sum += int(tout.value)
+        if from_addr is None:
+            from_addr = out_address(tout, hrp=hrp)
+
+    fee_sats: int | None = None
+    non_cb_inputs = sum(1 for tin in tx.inputs if not tin.is_coinbase())
+    if non_cb_inputs > 0 and resolved == non_cb_inputs and in_sum >= out_v:
+        fee_sats = in_sum - out_v
+
+    to_addr: str | None = None
+    if tx.outputs:
+        for tout in tx.outputs:
+            cand = out_address(tout, hrp=hrp)
+            if cand and cand != from_addr:
+                to_addr = cand
+                break
+        if to_addr is None:
+            to_addr = out_address(tx.outputs[0], hrp=hrp)
+
+    return from_addr, to_addr, fee_sats, (in_sum if resolved else None)
+
+
 def summarize_tx(
     chain: ReadOnlyChain,
     tx: Transaction,
@@ -567,6 +630,7 @@ def summarize_tx(
     coinbase = tx.is_coinbase()
     raw = tx.serialize()
     size = len(raw)
+    tx_idx = None if coinbase else _txid_index(chain, tip)
 
     inputs: list[dict[str, Any]] = []
     in_value = 0
@@ -574,7 +638,11 @@ def summarize_tx(
         if tin.is_coinbase():
             inputs.append({"coinbase": True, "script_sig_hex": tin.script_sig.hex()})
             continue
-        prev = _prev_output(chain, tin.prev_txid, tin.prev_vout)
+        prev = (
+            _prev_from_index(tx_idx, tin.prev_txid, tin.prev_vout)
+            if tx_idx is not None
+            else _prev_output(chain, tin.prev_txid, tin.prev_vout)
+        )
         entry: dict[str, Any] = {
             "coinbase": False,
             "prev_txid": tin.prev_txid.hex(),
@@ -942,14 +1010,15 @@ def transactions_page(
     now = int(time.time())
     out: list[dict[str, Any]] = []
     seen = 0
+    tx_idx = _txid_index(chain, tip)
     for h in range(tip, -1, -1):
         block = chain.get_block_by_height(h)
         if block is None:
             continue
         bh = block.block_hash().hex()
         ts = int(block.header.timestamp)
-        for idx in range(len(block.transactions) - 1, -1, -1):
-            tx = block.transactions[idx]
+        for tx_i in range(len(block.transactions) - 1, -1, -1):
+            tx = block.transactions[tx_i]
             cb = tx.is_coinbase()
             if transfers_only and cb:
                 continue
@@ -957,30 +1026,9 @@ def transactions_page(
                 seen += 1
                 continue
             out_v = int(tx.output_value())
-            from_addr: str | None = None
-            to_addr: str | None = None
-            fee_sats: int | None = None
-            if cb:
-                to_addr = out_address(tx.outputs[0], hrp=hrp) if tx.outputs else None
-                from_addr = "coinbase"
-            else:
-                tin = tx.inputs[0]
-                prev = _prev_output(chain, tin.prev_txid, tin.prev_vout)
-                if prev is not None:
-                    tout, _ = prev
-                    from_addr = out_address(tout, hrp=hrp)
-                    in_sum = int(tout.value)
-                    if len(tx.inputs) == 1 and in_sum >= out_v:
-                        fee_sats = in_sum - out_v
-                if tx.outputs:
-                    to_addr = None
-                    for tout in tx.outputs:
-                        cand = out_address(tout, hrp=hrp)
-                        if cand and cand != from_addr:
-                            to_addr = cand
-                            break
-                    if to_addr is None:
-                        to_addr = out_address(tx.outputs[0], hrp=hrp)
+            from_addr, to_addr, fee_sats, _in_v = _transfer_endpoints(
+                chain, tx, hrp=hrp, idx=tx_idx
+            )
             pay_sats = payment_amount_sats(tx, from_addr=from_addr, hrp=hrp)
             out.append(
                 {
@@ -1003,7 +1051,7 @@ def transactions_page(
                     "from": from_addr,
                     "to": to_addr,
                     "size_bytes": len(tx.serialize()),
-                    "index_in_block": idx,
+                    "index_in_block": tx_i,
                 }
             )
             seen += 1
@@ -1035,6 +1083,7 @@ def recent_transactions(
     tip = chain.height if tip is None else tip
     now = int(time.time())
     out: list[dict[str, Any]] = []
+    tx_idx = _txid_index(chain, tip)
     for h in range(tip, -1, -1):
         block = chain.get_block_by_height(h)
         if block is None:
@@ -1042,37 +1091,15 @@ def recent_transactions(
         bh = block.block_hash().hex()
         ts = int(block.header.timestamp)
         # Newest-first within block: reverse index order
-        for idx in range(len(block.transactions) - 1, -1, -1):
-            tx = block.transactions[idx]
+        for tx_i in range(len(block.transactions) - 1, -1, -1):
+            tx = block.transactions[tx_i]
             cb = tx.is_coinbase()
             if transfers_only and cb:
                 continue
             out_v = int(tx.output_value())
-            from_addr: str | None = None
-            to_addr: str | None = None
-            fee_sats: int | None = None
-            if cb:
-                to_addr = out_address(tx.outputs[0], hrp=hrp) if tx.outputs else None
-                from_addr = "coinbase"
-            else:
-                tin = tx.inputs[0]
-                prev = _prev_output(chain, tin.prev_txid, tin.prev_vout)
-                if prev is not None:
-                    tout, _ = prev
-                    from_addr = out_address(tout, hrp=hrp)
-                    in_sum = int(tout.value)
-                    if len(tx.inputs) == 1 and in_sum >= out_v:
-                        fee_sats = in_sum - out_v
-                if tx.outputs:
-                    # Prefer first non-change output as the payment destination.
-                    to_addr = None
-                    for tout in tx.outputs:
-                        cand = out_address(tout, hrp=hrp)
-                        if cand and cand != from_addr:
-                            to_addr = cand
-                            break
-                    if to_addr is None:
-                        to_addr = out_address(tx.outputs[0], hrp=hrp)
+            from_addr, to_addr, fee_sats, _in_v = _transfer_endpoints(
+                chain, tx, hrp=hrp, idx=tx_idx
+            )
             pay_sats = payment_amount_sats(tx, from_addr=from_addr, hrp=hrp)
             out.append(
                 {
@@ -1095,7 +1122,7 @@ def recent_transactions(
                     "from": from_addr,
                     "to": to_addr,
                     "size_bytes": len(tx.serialize()),
-                    "index_in_block": idx,
+                    "index_in_block": tx_i,
                 }
             )
             if len(out) >= count:

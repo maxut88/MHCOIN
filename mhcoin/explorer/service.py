@@ -774,6 +774,17 @@ def _page(title: str, body: str, *, tip: int | None = None, hero: bool = False) 
   .badge.warn {{ background: #fef3c7; color: #92400e; }}
   ul.plain {{ list-style: none; padding: 0; margin: 0; }}
   ul.plain li {{ padding: .55rem 0; border-bottom: 1px solid var(--line); }}
+  ul.plain li.io-row {{
+    display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: .35rem .85rem;
+    align-items: start;
+  }}
+  ul.plain li.io-row .io-main {{ min-width: 0; word-break: break-all; }}
+  ul.plain li.io-row .io-amt {{ white-space: nowrap; text-align: right; font-variant-numeric: tabular-nums; }}
+  ul.plain li.io-row .io-meta {{ grid-column: 1 / -1; font-size: .8rem; }}
+  @media (max-width: 720px) {{
+    ul.plain li.io-row {{ grid-template-columns: 1fr; }}
+    ul.plain li.io-row .io-amt {{ text-align: left; }}
+  }}
   footer.site {{ width: 100%; margin: 0; padding: 0 1.5rem 2rem; color: var(--muted); font-size: .82rem; }}
   @media (max-width: 720px) {{
     .kv {{ grid-template-columns: 1fr; }}
@@ -2286,12 +2297,20 @@ def _render_tx(t: dict[str, Any]) -> bytes:
             addr = i.get("address") or "?"
             val = i.get("value_mhc") or "?"
             prev = i.get("prev_txid")
+            vout = i.get("prev_vout")
+            src_h = i.get("source_height")
+            src_meta = (
+                f'<span class="muted">vout {_esc(vout)}'
+                + (f' · from block #{_esc(src_h)}' if src_h is not None else "")
+                + "</span>"
+            )
             ins.append(
-                "<li>"
-                + _copyable(prev, href=f"/tx/{prev}")
-                + f":{i.get('prev_vout')} → "
+                '<li class="io-row"><div class="io-main">'
+                + _copyable(prev, href=f"/tx/{prev}", short=False)
+                + f"<div class='io-meta'>{src_meta} → "
                 + _copyable(addr, href=f"/address/{addr}", short=False)
-                + f" <strong>{_esc(val)} MHC</strong></li>"
+                + "</div></div>"
+                + f'<div class="io-amt"><strong>{_esc(val)} MHC</strong></div></li>'
             )
     # Sender = first non-coinbase input address (for change labeling).
     from_addr = None
@@ -2310,9 +2329,10 @@ def _render_tx(t: dict[str, Any]) -> bytes:
         elif not coinbase and from_addr and addr != from_addr:
             tag = " <span class='muted'>(payment)</span>"
         outs.append(
-            "<li>"
+            '<li class="io-row"><div class="io-main">'
             + _copyable(addr, href=f"/address/{addr}", short=False)
-            + f" <strong class='reward'>{_esc(o.get('value_mhc'))} MHC</strong>{tag}</li>"
+            + f"{tag}</div>"
+            + f'<div class="io-amt"><strong class="reward">{_esc(o.get("value_mhc"))} MHC</strong></div></li>'
         )
     conf = t.get("confirmations")
     badge = f'<span class="badge">{conf} confirmations</span>' if conf else ""
@@ -2329,6 +2349,10 @@ def _render_tx(t: dict[str, Any]) -> bytes:
           <div class="val">{_esc(t.get("fee_mhc") or "—")} MHC</div></div>
         <div class="stat"><div class="lbl">Fee rate</div>
           <div class="val">{_esc(t.get("fee_rate") or "—")}</div></div>
+        <div class="stat"><div class="lbl">Inputs total</div>
+          <div class="val">{_esc(t.get("input_value_mhc") or "—")} MHC</div></div>
+        <div class="stat"><div class="lbl">Outputs total</div>
+          <div class="val">{_esc(t.get("output_value_mhc") or "—")} MHC</div></div>
 """
         if change_mhc is not None:
             fee_row += f"""
@@ -2337,6 +2361,14 @@ def _render_tx(t: dict[str, Any]) -> bytes:
 """
     tip = _inferred_tip(height, conf)
     amt_lbl = "Reward" if coinbase else "Sent to recipient"
+    in_n = t.get("input_count") if t.get("input_count") is not None else len(t.get("inputs") or [])
+    out_n = t.get("output_count") if t.get("output_count") is not None else len(t.get("outputs") or [])
+    in_lbl = f'{_esc(in_n)} input{"s" if int(in_n or 0) != 1 else ""}'
+    if t.get("input_value_mhc"):
+        in_lbl += f' · {_esc(t.get("input_value_mhc"))} MHC'
+    out_lbl = f'{_esc(out_n)} output{"s" if int(out_n or 0) != 1 else ""}'
+    if t.get("output_value_mhc"):
+        out_lbl += f' · {_esc(t.get("output_value_mhc"))} MHC'
     raw_hex = t.get("raw_hex") or ""
     decode_obj = {
         "txid": t.get("txid"),
@@ -2368,10 +2400,12 @@ def _render_tx(t: dict[str, Any]) -> bytes:
           <div class="val">{_esc(t.get("age") or "—")}</div></div>
         <div class="stat"><div class="lbl">Size</div>
           <div class="val">{_esc(t.get("size_bytes"))} bytes</div></div>
+        <div class="stat"><div class="lbl">In / Out</div>
+          <div class="val">{_esc(in_n)} / {_esc(out_n)}</div></div>
       </div>
       <p class="muted" style="margin:.75rem 0 0;font-size:.85rem">
         {"Block reward credited to miner." if coinbase else
-         "You sent the payment amount to the recipient. Change returns to your wallet. Only payment + network fee leave your balance."}
+         "Payment goes to the recipient. Change returns to the sender. Fee = inputs − outputs."}
       </p>
       <div class="kv" style="margin-top:1rem">
         <div>Txid</div><div>{_copyable(t.get("txid"), short=False)}</div>
@@ -2380,11 +2414,17 @@ def _render_tx(t: dict[str, Any]) -> bytes:
       </div>
     </div>
     <div class="card">
-      <h1>From</h1>
+      <div class="card-head">
+        <h1>From</h1>
+        <span class="muted">{in_lbl}</span>
+      </div>
       <ul class="plain">{"".join(ins) or "<li class='muted'>—</li>"}</ul>
     </div>
     <div class="card">
-      <h1>To</h1>
+      <div class="card-head">
+        <h1>To</h1>
+        <span class="muted">{out_lbl}</span>
+      </div>
       <ul class="plain">{"".join(outs) or "<li class='muted'>—</li>"}</ul>
     </div>
     <div class="card">
