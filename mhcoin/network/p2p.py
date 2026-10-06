@@ -1,4 +1,4 @@
-"""P2P manager — peers, listen, connect, relay, Stage 7 discovery/bans."""
+"""P2P manager — peers, listen, connect, relay, discovery/bans."""
 
 from __future__ import annotations
 

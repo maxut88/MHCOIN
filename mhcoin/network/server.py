@@ -1,4 +1,4 @@
-"""TCP listen server for MHCOIN P2P (Stage 2)."""
+"""TCP listen server for MHCOIN P2P."""
 
 from __future__ import annotations
 

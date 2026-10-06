@@ -110,8 +110,8 @@ class Peer:
         self.on_handshaked = on_handshaked
         self.on_close = on_close
         self.handshake_timeout = handshake_timeout
-        self.relay = None  # set by P2PManager when Stage 3 TxRelay is attached
-        self.discovery = None  # Stage 7 DiscoveryManager
+        self.relay = None  # set by P2PManager when TxRelay is attached
+        self.discovery = None  # DiscoveryManager
 
         try:
             peername = sock.getpeername()

@@ -1,7 +1,7 @@
 """UTXO set: create/spend, double-spend protection, LMDB persistence, undo/rollback.
 
-On-disk layout (Bitcoin-role ``chainstate/`` KV store via LMDB — portable
-wheels on Linux/macOS/Windows; same key layout as a LevelDB chainstate):
+On-disk layout (``chainstate/`` LMDB KV store — portable wheels on
+Linux/macOS/Windows):
 
   key ``C`` + txid(32) + vout_u32be  → coin value
   key ``M`` + utf-8 meta key         → utf-8 meta value

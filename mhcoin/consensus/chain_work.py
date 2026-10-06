@@ -35,7 +35,7 @@ def select_best_chain(candidates: list[list[Block]]) -> list[Block]:
     Choose the chain with the greatest cumulative PoW (offline helper).
 
     Tie-break for this helper: longer height, then tip hash hex.
-    Live Stage 6 reorg policy differs: equal work keeps the current active tip
+    Live reorg policy differs: equal work keeps the current active tip
     (no unnecessary reorganization). See docs/REORG.md.
     """
     if not candidates:

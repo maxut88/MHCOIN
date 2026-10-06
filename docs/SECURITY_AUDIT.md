@@ -1,9 +1,8 @@
-# MHCOIN Stage 8 — Security & Adversarial Audit
+# MHCOIN Security & Adversarial Audit
 
 ## Goal
 
-Stage 8 does **not** add large new features. It audits and hardens the existing
-node so that adversarial peers cannot:
+Hardening so that adversarial peers cannot:
 
 - mutate consensus state with invalid data
 - exhaust memory / request tables
@@ -18,13 +17,14 @@ attack
   → penalty (misbehavior score)
   → disconnect
   → ban (threshold)
-  → kick remaining sockets for host
+  → kick remaining sockets for that host
   → honest peers continue
 ```
 
 ## Clarification on “limits”
 
-There are **no** DNS seeds / seed-node lists / central directories (by design).
+Bootstrap seeds (hardcoded / optional DNS) are **not** consensus authorities.
+There is no central directory that nodes must trust for chain validity.
 
 There **are** explicit safety limits, including:
 
@@ -40,7 +40,7 @@ There **are** explicit safety limits, including:
 | Peers | `DEFAULT_MAX_PEERS`, inbound-per-host, connect rate |
 | Abuse | ban score threshold, host bans, kick-on-ban |
 
-## Stage 8 hardenings
+## Hardenings
 
 1. **Ban bypass fix** — misbehavior scores are **not** cleared on handshake.
 2. **Unified penalty path** — malformed INV/GETDATA/TX/BLOCK/HEADERS/GETHEADERS
@@ -73,10 +73,11 @@ Localhost tests share `127.0.0.1`, so host-bans affect all local peers.
 Production deployments on distinct IPs keep honest peers connected while the
 attacker host is banned.
 
-## Not Stage 8 / deferred to Stage 9
+## Out of scope / future policy
 
-- Mainnet genesis finalization
-- Production difficulty schedule
-- Public DNS seeds (still not planned as a consensus dependency)
 - Public HTTP RPC / exchange APIs
-- Tor/I2P
+- Tor / I2P transports
+- Mining pool protocols
+
+Consensus genesis, difficulty schedule, and fingerprint are already frozen —
+see [CONSENSUS.md](CONSENSUS.md) and [GENESIS.md](GENESIS.md).

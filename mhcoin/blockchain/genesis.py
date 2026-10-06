@@ -1,4 +1,4 @@
-"""Network genesis construction, freeze verification, and validation (Stage 9)."""
+"""Network genesis construction, freeze verification, and validation."""
 
 from __future__ import annotations
 

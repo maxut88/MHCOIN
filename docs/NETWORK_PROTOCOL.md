@@ -1,27 +1,12 @@
 # MHCOIN Network Protocol
 
-## Status
+Wire protocol for MHCOIN full nodes. Related: [DISCOVERY.md](DISCOVERY.md),
+[REORG.md](REORG.md), [SECURITY_AUDIT.md](SECURITY_AUDIT.md).
 
-| Stage | Scope | Status |
-|-------|--------|--------|
-| 1 | Message envelope | **Done** |
-| 2 | VERSION/VERACK/PING/PONG + TCP peers | **Done** |
-| 3 | INV / GETDATA / TX relay | **Done** |
-| 4 | BLOCK relay + full block validation | **Done** |
-| 5 | HEADERS + chain sync | **Done** |
-| 6 | Reorg / fork choice | **Done** |
-| 7 | Peer discovery / bans / reconnect | **Done** |
-| 8 | Security & adversarial audit | **Done** |
-| 9 | Mainnet preparation (frozen genesis, versioning) | **Done** (no auto-launch) |
-
----
-
-## Envelope (Stage 1)
+## Envelope
 
 `[ magic 4 ][ command 12 ][ length u32 LE ][ checksum 4 ][ payload ]`  
 Checksum = `HASH256(payload)[:4]`. `MAX_PAYLOAD_SIZE` = 1_000_000.
-
----
 
 ## Inventory
 
@@ -30,9 +15,18 @@ Checksum = `HASH256(payload)[:4]`. `MAX_PAYLOAD_SIZE` = 1_000_000.
 | TX | 1 |
 | BLOCK | 2 |
 
----
+## Handshake & keepalive
 
-## Stage 5–6 — synchronization & forks
+`VERSION` / `VERACK` establish the session. `PING` / `PONG` keep the link alive.
+Peers outside `[MIN_SUPPORTED_PROTOCOL_VERSION, MAX_SUPPORTED_PROTOCOL_VERSION]`
+are disconnected.
+
+## Transaction & block relay
+
+`INV` → `GETDATA` → `TX` / `BLOCK`. Full blocks are validated (PoW, merkle,
+UTXO rules) before acceptance. See [TRANSACTIONS.md](TRANSACTIONS.md).
+
+## Synchronization & forks
 
 ### GETHEADERS
 
@@ -66,8 +60,8 @@ handshake (peer start_height hint > ours — informational only)
   → repeat GETHEADERS until empty HEADERS
 ```
 
-Stage 6: headers need not extend the active tip if the first header's parent is
-already known. Full blocks remain required for UTXO validation. Fork choice uses
+Headers need not extend the active tip if the first header's parent is already
+known. Full blocks remain required for UTXO validation. Fork choice uses
 **local cumulative work** only — see [REORG.md](REORG.md).
 
 ### Limits
@@ -82,13 +76,9 @@ already known. Full blocks remain required for UTXO validation. Fork choice uses
 | MAX_ORPHAN_BYTES | 2_000_000 |
 | headers/sync timeouts | 15s / 30s |
 
-### Not in Stage 6
+Not in scope for this protocol layer: HEADERS-only light clients, mining pools, SPV.
 
-HEADERS-only light clients, seed nodes, mainnet genesis, mining pools, SPV.
-
----
-
-## Stage 7 — discovery & resilience
+## Discovery & resilience
 
 See [DISCOVERY.md](DISCOVERY.md).
 
@@ -96,11 +86,9 @@ See [DISCOVERY.md](DISCOVERY.md).
 - Persistent AddrDB + ban list
 - Outbound target + reconnect
 - Misbehavior scoring on invalid blocks / protocol abuse
-- **No DNS seeds / no central peer directory**
+- Optional DNS / hardcoded seeds for first contact only (not consensus)
 
----
-
-## Stage 8 — security & adversarial audit
+## Security
 
 See [SECURITY_AUDIT.md](SECURITY_AUDIT.md).
 

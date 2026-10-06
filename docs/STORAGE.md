@@ -8,9 +8,9 @@ Layout under `--data-dir` (per network):
   bans.json          # misbehavior / bans
   chain.sqlite       # block index + undo + tip meta (schema_version=3)
   blocks/
-    blk00000.dat     # append-only raw blocks (Bitcoin-style)
+    blk00000.dat     # append-only raw block files
     blk00001.dat     # …
-  chainstate/        # LMDB UTXO set (Bitcoin chainstate role); migrates legacy utxo.sqlite
+  chainstate/        # LMDB UTXO set; migrates legacy utxo.sqlite
   wallet.json        # wallet (unchanged by chain storage migrations)
 ```
 
@@ -27,15 +27,15 @@ Opening a datadir runs idempotent migrations (v1→index, embedded raw→flat fi
 
 ## UTXO (`chainstate/`)
 
-LMDB keys (same layout Bitcoin uses conceptually for coins):
+LMDB key layout:
 
 | Key | Value |
 |-----|-------|
 | `C` + txid(32) + vout_u32be | value_u64be \| height_u32be \| coinbase_u8 \| script_pubkey |
 | `M` + utf-8 meta key | utf-8 meta value |
 
-LMDB is used instead of LevelDB so Desktop builds ship cleanly on macOS/Windows
-(binary wheels). Role matches Bitcoin `chainstate/`: durable UTXO KV + cache.
+LMDB provides portable wheels on macOS/Windows/Linux for Desktop builds.
+`chainstate/` is the durable UTXO key-value store plus an in-memory cache.
 
 In-memory cache mirrors the set for fast validation at current scale; durable
 writes use atomic LMDB transactions (per block apply / disconnect).

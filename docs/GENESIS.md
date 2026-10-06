@@ -1,4 +1,4 @@
-# MHCOIN Genesis (Stage 9)
+# MHCOIN Genesis
 
 ## Rule
 

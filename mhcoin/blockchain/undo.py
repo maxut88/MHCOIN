@@ -1,4 +1,4 @@
-"""Block undo records for UTXO rollback (Stage 6 reorg).
+"""Block undo records for UTXO rollback during reorg.
 
 Versioned JSON — no pickle. Restores exact UTXO state before a block was applied.
 """

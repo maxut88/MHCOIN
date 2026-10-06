@@ -1,6 +1,6 @@
-# MHCOIN Consensus Freeze (RC1)
+# MHCOIN Consensus Freeze
 
-After Stage 9, MHCOIN treats consensus-critical code as **frozen for Release Candidate**.
+Consensus-critical code is **frozen** for mainnet compatibility.
 
 ```
                  MHCOIN
@@ -36,7 +36,7 @@ PYTHONPATH=. python3 -m mhcoin.audit fingerprint
 PYTHONPATH=. python3 -m mhcoin.audit identity
 ```
 
-Identical trees → identical `fingerprint`. Divergent fingerprint ⇒ do not claim the same RC build.
+Identical trees → identical `fingerprint`. Divergent fingerprint ⇒ do not claim the same build.
 
 ## Allowed without consensus bump
 
@@ -56,4 +56,4 @@ When in doubt, treat as consensus and bump `PROTOCOL_VERSION` / document in rele
 3. Re-run `python3 -m mhcoin.audit rc1` and full pytest.
 4. Never edit mainnet genesis constants “to fix a bug” after freeze without an explicit hard-fork decision.
 
-**Mainnet remains NOT LAUNCHED** until `docs/MAINNET_CHECKLIST.md` and `docs/RC1_AUDIT.md` are complete.
+Mainnet genesis and consensus parameters are **frozen** in source. Any consensus change requires an explicit hard-fork decision and release notes.

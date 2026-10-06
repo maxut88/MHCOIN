@@ -327,7 +327,7 @@ def decode_block(payload: bytes) -> Block:
         raise ProtocolError(f"malformed BLOCK: {e}") from e
 
 
-# --- Stage 5: GETHEADERS / HEADERS -----------------------------------------
+# --- GETHEADERS / HEADERS --------------------------------------------------
 
 
 def encode_getheaders(locator: list[bytes], hash_stop: bytes | None = None) -> bytes:
@@ -402,7 +402,7 @@ def decode_headers(payload: bytes) -> list[BlockHeader]:
         raise ProtocolError(f"malformed HEADERS: {e}") from e
 
 
-# --- Stage 7: GETADDR / ADDR -----------------------------------------------
+# --- GETADDR / ADDR --------------------------------------------------------
 
 
 @dataclass(frozen=True)

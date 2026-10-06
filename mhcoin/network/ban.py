@@ -1,4 +1,4 @@
-"""Peer ban / misbehavior scoring (Stage 7–8 node policy)."""
+"""Peer ban / misbehavior scoring (node policy)."""
 
 from __future__ import annotations
 
@@ -162,7 +162,7 @@ class BanManager:
     def misbehavior(self, host: str, points: int, *, reason: str) -> bool:
         """
         Add misbehavior points. Returns True if the host is banned after this call.
-        Scores persist across reconnects (Stage 8: no handshake score wipe).
+        Scores persist across reconnects (no handshake score wipe).
         """
         if points <= 0:
             return False

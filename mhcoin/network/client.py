@@ -1,4 +1,4 @@
-"""Outbound TCP client for MHCOIN P2P (Stage 2)."""
+"""Outbound TCP client for MHCOIN P2P."""
 
 from __future__ import annotations
 

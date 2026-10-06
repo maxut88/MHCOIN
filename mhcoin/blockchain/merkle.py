@@ -8,7 +8,7 @@ from mhcoin.crypto.hashing import hash256
 def merkle_root(txids: list[bytes]) -> bytes:
     """
     Compute Merkle root of transaction ids (32-byte hashes).
-    Odd nodes duplicated (Bitcoin-like behaviour, MHCOIN-owned code).
+    Odd nodes duplicated (MHCOIN merkle rule).
     Empty list → hash of empty bytes (should not happen for real blocks).
     """
     if not txids:

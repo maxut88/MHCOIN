@@ -1,60 +1,64 @@
-# MHCOIN Mainnet Preparation (Stage 9)
+# MHCOIN Mainnet
 
-This document defines production readiness. **Stage 9 does not launch mainnet.**
+Live network identity and operator notes. Genesis and consensus parameters are
+**frozen** in `mhcoin/consensus/params.py`.
 
-## Goals
+## Identity
 
-1. Freeze production consensus parameters.
-2. Freeze reproducible mainnet genesis (hash, merkle, nonce, timestamp, bits, magic).
-3. Hard-separate mainnet / testnet / localnet (magic, ports, genesis, data dirs).
-4. Protocol versioning with explicit upgrade rules.
-5. Genesis verification on every node start.
-6. Document fresh-node bootstrap and launch procedure.
-7. Complete the safety checklist before any real launch.
+| | |
+|---|---|
+| Genesis | `62e078a7ca0dfeac4c6451e5852d5ec714c7aacbff4e48f1d8cc8aa9560a0000` |
+| Consensus fingerprint | `21f256498747b313795b65c9e26f0dd1cb23ee762813bc0d593c2c513e787ae9` |
+| Magic | `4D48434E` (`MHCN`) |
+| Default port | **8333** |
+| Data directory | `~/.mhcoin/mainnet/` |
 
-## Fresh-node bootstrap (no central blockchain server)
-
+```bash
+mhcoin genesis verify --network mainnet
+mhcoin audit fingerprint
 ```
-fresh VPS
+
+## Fresh node bootstrap
+
+```text
+install MHCOIN Core (release) or pip install -e .
    ↓
-install MHCOIN (pip install -e .)
-   ↓
-configure mainnet (MHCOIN_NETWORK=mainnet, dedicated data dir)
+MHCOIN_NETWORK=mainnet · dedicated data dir
    ↓
 mhcoin genesis verify --network mainnet
    ↓
-mhcoin node start --network mainnet --connect <peer1:8333> --connect <peer2:8333>
+mhcoin node start --network mainnet
    ↓
-discover peers (ADDR/GETADDR; no DNS seeds)
+seeds / MHCOIN_CONNECT → peers.dat → ADDR gossip
    ↓
 sync from genesis (GETHEADERS / GETDATA)
    ↓
-verify chain + UTXO supply
-   ↓
-ready
+validate PoW + rules locally
 ```
-
-Example:
 
 ```bash
 export MHCOIN_NETWORK=mainnet
 export MHCOIN_DATA=$HOME/.mhcoin/mainnet
-cd . && pip3 install -e ".[dev]" --user --break-system-packages
 
 mhcoin genesis verify --network mainnet
 
 mhcoin node start \
   --network mainnet \
   --host 0.0.0.0 \
-  --data-dir "$MHCOIN_DATA/node-8333" \
-  --connect 203.0.113.10:8333 \
-  --connect 198.51.100.20:8333
+  --port 8333 \
+  --data-dir "$MHCOIN_DATA/node-8333"
+```
+
+Optional first contact when the default seed is unreachable:
+
+```bash
+export MHCOIN_CONNECT=176.38.3.168:8333
 ```
 
 Empty datadir → frozen mainnet genesis is installed (not mined). Wrong genesis on
 disk → node refuses to start.
 
-## Network separation guarantees
+## Network separation
 
 | Mechanism | Effect |
 |-----------|--------|
@@ -66,11 +70,16 @@ disk → node refuses to start.
 
 It must be impossible to accidentally merge mainnet ↔ testnet or mainnet ↔ localnet.
 
-## What Stage 9 does **not** do
+## Bootstrap vs consensus
 
-- Does not auto-start a public mainnet ceremony.
-- Does not invent a new genesis at runtime.
-- Does not enable DNS seeds or a central “blockchain server”.
-- Does not claim economic readiness (hashrate, exchanges, etc.).
+- Hardcoded seeds and optional DNS seeds are **first contact only**.
+- They do not mint blocks and are not trusted for consensus.
+- Every node validates PoW and rules itself.
+- See [DISCOVERY.md](DISCOVERY.md).
 
-See `docs/LAUNCH.md` and `docs/MAINNET_CHECKLIST.md`.
+## Related
+
+- [GENESIS.md](GENESIS.md)
+- [CONSENSUS.md](CONSENSUS.md)
+- [CONSENSUS_FREEZE.md](CONSENSUS_FREEZE.md)
+- [USER_FAQ.md](USER_FAQ.md)

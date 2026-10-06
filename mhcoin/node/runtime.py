@@ -1,4 +1,4 @@
-"""Long-running MHCOIN node (Stage 4: P2P + TX/BLOCK relay; Stage 9: genesis verify)."""
+"""Long-running MHCOIN node (P2P + TX/BLOCK relay + genesis verify)."""
 
 from __future__ import annotations
 
@@ -154,7 +154,7 @@ class NodeRuntime:
     def prepare_block_template(
         self, miner_address: str, *, hrp: str | None = None
     ) -> tuple[Block, int, int]:
-        """Build a block template from the live node tip/mempool (Bitcoin-style).
+        """Build a block template from the live node tip/mempool.
 
         Callers mine outside locks, then submit via accept_block().
         Returns (block, height, bits).

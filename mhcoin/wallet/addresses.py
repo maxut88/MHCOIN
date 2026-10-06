@@ -1,4 +1,4 @@
-"""MHC address format: Bech32 with HRP `mhc` → displays as mhc1... (not Bitcoin)."""
+"""MHC address format: Bech32 with HRP ``mhc`` → ``mhc1…``."""
 
 from __future__ import annotations
 

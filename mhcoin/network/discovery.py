@@ -1,7 +1,7 @@
-"""Stage 7 — ADDR/GETADDR gossip, outbound selection, reconnect.
+"""ADDR/GETADDR gossip, outbound selection, reconnect.
 
 Bootstrap seeds (hardcoded / DNS) are handled in mhcoin.network.seeds; this
-module maintains the mesh after first contact (Bitcoin-style ADDR gossip).
+module maintains the mesh after first contact (ADDR gossip).
 """
 
 from __future__ import annotations
@@ -109,7 +109,7 @@ class DiscoveryManager:
                     source="inbound" if peer.inbound else "gossip",
                 )
                 self.addrdb.mark_success(peer.host, listen_port)
-        # Stage 8: do NOT clear misbehavior scores on handshake (prevents ban bypass)
+        # Do NOT clear misbehavior scores on handshake (prevents ban bypass)
 
         # Request addresses once per peer
         with self._lock:

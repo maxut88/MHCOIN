@@ -1,4 +1,4 @@
-"""Bounded orphan block pool (Stage 6)."""
+"""Bounded orphan block pool."""
 
 from __future__ import annotations
 

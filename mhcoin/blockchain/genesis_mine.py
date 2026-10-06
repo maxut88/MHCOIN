@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Reproducible MHCOIN genesis tooling (Stage 9).
+"""Reproducible MHCOIN genesis tooling.
 
 Does NOT mutate frozen constants. Use `mine-prepare` to produce candidate JSON;
 operators must review and manually freeze values into mhcoin.consensus.params.

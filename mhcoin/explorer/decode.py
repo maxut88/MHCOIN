@@ -656,7 +656,7 @@ def summarize_tx(
             f"{fee_per_byte:.3f} sat/byte" if fee_per_byte is not None else None
         ),
         "satoshi_per_coin": SATOSHI_PER_COIN,
-        # Explicit N/A for Bitcoin-only concepts (documented in UI)
+        # Explicit N/A for concepts not used by MHCOIN (documented in UI)
         "witness": False,
         "weight": None,
         "rbf": None,

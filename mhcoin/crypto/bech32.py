@@ -1,4 +1,4 @@
-"""Bech32 encoding (BIP-173 style) with MHCOIN-specific HRP — not Bitcoin."""
+"""Bech32 encoding (BIP-173) with MHCOIN HRP ``mhc``."""
 
 from __future__ import annotations
 

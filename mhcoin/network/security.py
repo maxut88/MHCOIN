@@ -1,4 +1,4 @@
-"""Stage 8 — rate limiting helpers for adversarial / DoS defenses."""
+"""Rate limiting helpers for adversarial / DoS defenses."""
 
 from __future__ import annotations
 

@@ -1,4 +1,4 @@
-"""MHCOIN blockchain: block index, active chain, side chains, reorg (Stage 6)."""
+"""MHCOIN blockchain: block index, active chain, side chains, reorg."""
 
 from __future__ import annotations
 
@@ -1011,7 +1011,7 @@ class Blockchain:
         mempool: Mempool | None = None,
     ) -> AcceptResult:
         """
-        Full Stage 6 acceptance: store valid blocks, reorg on greater work.
+        Full acceptance: store valid blocks, reorg on greater work.
         """
         def _do() -> AcceptResult:
             with chain_disk_lock(self.data_dir):

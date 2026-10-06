@@ -126,7 +126,7 @@ def wallet_restore(
     activate: bool,
     gap_limit: int,
 ) -> None:
-    """Restore a wallet from BIP39 seed words (Bitcoin-style)."""
+    """Restore a wallet from BIP39 seed words."""
     paths = wallet_paths(network)
     words = mnemonic or click.prompt("BIP39 mnemonic", hide_input=False)
     pwd = password or os.environ.get("MHCOIN_WALLET_PASSWORD") or _password(create=True)
@@ -168,7 +168,7 @@ def wallet_import_key(
     password: str | None,
     activate: bool,
 ) -> None:
-    """Import a private key (WIF or hex), Bitcoin-compatible."""
+    """Import a private key (WIF or hex)."""
     paths = wallet_paths(network)
     raw = key_text or click.prompt("Private key (WIF or hex)", hide_input=True)
     pwd = password or os.environ.get("MHCOIN_WALLET_PASSWORD") or _password(create=True)
@@ -499,7 +499,7 @@ def blockchain_info(network: str | None, data_dir: str | None) -> None:
 @click.option("--network", default=None)
 @click.option("--data-dir", default=None, type=click.Path())
 def blockchain_forks(network: str | None, data_dir: str | None) -> None:
-    """Show active tip and known side-chain tips (Stage 6)."""
+    """Show active tip and known side-chain tips."""
     paths = wallet_paths(network)
     dpath = Path(data_dir).expanduser().resolve() if data_dir else paths.data_dir
     node = LocalNode(dpath, hrp=paths.hrp, network=paths.network)
@@ -566,7 +566,7 @@ def blockchain_init(network: str | None, password: str | None) -> None:
 
 @cli.group()
 def genesis() -> None:
-    """Frozen genesis show / verify (Stage 9). Never auto-launches mainnet."""
+    """Frozen genesis show / verify."""
 
 
 @genesis.command("show")
@@ -768,7 +768,7 @@ def mining_start(
 
 @cli.group()
 def node() -> None:
-    """P2P node (Stage 2: handshake / ping)."""
+    """P2P node."""
 
 
 @node.command("start")
@@ -797,7 +797,7 @@ def node_start(
     Does not invent genesis: installs the frozen genesis for --network on first start.
     Default network is localnet (never auto-selects mainnet).
 
-    Bootstrap is Bitcoin-style: optional seeds for first contact, then ADDR gossip.
+    Bootstrap: optional seeds for first contact, then ADDR gossip.
     """
     import logging
 
@@ -881,7 +881,7 @@ def node_info(data_dir: str) -> None:
 @node.command("addrs")
 @click.option("--data-dir", required=True, type=click.Path(exists=True))
 def node_addrs(data_dir: str) -> None:
-    """Show known peer addresses from AddrDB (Stage 7)."""
+    """Show known peer addresses from AddrDB."""
     from mhcoin.network.addrdb import AddrDB
 
     db = AddrDB(Path(data_dir) / "peers.dat")
@@ -900,7 +900,7 @@ def node_addrs(data_dir: str) -> None:
 @node.command("bans")
 @click.option("--data-dir", required=True, type=click.Path(exists=True))
 def node_bans(data_dir: str) -> None:
-    """Show banned hosts (Stage 7)."""
+    """Show banned hosts."""
     from mhcoin.network.ban import BanManager
 
     bans = BanManager(Path(data_dir) / "bans.json")

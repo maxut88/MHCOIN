@@ -1,6 +1,6 @@
-"""WIF (Wallet Import Format) encode/decode — Bitcoin-compatible secp256k1 keys.
+"""WIF (Wallet Import Format) encode/decode for secp256k1 keys.
 
-MHCOIN uses the same curve and key material as Bitcoin. Standard compressed
+MHCOIN uses secp256k1 key material. Compressed
 mainnet-style WIF (version ``0x80``) is accepted so keys can move between tools
 that speak WIF; hex (64 nybbles) is also accepted.
 """
@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import hashlib
 
-# Bitcoin mainnet WIF version byte (compressed keys append 0x01 before checksum).
+# WIF version byte 0x80 (compressed keys append 0x01 before checksum).
 WIF_VERSION_MAINNET = 0x80
 
 _B58_ALPHABET = b"123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz"
@@ -65,7 +65,7 @@ def _base58check_decode(text: str) -> bytes:
 
 
 def encode_wif(private_key: bytes, *, compressed: bool = True) -> str:
-    """Encode 32-byte private key as compressed (default) Bitcoin-style WIF."""
+    """Encode 32-byte private key as compressed (default) WIF."""
     if len(private_key) != 32:
         raise ValueError("private key must be 32 bytes")
     payload = bytes([WIF_VERSION_MAINNET]) + private_key

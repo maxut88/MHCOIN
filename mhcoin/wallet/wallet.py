@@ -1,6 +1,6 @@
 """MHCOIN wallet: create keys, addresses, encrypted persistence, send.
 
-Bitcoin-style recovery:
+HD recovery:
 - BIP39 mnemonic (12/24 words) + BIP32 path ``m/84'/0'/0'/0/0``
 - Import raw hex or WIF private key
 
@@ -106,7 +106,7 @@ class Wallet:
         make_default: bool = True,
         strength: int = 128,
     ) -> WalletCreateResult:
-        """Create a new HD wallet from a BIP39 mnemonic (Bitcoin-style).
+        """Create a new HD wallet from a BIP39 mnemonic.
 
         Writes encrypted private key (+ encrypted mnemonic) into wallet.json.
         Returns the mnemonic **once** — store it offline; it is the recovery seed.
@@ -196,7 +196,7 @@ class Wallet:
         label: str = "imported",
         make_default: bool = True,
     ) -> WalletCreateResult:
-        """Import a hex or WIF private key (Bitcoin-compatible WIF)."""
+        """Import a hex or WIF private key (standard WIF)."""
         pwd = password or self._password
         if not pwd:
             raise WalletError("wallet password required for encrypted storage")
@@ -765,7 +765,7 @@ class Wallet:
         # No unused change address available — derive the next one from seed.
         root = next((w for w in account_recs if w.encrypted_mnemonic), None)
         if root is None or not root.encrypted_mnemonic:
-            # Single-key / imported WIF wallets have no BIP39 seed. Bitcoin-style
+            # Single-key / imported WIF wallets have no BIP39 seed.
             # fallback: send change back to the active spendable address so Send
             # still works (no silent fund lock).
             if active.watch_only or not active.encrypted_private_key:

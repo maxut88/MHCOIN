@@ -4,7 +4,7 @@
 
 - Bech32 with human-readable part **`mhc`**
 - Display form: **`mhc1…`** (witness v0, 20-byte pubkey hash)
-- Checksum: Bech32 BCH code (same algorithm family as BIP-173, **different HRP and network** from Bitcoin)
+- Checksum: Bech32 BCH code (BIP-173 family; HRP ``mhc``)
 
 ## Key derivation (BIP84 HD)
 

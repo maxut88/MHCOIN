@@ -1,4 +1,4 @@
-# MHCOIN Consensus (Stage 9)
+# MHCOIN Consensus
 
 Authoritative source: `mhcoin/consensus/params.py`.
 
@@ -58,7 +58,7 @@ Data directories are `~/.mhcoin/<network>/` by default.
 | `PROTOCOL_VERSION` | 1 | Advertised wire version |
 | `MIN_SUPPORTED_PROTOCOL_VERSION` | 1 | Reject older peers |
 | `MAX_SUPPORTED_PROTOCOL_VERSION` | 1 | Reject newer peers |
-| `SOFTWARE_VERSION` | 0.3.0 | Informational user-agent |
+| `SOFTWARE_VERSION` | 0.4.1.12 | Informational user-agent |
 
 ### Compatibility rules
 
@@ -79,4 +79,4 @@ Fee: `sum(input values) - sum(outputs)` (non-negative).
 Header: version, prev hash, merkle root, timestamp, bits, nonce.
 First transaction must be coinbase; coinbase value ≤ subsidy(height) + fees.
 
-See also: `docs/GENESIS.md`, `docs/MAINNET.md`, `docs/LAUNCH.md`.
+See also: [GENESIS.md](GENESIS.md), [MAINNET.md](MAINNET.md), [CONSENSUS_FREEZE.md](CONSENSUS_FREEZE.md).

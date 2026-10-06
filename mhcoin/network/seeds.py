@@ -1,8 +1,8 @@
-"""Bootstrap peers — Bitcoin-style seeds (hardcoded + optional DNS).
+"""Bootstrap peers — hardcoded seeds and optional DNS.
 
 Consensus does NOT depend on these hosts. They are only the first contacts
 for a fresh node. After handshake, ADDR/GETADDR gossip + AddrDB take over
-(same model as Bitcoin Core: seeds → peers.dat → mesh).
+(seeds → peers.dat → mesh).
 """
 
 from __future__ import annotations
@@ -14,7 +14,7 @@ from typing import Iterable
 
 logger = logging.getLogger("mhcoin.seeds")
 
-# Hardcoded IP fallbacks (like Bitcoin pnSeed6 / fixed seeds).
+# Hardcoded IP fallbacks for first contact.
 # Add more operator IPs as the network grows — never a single point of authority.
 HARDCODED_SEEDS: dict[str, list[str]] = {
     "mainnet": [
@@ -25,7 +25,7 @@ HARDCODED_SEEDS: dict[str, list[str]] = {
     "localnet": [],
 }
 
-# DNS seeds (like Bitcoin DNS seeds). Each name should resolve to many A/AAAA
+# DNS seeds. Each name should resolve to many A/AAAA
 # records run by independent operators. Empty until domains are published.
 DNS_SEEDS: dict[str, list[str]] = {
     "mainnet": [
@@ -108,7 +108,7 @@ def default_connect_peers(network: str, *, resolve_dns: bool = True) -> list[str
     """Return bootstrap dial targets for a network (override via env).
 
     Order of preference:
-      1) MHCOIN_CONNECT=host:port,... (manual, Bitcoin --connect style)
+      1) MHCOIN_CONNECT=host:port,... (manual)
       2) Hardcoded seeds + resolved DNS seeds (+ MHCOIN_DNS_SEEDS)
     """
     net = network.strip().lower()

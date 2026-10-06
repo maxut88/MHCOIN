@@ -1,4 +1,4 @@
-"""BIP21-style payment URIs for MHCOIN: ``mhcoin:<address>?amount=<mhc>``.
+"""Payment URIs for MHCOIN: ``mhcoin:<address>?amount=<mhc>``.
 
 The explorer's receive QR still encodes a plain address (see
 ``mhcoin.explorer.decode.qr_svg`` callers) — Desktop prefers the richer

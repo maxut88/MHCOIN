@@ -1,4 +1,4 @@
-"""Flat block files (Bitcoin-style ``blocks/blkNNNNN.dat``).
+"""Flat block files (``blocks/blkNNNNN.dat``).
 
 Index metadata stays in ``chain.sqlite``; raw block bytes live on disk here.
 """
@@ -9,7 +9,7 @@ import os
 import threading
 from pathlib import Path
 
-# ~128 MiB per file, same ballpark as Bitcoin Core's max block file size.
+# ~128 MiB per flat block file.
 DEFAULT_MAX_FILE_BYTES = 128 * 1024 * 1024
 
 

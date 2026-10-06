@@ -1,6 +1,6 @@
-"""Stage 5–6 — chain synchronization (HEADERS + block download + forks).
+"""Chain synchronization (HEADERS + block download + forks).
 
-Stage 6: headers may describe a competing branch; blocks are validated locally;
+Headers may describe a competing branch; blocks are validated locally;
 fork choice uses cumulative work (never peer height).
 """
 
@@ -300,7 +300,7 @@ class SyncManager:
             return
 
         first_prev = headers[0].previous_block_hash
-        # Stage 6: parent must be known (active or side); need not be active tip
+        # Parent must be known (active or side); need not be active tip
         if self.chain.get_index(first_prev) is None and first_prev != ZERO_HASH:
             logger.info(
                 "HEADERS from %s: unknown parent %s — cannot validate yet",

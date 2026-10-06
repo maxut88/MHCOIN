@@ -1,4 +1,4 @@
-"""P2P protocol surface for Stage 1 (message envelope).
+"""P2P protocol surface (message envelope).
 
 Later stages add VERSION/VERACK payloads and peer I/O.
 """

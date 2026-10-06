@@ -411,7 +411,7 @@ class CoreController:
     # --- receive QR (mhcoin: URI, offline SVG) -------------------------------
 
     def receive_qr(self, address: str | None = None, amount_mhc: str | None = None) -> dict:
-        """SVG QR for ``mhcoin:<address>[?amount=]`` (BIP21-style, offline).
+        """SVG QR for ``mhcoin:<address>[?amount=]`` (offline).
 
         Reuses the explorer's vendored qrcodegen — no extra dependency. The
         explorer page itself still encodes a plain address, so Desktop (and
@@ -751,7 +751,7 @@ class CoreController:
         return f"{format_mhc(self._balance_cache_sats)} MHC"
 
     def send(self, to_address: str, amount_mhc: str, password: str, fee_mhc: str | None = None) -> str:
-        # Accept a plain address OR a BIP21-style "mhcoin:<addr>?amount=" URI
+        # Accept a plain address OR a "mhcoin:<addr>?amount=" URI
         # (Desktop's own Receive QR emits the URI form; explorer QR is plain —
         # pasted/scanned values from either must work here).
         from mhcoin.desktop.uri import parse_payment_uri

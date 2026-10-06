@@ -1,6 +1,6 @@
 """Consensus and network constants.
 
-Stage 9: monetary policy and PoW model are defined in mhcoin.consensus.params.
+Monetary policy and PoW model are defined in mhcoin.consensus.params.
 This module re-exports for backward compatibility with existing imports.
 """
 

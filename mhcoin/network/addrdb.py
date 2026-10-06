@@ -1,4 +1,4 @@
-"""Persistent address book for peer discovery (Bitcoin peers.dat analogue).
+"""Persistent address book for peer discovery (``peers.dat``).
 
 Stores peers in ``peers.dat`` (versioned JSON). On first open, migrates a legacy
 ``peers.sqlite`` in the same directory if present.

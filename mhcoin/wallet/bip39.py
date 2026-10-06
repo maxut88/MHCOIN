@@ -1,4 +1,4 @@
-"""BIP39 mnemonic helpers (Bitcoin-compatible English wordlist)."""
+"""BIP39 mnemonic helpers (standard English wordlist)."""
 
 from __future__ import annotations
 

@@ -15,7 +15,7 @@ from mhcoin.consensus.params import (
 
 
 def bits_to_target(bits: int) -> int:
-    """Decode Bitcoin-style compact bits into integer target (MHCOIN-owned)."""
+    """Decode compact nBits into integer target."""
     if bits < 0 or bits > 0xFFFFFFFF:
         raise ValueError("bits out of u32 range")
     exponent = bits >> 24
@@ -51,7 +51,7 @@ def target_to_bits(target: int) -> int:
 
 def hash_meets_target(block_hash: bytes, bits: int) -> bool:
     target = bits_to_target(bits)
-    # Interpret hash as little-endian integer (Bitcoin-like)
+    # Interpret hash as little-endian integer
     value = int.from_bytes(block_hash, "little")
     return value <= target
 

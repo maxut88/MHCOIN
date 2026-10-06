@@ -1,7 +1,7 @@
 """Canonical binary encoding helpers (MHCOIN wire format).
 
 Byte order: little-endian for all multi-byte integers.
-Varints: compact size encoding (MHCOIN-owned; not Bitcoin Core source).
+Varints: MHCOIN compact size encoding.
 
 Transaction layout:
 

@@ -1072,7 +1072,7 @@ function bindHistFilterRow(idPrefix, onChange){
   });
 }
 
-// --- mhcoin: payment URI (BIP21-style) --------------------------------------
+// --- mhcoin: payment URI ----------------------------------------------------
 // Desktop's own Receive QR/copy-link emits "mhcoin:<address>?amount=<mhc>";
 // explorer QR is a plain address — Send must accept both when pasted/scanned.
 function buildMhcoinUri(address, amountMhc){

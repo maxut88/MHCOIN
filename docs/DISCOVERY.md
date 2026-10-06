@@ -1,12 +1,12 @@
-# MHCOIN peer discovery — Bitcoin-style bootstrap
+# MHCOIN peer discovery
 
-## Model (same idea as Bitcoin)
+## Model
 
 ```text
 hardcoded seeds + DNS seeds   ← first contact only (not consensus)
            │
            ▼
-        AddrDB                ← peers.dat (Bitcoin-style peer address book)
+        AddrDB                ← peers.dat (peer address book)
            │
            ▼
    ADDR / GETADDR gossip      ← mesh grows without a central server
@@ -31,7 +31,7 @@ original seed.
 
 ## Bootstrap sources
 
-1. `MHCOIN_CONNECT=host:port,...` — manual (like `bitcoind -connect`)
+1. `MHCOIN_CONNECT=host:port,...` — manual override
 2. Hardcoded seeds in `mhcoin/network/seeds.py`
 3. DNS seeds (`DNS_SEEDS` + `MHCOIN_DNS_SEEDS`) — resolve A/AAAA → many IPs
 
@@ -88,3 +88,9 @@ mhcoin node start --network mainnet
 mhcoin node start --network mainnet --connect 203.0.113.10:8333
 mhcoin node start --network mainnet --no-seed   # dial nothing until gossip/manual
 ```
+
+## Related
+
+- [NODE.md](NODE.md)
+- [NETWORK_PROTOCOL.md](NETWORK_PROTOCOL.md)
+- [USER_FAQ.md](USER_FAQ.md)

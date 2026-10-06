@@ -28,7 +28,7 @@ class WalletRecord:
     public_key_hex: str
     encrypted_private_key: str  # empty string for watch-only
     created_at: str
-    # Optional Bitcoin-style recovery metadata (older wallet.json omit these).
+    # Optional HD recovery metadata (older wallet.json omit these).
     derivation_path: str | None = None
     encrypted_mnemonic: str | None = None
     # HD account grouping: root wallet_id shared by receive/change addresses.

@@ -1,4 +1,4 @@
-"""Bootstrap seed helpers (Bitcoin-style)."""
+"""Bootstrap seed helpers."""
 
 from __future__ import annotations
 

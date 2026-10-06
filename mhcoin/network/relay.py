@@ -1,4 +1,4 @@
-"""Stage 3–4 inventory relay: INV → GETDATA → TX/BLOCK."""
+"""Inventory relay: INV → GETDATA → TX/BLOCK."""
 
 from __future__ import annotations
 
@@ -50,7 +50,7 @@ logger = logging.getLogger("mhcoin.p2p")
 
 class TxRelay:
     """
-    Mempool TX relay + chain BLOCK relay with Stage 6 fork/reorg support.
+    Mempool TX relay + chain BLOCK relay with fork/reorg support.
 
     No private keys. Consensus values are always computed locally.
     """
@@ -116,7 +116,7 @@ class TxRelay:
     def _note_invalid(self, peer: Peer | None, reason: str) -> None:
         self._penalize(peer, MISBEHAVIOR_INVALID_BLOCK, reason)
 
-    # --- TX path (Stage 3) -------------------------------------------------
+    # --- TX path -----------------------------------------------------------
 
     def knows(self, txid_hex: str) -> bool:
         with self._lock:
@@ -174,7 +174,7 @@ class TxRelay:
                 n += 1
         return n
 
-    # --- BLOCK path (Stage 4) ----------------------------------------------
+    # --- BLOCK path --------------------------------------------------------
 
     def accept_block(self, block: Block, *, source_peer: Peer | None = None) -> int:
         """
@@ -415,7 +415,7 @@ class TxRelay:
         with self._lock:
             self._requested_block.discard(hx)
 
-        # Stage 5 ordered sync download
+        # Ordered sync download
         if self.sync is not None and self.sync.handle_incoming_block(peer, block):
             return
 
@@ -461,6 +461,6 @@ class TxRelay:
             except Exception:
                 logger.debug("block INV relay failed to %s", p.addr)
 
-    # backward-compatible alias used by older Stage 3 tests
+    # backward-compatible alias used by older tests
     def _announce_inv(self, txid_hex: str, *, exclude: str | None) -> None:
         self._announce_tx_inv(txid_hex, exclude=exclude)

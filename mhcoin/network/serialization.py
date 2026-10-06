@@ -1,4 +1,4 @@
-"""Canonical P2P message envelope serialization (Stage 1).
+"""Canonical P2P message envelope serialization.
 
 Wire layout (little-endian length; checksum = first 4 bytes of HASH256(payload)):
 

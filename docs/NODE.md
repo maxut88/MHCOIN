@@ -1,7 +1,7 @@
 # MHCOIN Node
 
-Stage 7: nodes gossip peer addresses, reconnect to known peers, and ban abusive
-hosts — still without DNS seeds or a central directory.
+Full nodes gossip peer addresses, reconnect from AddrDB, and ban abusive hosts.
+Bootstrap uses hardcoded/DNS seeds when configured; consensus never trusts seeds.
 
 ## Run multiple nodes
 
@@ -30,9 +30,9 @@ mhcoin blockchain forks --data-dir ~/.mhcoin/localnet/node3
 - `--connect` seeds AddrDB as `manual` sources.
 - Peer ADDR messages are untrusted; limits apply.
 - `peer.start_height` remains a sync **hint**, never consensus.
-- Fork choice remains highest cumulative PoW (Stage 6).
+- Fork choice remains highest cumulative PoW.
 - Banned hosts cannot connect until ban expiry.
-- Misbehavior scores **persist across reconnect** (Stage 8).
+- Misbehavior scores **persist across reconnect**.
 
 See [DISCOVERY.md](DISCOVERY.md), [STORAGE.md](STORAGE.md), [SECURITY_AUDIT.md](SECURITY_AUDIT.md),
 [REORG.md](REORG.md), [NETWORK_PROTOCOL.md](NETWORK_PROTOCOL.md).

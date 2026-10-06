@@ -1,4 +1,4 @@
-"""MHCOIN network parameters (Stage 9).
+"""MHCOIN network parameters.
 
 Consensus-critical values must match across all honest nodes of a network.
 Policy/node-safety limits live elsewhere (network.constants) and are NOT
@@ -71,10 +71,10 @@ MAX_SUPPORTED_PROTOCOL_VERSION = 1
 try:
     from mhcoin import __version__ as SOFTWARE_VERSION
 except Exception:  # pragma: no cover
-    SOFTWARE_VERSION = "0.4.0.1"
+    SOFTWARE_VERSION = "0.4.1.12"
 USER_AGENT = f"/MHCOIN:{SOFTWARE_VERSION}/"
 
-# Compatibility rule (Stage 9):
+# Compatibility rule:
 # - Peers with protocol_version < MIN_SUPPORTED or > MAX_SUPPORTED are rejected.
 # - Raising MIN_SUPPORTED is a deliberate network upgrade (document in release notes).
 # - Changing consensus rules without coordinated MIN/PROTOCOL bump risks a split.
@@ -112,7 +112,7 @@ class NetworkParams:
 # Burn/dev commitment used by frozen genesis coinbases (not a hot wallet).
 _GENESIS_BURN_PKH = bytes.fromhex("00" * 19 + "01")
 
-# Regtest / localnet — easy PoW, shared frozen genesis (existing Stage 2+)
+# Regtest / localnet — easy PoW, shared frozen genesis
 _REGTEST = NetworkParams(
     name="regtest",
     magic=NETWORK_MAGIC["regtest"],

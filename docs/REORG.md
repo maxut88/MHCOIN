@@ -1,4 +1,4 @@
-# MHCOIN Stage 6 — Reorg & Fork Choice
+# MHCOIN Reorg & Fork Choice
 
 ## Overview
 

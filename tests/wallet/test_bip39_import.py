@@ -1,4 +1,4 @@
-"""BIP39 restore + WIF/hex import (Bitcoin-style recovery)."""
+"""BIP39 restore + WIF/hex import."""
 
 from __future__ import annotations
 

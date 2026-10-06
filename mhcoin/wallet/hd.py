@@ -1,6 +1,6 @@
 """BIP32 hierarchical deterministic keys (secp256k1) for MHCOIN.
 
-BIP84-style paths (Bitcoin-compatible tree; MHCOIN addresses remain ``mhc1…``):
+BIP84 derivation paths (MHCOIN addresses remain ``mhc1…``):
 
 - Account:  ``m/84'/0'/0'``
 - Receive:  ``m/84'/0'/0'/0/n``  (external)
