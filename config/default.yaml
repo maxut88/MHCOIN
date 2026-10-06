@@ -1,4 +1,4 @@
-# MHCOIN network parameters (Milestone 1: wallet/crypto only)
+# MHCOIN sample config (localnet defaults)
 network: localnet
 
 data_dir: ~/.mhcoin/localnet

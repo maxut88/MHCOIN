@@ -1,4 +1,8 @@
-"""Balance and history — populated in later milestones (UTXO / chain)."""
+"""Legacy address balance stub.
+
+Desktop/CLI balances use the live UTXO set via the wallet/controller paths.
+This module remains for a minimal BalanceInfo shape and tests.
+"""
 
 from __future__ import annotations
 
@@ -12,7 +16,7 @@ class BalanceInfo:
 
 
 def get_balance(_address: str) -> BalanceInfo:
-    """Milestone 1: no chain yet; balance is always zero."""
+    """Stub: returns zero. Prefer wallet UTXO balance APIs."""
     return BalanceInfo(confirmed=0, unconfirmed=0)
 
 
