@@ -42,9 +42,9 @@ def test_production_consensus_table():
     assert HALVING_INTERVAL == 210_000
     assert TARGET_BLOCK_TIME_SECONDS == 600
     assert POW_ALGORITHM == "HASH256"
-    assert PROTOCOL_VERSION == 1
-    assert MIN_SUPPORTED_PROTOCOL_VERSION == 1
-    assert MAX_SUPPORTED_PROTOCOL_VERSION == 1
+    assert PROTOCOL_VERSION == 2
+    assert MIN_SUPPORTED_PROTOCOL_VERSION == 2
+    assert MAX_SUPPORTED_PROTOCOL_VERSION == 2
     from mhcoin import __version__ as _pkg_ver
     assert SOFTWARE_VERSION == _pkg_ver
     assert "MAX_SUPPLY_COINS" in CONSENSUS_CRITICAL_SHARED

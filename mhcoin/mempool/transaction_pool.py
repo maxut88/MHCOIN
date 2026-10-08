@@ -37,7 +37,13 @@ class Mempool:
     def _save(self) -> None:
         if self.path is None:
             return
-        data = {"txs": {hx: tx.serialize().hex() for hx, tx in self._txs.items()}}
+        import time
+
+        data = {
+            "txs": {hx: tx.serialize().hex() for hx, tx in self._txs.items()},
+            "updated": int(time.time()),
+            "count": len(self._txs),
+        }
         tmp = self.path.with_suffix(".tmp")
         tmp.write_text(json.dumps(data, indent=2), encoding="utf-8")
         tmp.replace(self.path)

@@ -705,6 +705,36 @@ def mining_mine(
         miner.close()
 
 
+@mining.command("pool-start")
+@click.option("--url", required=True, help="Pool host:port (JSON protocol, default port 3333)")
+@click.option("--address", required=True, help="Your payout mhc1… address")
+@click.option("--worker", default="default", show_default=True, help="Worker name")
+@click.option("--network", default=None, help="Used only to validate address HRP")
+def mining_pool_start(url: str, address: str, worker: str, network: str | None) -> None:
+    """Mine to an MHCOIN pool over the JSON TCP protocol (no local chain write).
+
+    Example:
+      mhcoin mining pool-start --url 127.0.0.1:3333 --address mhc1…
+    """
+    from mhcoin.pool.client import PoolClient, parse_pool_url
+    from mhcoin.wallet.addresses import validate_address
+
+    paths = wallet_paths(network)
+    if not validate_address(address, hrp=paths.hrp):
+        raise click.ClickException(
+            f"invalid address for network={paths.network} (expected hrp={paths.hrp})"
+        )
+    host, port = parse_pool_url(url)
+    click.echo(f"Connecting to pool {host}:{port} as {address}.{worker}")
+    client = PoolClient(host=host, port=port, address=address, worker=worker)
+    try:
+        client.mine_forever()
+    except Exception as e:
+        raise click.ClickException(str(e)) from e
+    finally:
+        client.close()
+
+
 @mining.command("start")
 @click.option("--address", required=True, help="Reward MHC address (coinbase payout)")
 @click.option("--network", default=None, help="localnet | testnet | mainnet | regtest")
@@ -993,6 +1023,65 @@ def audit_fingerprint() -> None:
     from mhcoin.audit.rc1 import consensus_source_fingerprint
 
     click.echo(json.dumps(consensus_source_fingerprint(), indent=2))
+
+
+@cli.group()
+def pool() -> None:
+    """Run an MHCOIN mining pool (operator)."""
+
+
+@pool.command("start")
+@click.option("--address", required=True, help="Pool coinbase / fee address (mhc1…)")
+@click.option("--network", default="mainnet", show_default=True)
+@click.option("--data-dir", default=None, type=click.Path(), help="Pool node chain datadir")
+@click.option("--pool-dir", default=None, type=click.Path(), help="Pool sqlite / state dir")
+@click.option("--listen", default="0.0.0.0", show_default=True, help="Bind host for miners")
+@click.option("--port", default=3333, show_default=True, type=int, help="JSON miner port")
+@click.option("--stratum-port", default=3334, show_default=True, type=int)
+@click.option("--web-port", default=8888, show_default=True, type=int, help="Stats HTTP port")
+@click.option("--fee-percent", default=1.0, show_default=True, type=float)
+@click.option("--share-factor", default=1024, show_default=True, type=int, help="Share easiness vs network")
+@click.option("--payout-threshold", default=None, type=int, help="Auto-payout threshold in sats")
+def pool_start(
+    address: str,
+    network: str,
+    data_dir: str | None,
+    pool_dir: str | None,
+    listen: str,
+    port: int,
+    stratum_port: int,
+    web_port: int,
+    fee_percent: float,
+    share_factor: int,
+    payout_threshold: int | None,
+) -> None:
+    """Start pool node + JSON/Stratum listeners + stats web UI.
+
+    Example:
+      export MHCOIN_POOL_PASSWORD='…'   # for auto-payouts from pool wallet in data-dir
+      mhcoin pool start --address mhc1… --network mainnet
+    """
+    from mhcoin.pool.config import PoolConfig
+    from mhcoin.pool.server import run_pool
+
+    overrides: dict = {
+        "network": network,
+        "pool_address": address,
+        "listen_host": listen,
+        "listen_port": port,
+        "stratum_port": stratum_port,
+        "web_port": web_port,
+        "fee_percent": fee_percent,
+        "share_factor": share_factor,
+    }
+    if data_dir:
+        overrides["data_dir"] = Path(data_dir).expanduser().resolve()
+    if pool_dir:
+        overrides["pool_dir"] = Path(pool_dir).expanduser().resolve()
+    if payout_threshold is not None:
+        overrides["payout_threshold_sats"] = payout_threshold
+    cfg = PoolConfig.from_env(**overrides)
+    run_pool(cfg)
 
 
 if __name__ == "__main__":

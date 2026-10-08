@@ -11,8 +11,9 @@ Authoritative source: `mhcoin/consensus/params.py`.
 | Initial subsidy | 50 MHC |
 | Halving | every 210,000 blocks |
 | Block interval target | 600 seconds |
-| Difficulty window | 30 blocks (per-block retarget) |
-| Difficulty damping | 1/16 |
+| Difficulty (from height 1500) | Bitcoin-style: retarget every **2016** blocks, full step, timespan clamp ×1/4..×4, no damping |
+| Difficulty (legacy, height &lt; 1500) | Per-block W30 + damping 1/16 (historical mainnet only) |
+| Activation height | `DIFFICULTY_BTC_ACTIVATION_HEIGHT = 1500` |
 | MTP window | 11 |
 | Max future block time | 7200 seconds |
 | Mainnet POW_LIMIT | genesis target (`bits = 0x1e0fffff`) |
@@ -21,14 +22,14 @@ Authoritative source: `mhcoin/consensus/params.py`.
 
 **Mainnet consensus fingerprint** (canonical source-tree hash):
 
-`21f256498747b313795b65c9e26f0dd1cb23ee762813bc0d593c2c513e787ae9`
+`0f6770b8df40575e458ca78f36f0ee1a40a9173111e49adb5a093df3478b270a`
 
 **Mainnet genesis:**
 
 `62e078a7ca0dfeac4c6451e5852d5ec714c7aacbff4e48f1d8cc8aa9560a0000`
 
 Changing any of these without a coordinated protocol upgrade is a hard fork.
-Do not document or ship obsolete W60/D1/8 difficulty parameters.
+All nodes must upgrade to protocol v2 **before** height 1500.
 
 ## Consensus-critical vs policy
 
@@ -55,9 +56,9 @@ Data directories are `~/.mhcoin/<network>/` by default.
 
 | Field | Value | Role |
 |-------|-------|------|
-| `PROTOCOL_VERSION` | 1 | Advertised wire version |
-| `MIN_SUPPORTED_PROTOCOL_VERSION` | 1 | Reject older peers |
-| `MAX_SUPPORTED_PROTOCOL_VERSION` | 1 | Reject newer peers |
+| `PROTOCOL_VERSION` | 2 | Advertised wire version (BTC difficulty hard fork) |
+| `MIN_SUPPORTED_PROTOCOL_VERSION` | 2 | Reject older peers |
+| `MAX_SUPPORTED_PROTOCOL_VERSION` | 2 | Reject newer peers |
 | `SOFTWARE_VERSION` | 0.4.1.12 | Informational user-agent |
 
 ### Compatibility rules

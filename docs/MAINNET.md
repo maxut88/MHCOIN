@@ -8,7 +8,7 @@ Live network identity and operator notes. Genesis and consensus parameters are
 | | |
 |---|---|
 | Genesis | `62e078a7ca0dfeac4c6451e5852d5ec714c7aacbff4e48f1d8cc8aa9560a0000` |
-| Consensus fingerprint | `21f256498747b313795b65c9e26f0dd1cb23ee762813bc0d593c2c513e787ae9` |
+| Consensus fingerprint | `0f6770b8df40575e458ca78f36f0ee1a40a9173111e49adb5a093df3478b270a` |
 | Magic | `4D48434E` (`MHCN`) |
 | Default port | **8333** |
 | Data directory | `~/.mhcoin/mainnet/` |

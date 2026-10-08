@@ -20,8 +20,11 @@ from mhcoin.consensus.difficulty import (
     target_to_bits,
 )
 from mhcoin.consensus.params import (
-    DIFFICULTY_DAMPING_DENOMINATOR,
-    DIFFICULTY_DAMPING_NUMERATOR,
+    DIFFICULTY_ADJUSTMENT_INTERVAL,
+    DIFFICULTY_BTC_ACTIVATION_HEIGHT,
+    DIFFICULTY_LEGACY_DAMPING_DENOMINATOR,
+    DIFFICULTY_LEGACY_DAMPING_NUMERATOR,
+    DIFFICULTY_LEGACY_WINDOW,
     DIFFICULTY_WINDOW,
     MTP_WINDOW,
     TARGET_BLOCK_TIME_SECONDS,
@@ -216,10 +219,66 @@ def test_regtest_fixed_easy_bits():
 
 def test_constants_match_spec():
     assert TARGET_BLOCK_TIME_SECONDS == 600
-    assert DIFFICULTY_WINDOW == 30
-    assert DIFFICULTY_DAMPING_NUMERATOR == 1
-    assert DIFFICULTY_DAMPING_DENOMINATOR == 16
+    assert DIFFICULTY_ADJUSTMENT_INTERVAL == 2016
+    assert DIFFICULTY_BTC_ACTIVATION_HEIGHT == 1500
+    assert DIFFICULTY_LEGACY_WINDOW == 30
+    assert DIFFICULTY_LEGACY_DAMPING_NUMERATOR == 1
+    assert DIFFICULTY_LEGACY_DAMPING_DENOMINATOR == 16
+    assert DIFFICULTY_WINDOW == DIFFICULTY_ADJUSTMENT_INTERVAL
     assert MTP_WINDOW == 11
+
+
+def test_btc_mid_epoch_bits_unchanged():
+    """After activation, bits stay frozen until the next 2016 boundary."""
+    p = get_network_params("mainnet")
+    # Synthetic parent just after activation (height 1500), not an epoch boundary.
+    parent_height = DIFFICULTY_BTC_ACTIVATION_HEIGHT
+    assert (parent_height + 1) % DIFFICULTY_ADJUSTMENT_INTERVAL != 0
+    ts = [p.genesis_timestamp + i * 60 for i in range(DIFFICULTY_ADJUSTMENT_INTERVAL)]
+    bits = get_next_work(
+        network="mainnet",
+        parent_height=parent_height,
+        parent_bits=p.genesis_bits,
+        window_timestamps=ts,
+    )
+    assert bits == p.genesis_bits
+
+
+def test_btc_epoch_retarget_full_step_no_damping():
+    """At height % 2016 == 0 (post-activation): full ×1/4..×4 step like Bitcoin."""
+    p = get_network_params("mainnet")
+    interval = DIFFICULTY_ADJUSTMENT_INTERVAL
+    parent_height = interval - 1  # next height == 2016
+    assert parent_height + 1 >= DIFFICULTY_BTC_ACTIVATION_HEIGHT
+    # Fast epoch: 60s per block → actual ≈ 2015*60, expect harden by ~10× (clamped ×4).
+    base = p.genesis_timestamp
+    timestamps = [base + i * 60 for i in range(interval)]
+    old_target = bits_to_target(p.genesis_bits)
+    bits = get_next_work(
+        network="mainnet",
+        parent_height=parent_height,
+        parent_bits=p.genesis_bits,
+        window_timestamps=timestamps,
+    )
+    new_target = bits_to_target(bits)
+    # Full step: new ≈ old * (actual/expected), clamped to old/4.
+    assert new_target < old_target
+    assert new_target == old_target // 4 or new_target <= old_target // 4 + 1
+    # Not damped 1/16: a damped step would only move ~1/16 of the gap.
+    damped_floor = old_target - max(1, (old_target - old_target // 4) // 16)
+    assert new_target < damped_floor
+
+
+def test_pre_activation_still_legacy_per_block():
+    """Height < 1500 keeps per-block W30 + 1/16 damping."""
+    rows = _sim_chain(60, 60)
+    assert all(h < DIFFICULTY_BTC_ACTIVATION_HEIGHT for h, _, _ in rows)
+    t0 = bits_to_target(rows[1][1])
+    t30 = bits_to_target(rows[30][1])
+    assert t30 < t0
+    # Per-block movement: bits change between consecutive heights in the fast window.
+    changed = sum(1 for i in range(2, 31) if rows[i][1] != rows[i - 1][1])
+    assert changed > 10
 
 
 # ---------------------------------------------------------------------------

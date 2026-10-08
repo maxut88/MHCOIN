@@ -8,6 +8,7 @@ Start here if you are a **user**: [USER_FAQ.md](USER_FAQ.md) · [USER_QUICKSTART
 |-----|--------|
 | [USER_FAQ.md](USER_FAQ.md) | Upgrade · backup · mining · peers |
 | [USER_QUICKSTART.md](USER_QUICKSTART.md) | CLI: wallet · mine · send |
+| [POOL.md](POOL.md) | Mining pool (operator + CLI miners) |
 | [DESKTOP.md](DESKTOP.md) | MHCOIN Core Desktop |
 | [WALLET.md](WALLET.md) | BIP39 / BIP84 · addresses |
 | [MAINNET.md](MAINNET.md) | Mainnet notes |

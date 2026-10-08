@@ -11,10 +11,16 @@ from mhcoin.transaction.transaction import Transaction
 from mhcoin.utxo import UTXOSet
 
 
-def create_coinbase(*, height: int, fees: int, pubkey_hash: bytes) -> Transaction:
+def create_coinbase(
+    *,
+    height: int,
+    fees: int,
+    pubkey_hash: bytes,
+    extra: bytes = b"MHCOIN",
+) -> Transaction:
     reward = get_block_subsidy(height) + fees
     return Transaction(
-        inputs=[TxIn.coinbase(height)],
+        inputs=[TxIn.coinbase(height, extra=extra)],
         outputs=[TxOut.p2pkh(reward, pubkey_hash)],
     )
 
@@ -29,6 +35,7 @@ def build_block_template(
     utxo: UTXOSet,
     miner_pubkey_hash: bytes,
     max_txs: int = 1000,
+    coinbase_extra: bytes = b"MHCOIN",
 ) -> Block:
     selected: list[Transaction] = []
     fees = 0
@@ -43,7 +50,12 @@ def build_block_template(
         selected.append(tx)
         fees += fee
 
-    coinbase = create_coinbase(height=height, fees=fees, pubkey_hash=miner_pubkey_hash)
+    coinbase = create_coinbase(
+        height=height,
+        fees=fees,
+        pubkey_hash=miner_pubkey_hash,
+        extra=coinbase_extra,
+    )
     block = Block(
         header=BlockHeader(
             version=BLOCK_VERSION,

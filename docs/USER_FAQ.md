@@ -41,15 +41,22 @@ Legacy wallets (pre-BIP39 key import) have **no** mnemonic — only the encrypte
 **Desktop:** Mining tab → payout `mhc1…` → **Start mining**.  
 Log should show live H/s (single-lane PoW). Newer builds use a faster in-place HASH256 loop.
 
-**CLI:**
+**CLI (solo):**
 
 ```bash
 mhcoin mining start --network mainnet --address mhc1…
 ```
 
+**CLI (pool)** — see [POOL.md](POOL.md):
+
+```bash
+mhcoin mining pool-start --url POOL_HOST:3333 --address mhc1…
+```
+
 Rules:
 
-- One writer per data folder — do **not** run Desktop mining and CLI mining on the same `~/.mhcoin/mainnet` at once.
+- One writer per data folder — do **not** run Desktop mining and CLI solo mining on the same `~/.mhcoin/mainnet` at once.
+- Pool mining does not write your local chain (safe alongside Desktop).
 - Hashrate in the Mining tab / log is the local estimate (H/s).
 - Explorer **Peers → H/S** comes from P2P `STATUS` (advisory, ~10 s). Prefer the Mining tab for your own rate.
 - Mac vs Windows on the same hardware often differs (~40–65%) — expected.

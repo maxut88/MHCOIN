@@ -42,10 +42,21 @@ HALVING_INTERVAL = 210_000
 TARGET_BLOCK_TIME_SECONDS = 600
 
 # Dynamic difficulty (mainnet/testnet). Integer-only; see consensus.difficulty.get_next_work.
-# Tuned via closed-loop + stochastic sweep: W30/D1/16 (was unstable W60/D1/8).
-DIFFICULTY_WINDOW = 30
-DIFFICULTY_DAMPING_NUMERATOR = 1
-DIFFICULTY_DAMPING_DENOMINATOR = 16
+#
+# From DIFFICULTY_BTC_ACTIVATION_HEIGHT: Bitcoin-style epoch retarget
+# (every DIFFICULTY_ADJUSTMENT_INTERVAL blocks, full step, timespan clamp ×1/4..×4).
+# Before activation: legacy per-block W30 / damping 1/16 (keeps historical chain valid).
+DIFFICULTY_ADJUSTMENT_INTERVAL = 2016
+DIFFICULTY_BTC_ACTIVATION_HEIGHT = 1500
+# Legacy pre-activation parameters (do not use for new consensus after activation).
+DIFFICULTY_LEGACY_WINDOW = 30
+DIFFICULTY_LEGACY_DAMPING_NUMERATOR = 1
+DIFFICULTY_LEGACY_DAMPING_DENOMINATOR = 16
+# Alias: ancestor window size fetched by the chain (must cover a full BTC epoch).
+DIFFICULTY_WINDOW = DIFFICULTY_ADJUSTMENT_INTERVAL
+# Back-compat names (legacy damping) — prefer LEGACY_* in new code.
+DIFFICULTY_DAMPING_NUMERATOR = DIFFICULTY_LEGACY_DAMPING_NUMERATOR
+DIFFICULTY_DAMPING_DENOMINATOR = DIFFICULTY_LEGACY_DAMPING_DENOMINATOR
 MTP_WINDOW = 11
 
 # PoW: double SHA-256 (HASH256) of the block header; UTXO accounting model
@@ -64,9 +75,9 @@ MAX_FUTURE_BLOCK_TIME = 2 * 60 * 60  # 7200s — future-timestamp policy/consens
 # Protocol versioning (wire compatibility — consensus-adjacent)
 # ---------------------------------------------------------------------------
 
-PROTOCOL_VERSION = 1
-MIN_SUPPORTED_PROTOCOL_VERSION = 1
-MAX_SUPPORTED_PROTOCOL_VERSION = 1
+PROTOCOL_VERSION = 2
+MIN_SUPPORTED_PROTOCOL_VERSION = 2
+MAX_SUPPORTED_PROTOCOL_VERSION = 2
 # Keep aligned with package release (mhcoin.__version__ / DMG name).
 try:
     from mhcoin import __version__ as SOFTWARE_VERSION
@@ -202,9 +213,12 @@ CONSENSUS_CRITICAL_SHARED = (
     "INITIAL_BLOCK_SUBSIDY",
     "HALVING_INTERVAL",
     "TARGET_BLOCK_TIME_SECONDS",
+    "DIFFICULTY_ADJUSTMENT_INTERVAL",
+    "DIFFICULTY_BTC_ACTIVATION_HEIGHT",
+    "DIFFICULTY_LEGACY_WINDOW",
+    "DIFFICULTY_LEGACY_DAMPING_NUMERATOR",
+    "DIFFICULTY_LEGACY_DAMPING_DENOMINATOR",
     "DIFFICULTY_WINDOW",
-    "DIFFICULTY_DAMPING_NUMERATOR",
-    "DIFFICULTY_DAMPING_DENOMINATOR",
     "MTP_WINDOW",
     "MAX_FUTURE_BLOCK_TIME",
     "POW_ALGORITHM",

@@ -152,7 +152,11 @@ class NodeRuntime:
         return self.relay.accept_block(block)
 
     def prepare_block_template(
-        self, miner_address: str, *, hrp: str | None = None
+        self,
+        miner_address: str,
+        *,
+        hrp: str | None = None,
+        coinbase_extra: bytes = b"MHCOIN",
     ) -> tuple[Block, int, int]:
         """Build a block template from the live node tip/mempool.
 
@@ -187,6 +191,7 @@ class NodeRuntime:
                 mempool=self.mempool,
                 utxo=self.chain.utxo,
                 miner_pubkey_hash=pkh,
+                coinbase_extra=coinbase_extra,
             )
         return block, height, bits
 

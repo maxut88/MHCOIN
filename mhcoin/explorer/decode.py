@@ -16,7 +16,7 @@ from mhcoin.consensus.params import (
     SATOSHI_PER_COIN,
     TARGET_BLOCK_TIME_SECONDS,
 )
-from mhcoin.constants import INITIAL_BLOCK_SUBSIDY
+from mhcoin.constants import INITIAL_BLOCK_SUBSIDY, MAX_SEQUENCE
 from mhcoin.transaction.transaction import Transaction
 from mhcoin.wallet.addresses import address_to_pubkey_hash, pubkey_hash_to_address, validate_address
 from mhcoin.wallet.send import format_mhc
@@ -24,6 +24,31 @@ from mhcoin.wallet.send import format_mhc
 DEFAULT_HRP = "mhc"
 BLOCKS_PER_PAGE = 100
 TXS_PER_PAGE = 100
+ADDRESS_PER_PAGE = 50
+ADDRESS_PER_PAGE_MAX = 200
+# BIP125 opt-in threshold: sequence < MAX_SEQUENCE - 1 signals replaceability.
+_RBF_SEQUENCE_THRESHOLD = MAX_SEQUENCE - 1
+
+
+def tx_size_metrics(size_bytes: int) -> dict[str, Any]:
+    """MHCOIN has no SegWit — weight/vsize follow Bitcoin legacy rules."""
+    size = max(0, int(size_bytes))
+    return {
+        "witness": False,
+        "size_bytes": size,
+        "vsize": size,
+        "weight": size * 4,
+    }
+
+
+def tx_signals_rbf(tx: Transaction) -> bool | None:
+    """BIP125-style RBF signal from input nSequence. None for coinbase."""
+    if tx.is_coinbase():
+        return None
+    return any(
+        (not tin.is_coinbase()) and int(tin.sequence) < _RBF_SEQUENCE_THRESHOLD
+        for tin in tx.inputs
+    )
 
 
 def payment_amount_sats(tx: Transaction, *, from_addr: str | None, hrp: str = DEFAULT_HRP) -> int:
@@ -180,17 +205,55 @@ def supply_info(
     }
 
 
-def load_mempool(data_dir, *, hrp: str = DEFAULT_HRP) -> dict[str, Any]:
+def _mempool_parse_tx(key: Any, val: Any) -> Transaction | None:
+    """Parse a mempool.json entry into a Transaction (hex or {hex:...})."""
+    if isinstance(val, str) and len(val) > 64:
+        try:
+            return Transaction.deserialize(bytes.fromhex(val))
+        except Exception:
+            return None
+    if isinstance(val, dict):
+        hx = val.get("hex") or val.get("raw_hex")
+        if isinstance(hx, str) and len(hx) > 64:
+            try:
+                return Transaction.deserialize(bytes.fromhex(hx))
+            except Exception:
+                return None
+    return None
+
+
+def load_mempool(
+    data_dir,
+    *,
+    hrp: str = DEFAULT_HRP,
+    chain: ReadOnlyChain | None = None,
+) -> dict[str, Any]:
     """Read node mempool.json (unconfirmed txs) without opening the live node."""
     from pathlib import Path
     import json
 
     path = Path(data_dir) / "mempool.json"
-    empty = {"count": 0, "transactions": [], "path": str(path)}
+    updated = None
+    updated_age = None
+    if path.is_file():
+        try:
+            mtime = int(path.stat().st_mtime)
+            updated = mtime
+            updated_age = format_age(mtime, now=int(time.time()))
+        except OSError:
+            pass
+    empty = {
+        "count": 0,
+        "transactions": [],
+        "path": str(path),
+        "updated": updated,
+        "updated_age": updated_age,
+        "source": "mempool.json",
+    }
     if not path.is_file():
         return empty
     try:
-        raw = json.loads(path.read_text())
+        raw = json.loads(path.read_text(encoding="utf-8"))
     except Exception:
         return empty
     txs_raw = raw.get("txs") or raw.get("transactions") or {}
@@ -201,33 +264,100 @@ def load_mempool(data_dir, *, hrp: str = DEFAULT_HRP) -> dict[str, Any]:
         items = [(None, x) for x in txs_raw]
     else:
         items = []
-    for key, val in items[:50]:
-        # mempool may store hex or nested dict — keep compact
-        if isinstance(val, dict):
-            txid = val.get("txid") or key
-            size = val.get("size") or val.get("size_bytes")
-            fee = val.get("fee_mhc") or val.get("fee")
-            rows.append({"txid": txid, "size_bytes": size, "fee_mhc": fee, "raw": False})
-        elif isinstance(val, str) and len(val) > 64:
-            try:
-                from mhcoin.transaction.transaction import Transaction
-                tx = Transaction.deserialize(bytes.fromhex(val))
-                out_v = int(tx.output_value())
+
+    tip = chain.height if chain is not None else None
+    for key, val in items:
+        tx = _mempool_parse_tx(key, val)
+        if tx is None:
+            if isinstance(val, dict):
                 rows.append(
                     {
-                        "txid": tx.txid().hex(),
-                        "size_bytes": len(tx.serialize()),
-                        "output_value_mhc": format_mhc(out_v),
-                        "coinbase": tx.is_coinbase(),
-                        "output_count": len(tx.outputs),
-                        "input_count": len(tx.inputs),
+                        "txid": val.get("txid") or key,
+                        "size_bytes": val.get("size") or val.get("size_bytes"),
+                        "fee_mhc": val.get("fee_mhc") or val.get("fee"),
+                        "note": "unparsed",
                     }
                 )
-            except Exception:
-                rows.append({"txid": key or "?", "note": "unparsed"})
+            else:
+                rows.append({"txid": key or str(val)[:64], "note": "unparsed"})
+            continue
+        if chain is not None:
+            row = summarize_tx(chain, tx, tip=tip, hrp=hrp)
         else:
-            rows.append({"txid": key or str(val)[:64]})
-    return {"count": len(items), "transactions": rows, "path": str(path)}
+            size = len(tx.serialize())
+            metrics = tx_size_metrics(size)
+            to_addr = out_address(tx.outputs[0], hrp=hrp) if tx.outputs else None
+            pay = payment_amount_sats(tx, from_addr=None, hrp=hrp)
+            row = {
+                "txid": tx.txid().hex(),
+                "coinbase": tx.is_coinbase(),
+                "size_bytes": size,
+                "vsize": metrics["vsize"],
+                "weight": metrics["weight"],
+                "witness": False,
+                "rbf": tx_signals_rbf(tx),
+                "output_value_mhc": format_mhc(int(tx.output_value())),
+                "amount_mhc": format_mhc(pay),
+                "amount_sats": pay,
+                "output_count": len(tx.outputs),
+                "input_count": len(tx.inputs),
+                "from": None,
+                "to": to_addr,
+                "fee_sats": None,
+                "fee_mhc": None,
+                "fee_per_byte": None,
+                "fee_rate": None,
+            }
+        row["unconfirmed"] = True
+        row["in_mempool"] = True
+        row["confirmations"] = 0
+        row["status"] = "unconfirmed"
+        # Compact list payload (full detail via /tx/<id>).
+        rows.append(
+            {
+                "txid": row.get("txid"),
+                "size_bytes": row.get("size_bytes"),
+                "vsize": row.get("vsize"),
+                "weight": row.get("weight"),
+                "input_count": row.get("input_count"),
+                "output_count": row.get("output_count"),
+                "amount_mhc": row.get("amount_mhc") or row.get("output_value_mhc"),
+                "fee_mhc": row.get("fee_mhc"),
+                "fee_rate": row.get("fee_rate"),
+                "fee_per_byte": row.get("fee_per_byte"),
+                "from": row.get("from")
+                or next(
+                    (
+                        i.get("address")
+                        for i in (row.get("inputs") or [])
+                        if i.get("address")
+                    ),
+                    None,
+                ),
+                "to": row.get("to")
+                or next(
+                    (
+                        o.get("address")
+                        for o in (row.get("outputs") or [])
+                        if o.get("address")
+                    ),
+                    None,
+                ),
+                "coinbase": bool(row.get("coinbase")),
+                "rbf": row.get("rbf"),
+                "unconfirmed": True,
+                "in_mempool": True,
+            }
+        )
+    rows.sort(key=lambda r: (-(r.get("fee_per_byte") or 0), str(r.get("txid") or "")))
+    return {
+        "count": len(items),
+        "transactions": rows,
+        "path": str(path),
+        "updated": updated,
+        "updated_age": updated_age,
+        "source": "mempool.json",
+    }
 
 
 def top_miners(
@@ -739,10 +869,8 @@ def summarize_tx(
             f"{fee_per_byte:.3f} sat/byte" if fee_per_byte is not None else None
         ),
         "satoshi_per_coin": SATOSHI_PER_COIN,
-        # Explicit N/A for concepts not used by MHCOIN (documented in UI)
-        "witness": False,
-        "weight": None,
-        "rbf": None,
+        **tx_size_metrics(size),
+        "rbf": tx_signals_rbf(tx),
         "fiat": None,
     }
 
@@ -840,10 +968,26 @@ def find_mempool_tx(
 
 
 def address_history(
-    chain: ReadOnlyChain, address: str, *, hrp: str = DEFAULT_HRP, limit: int = 5000
+    chain: ReadOnlyChain,
+    address: str,
+    *,
+    hrp: str = DEFAULT_HRP,
+    page: int = 1,
+    per_page: int = ADDRESS_PER_PAGE,
+    limit: int | None = None,
 ) -> dict[str, Any]:
+    """Full-chain address scan with paginated output list.
+
+    Totals / balance always cover the whole history. ``limit`` is accepted as a
+    legacy alias for ``per_page`` (capped at ADDRESS_PER_PAGE_MAX).
+    """
     if not validate_address(address, hrp=hrp):
         raise ValueError("invalid address")
+
+    if limit is not None:
+        per_page = int(limit)
+    per_page = max(1, min(int(per_page or ADDRESS_PER_PAGE), ADDRESS_PER_PAGE_MAX))
+    page = max(1, int(page or 1))
 
     pkh = address_to_pubkey_hash(address, hrp=hrp)
     received: list[dict[str, Any]] = []
@@ -925,15 +1069,21 @@ def address_history(
         row["spent"] = is_spent
         row["status"] = "spent" if is_spent else "unspent"
     received.reverse()  # newest first
+    total = len(received)
+    total_pages = max(1, (total + per_page - 1) // per_page) if total else 1
+    if page > total_pages:
+        page = total_pages
+    start = (page - 1) * per_page
+    page_rows = received[start : start + per_page]
     series = balance_series
     if len(series) > 120:
-        step = max(1, len(series) // 120)
+        step = max(1, (len(series) + 119) // 120)
         series = series[::step]
         if series and series[-1] != balance_series[-1]:
             series.append(balance_series[-1])
     return {
         "address": address,
-        "received_count": len(received),
+        "received_count": total,
         "total_received_sats": total_in,
         "total_received_mhc": format_mhc(total_in),
         # Sent = paid to others only (e.g. 1.00000000). Fee is separate.
@@ -947,8 +1097,11 @@ def address_history(
         "balance_mhc": format_mhc(balance),
         "utxo_count": len(owned),
         "tip_height": tip,
-        "outputs": received[:limit],
-        "truncated": len(received) > limit,
+        "outputs": page_rows,
+        "page": page,
+        "per_page": per_page,
+        "total_pages": total_pages,
+        "truncated": False,
         "balance_series_sats": series,
         "flow": {
             "received_sats": total_in,
@@ -1255,6 +1408,49 @@ def _rich_list_rows(
     }
 
 
+def _rich_list_from_sqlite(
+    data_dir, *, hrp: str = DEFAULT_HRP, limit: int = 100
+) -> dict[str, Any] | None:
+    """Prefer live ``utxo.sqlite`` (node may leave LMDB chainstate behind)."""
+    import sqlite3
+    from collections import defaultdict
+    from pathlib import Path
+
+    from mhcoin.transaction.input import TxOut
+
+    path = Path(data_dir) / "utxo.sqlite"
+    if not path.is_file():
+        return None
+    balances: dict[str, int] = defaultdict(int)
+    utxo_counts: dict[str, int] = defaultdict(int)
+    try:
+        db = sqlite3.connect(f"file:{path}?mode=ro", uri=True)
+        try:
+            db.execute("PRAGMA query_only=ON")
+            rows = db.execute("SELECT value, script_pubkey FROM utxo").fetchall()
+        finally:
+            db.close()
+    except Exception:
+        return None
+    if not rows:
+        return None
+    for value, script in rows:
+        try:
+            tout = TxOut(value=int(value), script_pubkey=bytes(script))
+            addr = out_address(tout, hrp=hrp)
+        except Exception:
+            continue
+        if not addr:
+            continue
+        balances[addr] += int(value)
+        utxo_counts[addr] += 1
+    if not balances:
+        return None
+    return _rich_list_rows(
+        dict(balances), dict(utxo_counts), limit=limit, source="utxo.sqlite"
+    )
+
+
 def rich_list(
     data_dir,
     *,
@@ -1262,13 +1458,16 @@ def rich_list(
     hrp: str = DEFAULT_HRP,
     limit: int = 100,
 ) -> dict[str, Any]:
-    """Top addresses by on-chain UTXO balance (chainstate preferred)."""
+    """Top addresses by on-chain UTXO balance (``utxo.sqlite`` preferred)."""
     from collections import defaultdict
     from pathlib import Path
 
     from mhcoin.utxo import UTXOSet
 
     limit = max(1, min(int(limit), 500))
+    from_sqlite = _rich_list_from_sqlite(data_dir, hrp=hrp, limit=limit)
+    if from_sqlite is not None:
+        return from_sqlite
     cs = Path(data_dir) / "chainstate"
     if cs.is_dir():
         try:

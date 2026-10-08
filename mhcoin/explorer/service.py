@@ -100,6 +100,14 @@ def _esc(s: Any) -> str:
 def _page(title: str, body: str, *, tip: int | None = None, hero: bool = False) -> bytes:
     tip_bit = f" · tip #{tip}" if tip is not None and tip >= 0 else ""
     _ = hero  # branding is always a single header
+    import os
+
+    pool_url = (os.environ.get("MHCOIN_POOL_URL") or "").strip()
+    pool_nav = (
+        f'\n          <a href="{_esc(pool_url)}" rel="noopener">Pool</a>'
+        if pool_url
+        else ""
+    )
     doc = f"""<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -146,11 +154,15 @@ def _page(title: str, body: str, *, tip: int | None = None, hero: bool = False) 
     --val: #c7ccd4; --tbl-link: #e7eaee;
   }}
   * {{ box-sizing: border-box; }}
-  html {{ background: var(--bg); color-scheme: light; }}
+  html {{
+    background: var(--bg); color-scheme: light;
+    overflow-x: clip; max-width: 100%;
+  }}
   [data-theme="dark"] html, html[data-theme="dark"] {{ color-scheme: dark; }}
   body {{
     margin: 0; font-family: var(--sans); color: var(--text); line-height: 1.5;
-    background: var(--bg); min-height: 100vh;
+    background: var(--bg); min-height: 100vh; max-width: 100%;
+    overflow-x: clip;
     transition: background-color .15s ease, color .15s ease;
   }}
   a {{ color: var(--link); text-decoration: none; }}
@@ -366,8 +378,8 @@ def _page(title: str, body: str, *, tip: int | None = None, hero: bool = False) 
     .theme-toggle.tc-found::before {{ animation: none !important; }}
   }}
   .search-row {{ display: flex; gap: .5rem; align-items: center; }}
-  main {{ width: 100%; margin: 0; padding: 1rem 1.5rem 2.75rem; }}
-  .shell {{ width: 100%; }}
+  main {{ width: 100%; max-width: 100%; margin: 0; padding: 1rem 1.5rem 2.75rem; min-width: 0; }}
+  .shell {{ width: 100%; max-width: 100%; min-width: 0; }}
   .kpi {{
     display: grid; grid-template-columns: repeat(8, minmax(0, 1fr));
     gap: .5rem; margin: 0 0 .9rem;
@@ -553,7 +565,11 @@ def _page(title: str, body: str, *, tip: int | None = None, hero: bool = False) 
     margin: .4rem 0 0; font-size: .74rem; font-weight: 650;
   }}
   .peers-panel > .muted {{ margin: 0 0 .35rem !important; font-size: .7rem !important; }}
-  .card {{ background: var(--panel); border: 1px solid var(--line); border-radius: 14px; padding: 1rem 1.1rem; margin: 0 0 1rem; }}
+  .card {{
+    background: var(--panel); border: 1px solid var(--line); border-radius: 14px;
+    padding: 1rem 1.1rem; margin: 0 0 1rem;
+    max-width: 100%; min-width: 0; overflow-wrap: anywhere;
+  }}
   .card-head {{ display: flex; align-items: center; justify-content: space-between; gap: .75rem; margin-bottom: .75rem; }}
   .card-head h1 {{ margin: 0; font-size: 1.05rem; }}
   .card-head .more {{ font-size: .85rem; font-weight: 650; }}
@@ -742,7 +758,10 @@ def _page(title: str, body: str, *, tip: int | None = None, hero: bool = False) 
   table a:hover, table a.mono:hover, .row-ico a:hover {{ color: var(--invert); }}
   .kpi .val a {{ color: var(--tbl-link); }}
   .kpi .val a:hover {{ color: var(--invert); }}
-  .mono {{ font-family: var(--mono); font-size: .72rem; word-break: break-all; }}
+  .mono {{
+    font-family: var(--mono); font-size: .72rem;
+    overflow-wrap: anywhere; word-break: break-word;
+  }}
   .nowrap {{ white-space: nowrap; }}
   th.num, td.num {{ text-align: center; white-space: nowrap; }}
   th.num-conf, td.num-conf {{
@@ -756,12 +775,17 @@ def _page(title: str, body: str, *, tip: int | None = None, hero: bool = False) 
   .muted {{ color: var(--muted); }}
   .err {{ color: #b42318; }}
   .ok {{ color: #0f766e; font-weight: 650; }}
-  .kv {{ display: grid; grid-template-columns: 150px 1fr; gap: .4rem .85rem; font-size: .93rem; }}
+  .kv {{
+    display: grid; grid-template-columns: minmax(96px, 150px) minmax(0, 1fr);
+    gap: .4rem .85rem; font-size: .93rem; max-width: 100%;
+  }}
+  .kv > div {{ min-width: 0; overflow-wrap: anywhere; word-break: break-word; }}
   .kv div:nth-child(odd) {{ color: var(--muted); }}
   .stats {{
     display: grid; gap: .55rem;
-    grid-template-columns: repeat(auto-fit, minmax(132px, 1fr));
+    grid-template-columns: repeat(auto-fit, minmax(min(132px, 100%), 1fr));
     container-type: inline-size; container-name: stats;
+    max-width: 100%; min-width: 0;
   }}
   .stat {{
     background: var(--soft); border: 1px solid var(--line); border-radius: 10px;
@@ -780,7 +804,7 @@ def _page(title: str, body: str, *, tip: int | None = None, hero: bool = False) 
   }}
   /* Dense when many tiles share one wide row */
   .stats.stats-compact {{
-    grid-template-columns: repeat(auto-fit, minmax(108px, 1fr));
+    grid-template-columns: repeat(auto-fit, minmax(min(108px, 100%), 1fr));
     gap: .45rem;
   }}
   .stats.stats-compact .stat {{ padding: .5rem .55rem; border-radius: 8px; }}
@@ -826,28 +850,35 @@ def _page(title: str, body: str, *, tip: int | None = None, hero: bool = False) 
   [data-theme="dark"] .io-row.focus-addr, [data-theme="dark"] li.focus-addr {{
     background: color-mix(in srgb, #16a34a 18%, transparent);
   }}
+  /* Fixed overlay — never changes document flow (no CLS / page jump on scroll). */
   .tx-sticky {{
-    position: sticky; top: 3.6rem; z-index: 15;
+    position: fixed; left: 1.5rem; right: 1.5rem; top: 4.35rem; z-index: 18;
     display: flex; flex-wrap: wrap; gap: .4rem .65rem; align-items: center;
-    padding: .45rem .7rem; margin: 0 0 .75rem;
-    background: color-mix(in srgb, var(--bg) 90%, transparent);
+    padding: .45rem .7rem; margin: 0; max-width: calc(100vw - 3rem);
+    background: color-mix(in srgb, var(--panel) 94%, transparent);
     backdrop-filter: blur(10px); -webkit-backdrop-filter: blur(10px);
     border: 1px solid var(--line); border-radius: 10px;
-    box-shadow: 0 6px 18px rgba(15,23,42,.06);
-    /* Hidden at top of page — shown only after summary scrolls away (no double header). */
-    opacity: 0; pointer-events: none; max-height: 0; margin-bottom: 0; padding-top: 0; padding-bottom: 0;
-    border-width: 0; overflow: hidden; transition: opacity .15s ease;
+    box-shadow: 0 6px 18px rgba(15,23,42,.08);
+    opacity: 0; pointer-events: none; visibility: hidden;
+    transform: translateY(-6px);
+    transition: opacity .15s ease, transform .15s ease, visibility .15s;
   }}
   .tx-sticky.is-on {{
-    opacity: 1; pointer-events: auto; max-height: 6rem;
-    margin-bottom: .75rem; padding: .45rem .7rem; border-width: 1px;
+    opacity: 1; pointer-events: auto; visibility: visible; transform: translateY(0);
   }}
-  [data-theme="dark"] .tx-sticky {{ box-shadow: 0 6px 18px rgba(0,0,0,.25); }}
-  .tx-sticky .tx-sticky-id {{ min-width: 0; flex: 1 1 220px; }}
+  [data-theme="dark"] .tx-sticky {{ box-shadow: 0 6px 18px rgba(0,0,0,.35); }}
+  .tx-sticky .tx-sticky-id {{ min-width: 0; flex: 1 1 160px; overflow: hidden; }}
+  .tx-sticky .tx-sticky-id .mono {{
+    display: inline-block; max-width: 100%;
+    overflow: hidden; text-overflow: ellipsis; white-space: nowrap; vertical-align: bottom;
+  }}
   .tx-sticky .tx-sticky-meta {{
     display: flex; flex-wrap: wrap; gap: .3rem .55rem; align-items: center; font-size: .8rem;
   }}
   .tx-sticky .tx-sticky-meta .badge {{ font-size: .68rem; }}
+  @media (max-width: 720px) {{
+    .tx-sticky {{ left: 1rem; right: 1rem; top: 4.1rem; max-width: calc(100vw - 2rem); }}
+  }}
   .flow-bars {{ display: grid; gap: .45rem; margin: .85rem 0 0; }}
   .flow-row {{ display: grid; grid-template-columns: 72px 1fr auto; gap: .5rem; align-items: center; font-size: .85rem; }}
   .flow-row .flow-lbl {{ color: var(--muted); font-weight: 650; }}
@@ -905,7 +936,13 @@ def _page(title: str, body: str, *, tip: int | None = None, hero: bool = False) 
     .kpi {{ grid-template-columns: 1fr; }}
   }}
 
-  .copy-wrap {{ display: inline-flex; align-items: center; gap: .35rem; max-width: 100%; }}
+  .copy-wrap {{
+    display: inline-flex; align-items: center; gap: .35rem;
+    max-width: 100%; min-width: 0; flex-wrap: wrap;
+  }}
+  .copy-wrap > a.mono, .copy-wrap > span.mono {{
+    min-width: 0; max-width: 100%; overflow-wrap: anywhere; word-break: break-word;
+  }}
   .copy-btn {{
     border: 1px solid var(--line); background: var(--soft); color: var(--muted);
     border-radius: 6px; padding: .05rem .35rem; cursor: pointer; font-size: .7rem; line-height: 1.2;
@@ -968,7 +1005,7 @@ def _page(title: str, body: str, *, tip: int | None = None, hero: bool = False) 
           <a href="/mempool">Mempool</a>
           <a href="/supply">Supply</a>
           <a href="/orphans">Orphans</a>
-          <a href="/block/0">Genesis</a>
+          <a href="/block/0">Genesis</a>{pool_nav}
         </nav>
       </div>
     </div>
@@ -1231,7 +1268,7 @@ class ExplorerApp:
         try:
             data = D.chain_stats(c, hrp=self.hrp)
             data["node"] = self.node_status()
-            data["mempool"] = D.load_mempool(self.data_dir, hrp=self.hrp)
+            data["mempool"] = D.load_mempool(self.data_dir, hrp=self.hrp, chain=c)
         finally:
             c.close()
         with self._home_lock:
@@ -1347,12 +1384,16 @@ class ExplorerApp:
         finally:
             c.close()
 
-    def address(self, addr: str) -> dict[str, Any] | None:
+    def address(
+        self, addr: str, *, page: int = 1, per_page: int = D.ADDRESS_PER_PAGE
+    ) -> dict[str, Any] | None:
         if not validate_address(addr, hrp=self.hrp):
             return None
         c = self.chain()
         try:
-            return D.address_history(c, addr, hrp=self.hrp, limit=5000)
+            return D.address_history(
+                c, addr, hrp=self.hrp, page=page, per_page=per_page
+            )
         finally:
             c.close()
 
@@ -1392,7 +1433,11 @@ class ExplorerApp:
         }
 
     def mempool(self) -> dict[str, Any]:
-        return D.load_mempool(self.data_dir, hrp=self.hrp)
+        c = self.chain()
+        try:
+            return D.load_mempool(self.data_dir, hrp=self.hrp, chain=c)
+        finally:
+            c.close()
 
     def supply(self) -> dict[str, Any]:
         home = self.home()
@@ -1410,21 +1455,34 @@ class ExplorerApp:
             c.close()
 
 
-def _pager(page: int, total_pages: int, base: str = "/blocks") -> str:
+def _pager(
+    page: int,
+    total_pages: int,
+    base: str = "/blocks",
+    *,
+    chain_links: bool = True,
+) -> str:
+    sep = "&" if "?" in base else "?"
     prev_l = (
-        f'<a href="{base}?page={page - 1}">← newer</a>' if page > 1 else '<span class="muted">← newer</span>'
+        f'<a href="{base}{sep}page={page - 1}">← newer</a>'
+        if page > 1
+        else '<span class="muted">← newer</span>'
     )
     next_l = (
-        f'<a href="{base}?page={page + 1}">older →</a>'
+        f'<a href="{base}{sep}page={page + 1}">older →</a>'
         if page < total_pages
         else '<span class="muted">older →</span>'
     )
+    extras = ""
+    if chain_links:
+        extras = (
+            f'<a href="{base}{sep}page={total_pages}">genesis page</a>'
+            f'<a href="/block/0">block #0</a>'
+        )
     return (
         f'<div class="pager">{prev_l}'
         f'<span class="muted">page {page} / {total_pages}</span>'
-        f"{next_l}"
-        f'<a href="{base}?page={total_pages}">genesis page</a>'
-        f'<a href="/block/0">block #0</a></div>'
+        f"{next_l}{extras}</div>"
     )
 
 
@@ -2472,7 +2530,6 @@ def _render_tx(t: dict[str, Any]) -> bytes:
             + _copyable(prev, href=_tx_href(prev), short=False)
             + f"<div class='io-meta'>{src_meta} → "
             + _copyable(addr, href=f"/address/{addr}", short=False)
-            + (" <span class='pill-unspent'>you</span>" if _is_focus(addr) else "")
             + "</div></div>"
             + f'<div class="io-amt"><strong>{_esc(val)}</strong><span class="unit"> MHC</span></div></li>'
         )
@@ -2500,7 +2557,6 @@ def _render_tx(t: dict[str, Any]) -> bytes:
             f'<li class="io-row{focus_cls}"><div class="io-main">'
             + _copyable(addr, href=f"/address/{addr}", short=False)
             + f"{tag}"
-            + (" <span class='pill-unspent'>you</span>" if _is_focus(addr) else "")
             + f" {_status_pill(spent)}</div>"
             + f'<div class="io-amt"><strong class="reward">{_esc(o.get("value_mhc"))}</strong>'
             + '<span class="unit"> MHC</span></div></li>'
@@ -2570,18 +2626,21 @@ def _render_tx(t: dict[str, Any]) -> bytes:
         [
             f'<div class="stat"><div class="lbl">Age</div>{_stat_val(t.get("age") or "—")}</div>',
             f'<div class="stat"><div class="lbl">Size</div>{_stat_val(t.get("size_bytes"), unit="B")}</div>',
+            f'<div class="stat"><div class="lbl">vSize</div>{_stat_val(t.get("vsize") or t.get("size_bytes"), unit="vB")}</div>',
+            f'<div class="stat"><div class="lbl">Weight</div>{_stat_val(t.get("weight"), unit="WU")}</div>',
             f'<div class="stat"><div class="lbl">In / Out</div>{_stat_val(f"{in_n} / {out_n}")}</div>',
         ]
     )
-    meta = f'<div class="stats stats-compact">{"".join(meta_tiles)}</div>'
-
-    focus_banner = ""
-    if focus:
-        focus_banner = (
-            f'<p class="muted" style="margin:0 0 .65rem;font-size:.85rem">'
-            f'Highlighting <a href="/address/{_esc(focus)}">{_esc(focus)}</a> · '
-            f'<span class="pill-unspent">you</span> marks this wallet on the page.</p>'
+    if not coinbase:
+        rbf = t.get("rbf")
+        rbf_lbl = "yes" if rbf is True else ("no" if rbf is False else "—")
+        meta_tiles.append(
+            f'<div class="stat"><div class="lbl">RBF</div>{_stat_val(rbf_lbl)}</div>'
         )
+        meta_tiles.append(
+            f'<div class="stat"><div class="lbl">Witness</div>{_stat_val("no")}</div>'
+        )
+    meta = f'<div class="stats stats-compact">{"".join(meta_tiles)}</div>'
 
     # Compact sticky: only after scroll (see JS). Avoid repeating Payment/Fee/Age from tiles.
     sticky = f"""
@@ -2613,7 +2672,6 @@ def _render_tx(t: dict[str, Any]) -> bytes:
     body = f"""
     <div class="shell">
     {sticky}
-    {focus_banner}
     <div class="card">
       <div class="card-head">
         <h1>{_type_pill(coinbase)} {badge}</h1>
@@ -2734,7 +2792,7 @@ def _render_address(a: dict[str, Any]) -> bytes:
         <div>{_flow_pill(received=False)}</div><div><strong>{_esc(a.get("total_sent_mhc") or "0")}</strong> MHC
           <span class="muted"> · payments only</span></div>
         <div>Network fees</div><div>{_esc(a.get("total_fees_mhc") or "0")} MHC</div>
-        <div>Outputs</div><div>{_esc(a.get("received_count"))}{_esc(" (truncated)" if a.get("truncated") else "")}</div>
+        <div>Outputs</div><div>{_esc(a.get("received_count"))}</div>
         </div>
       </div>
       {flow_html}
@@ -2744,19 +2802,20 @@ def _render_address(a: dict[str, Any]) -> bytes:
       </div>
       <p class="muted" style="margin:.75rem 0 0;font-size:.85rem">
         Balance ≈ Received − Sent − Fees.
-        Open a tx from this page to highlight this address on From/To.
       </p>
     </div>
     <div class="card">
       <div class="card-head">
         <h1>Received outputs</h1>
-        <span class="muted">newest first</span>
+        <span class="muted">newest first · {_esc(a.get("per_page") or D.ADDRESS_PER_PAGE)} / page</span>
       </div>
+      {_pager(int(a.get("page") or 1), int(a.get("total_pages") or 1), base=f"/address/{addr}", chain_links=False) if int(a.get("total_pages") or 1) > 1 else ""}
       <div class="table-wrap"><table class="data-table">
         <tr><th class="num">Height</th><th class="hash-col">Txid</th><th class="num">vout</th><th class="num">MHC</th>
             <th>Status</th><th class="num">Age</th><th class="num-conf">Confirmations</th><th>Type</th></tr>
         {"".join(rows) or '<tr><td colspan="8" class="muted">No outputs</td></tr>'}
       </table></div>
+      {_pager(int(a.get("page") or 1), int(a.get("total_pages") or 1), base=f"/address/{addr}", chain_links=False) if int(a.get("total_pages") or 1) > 1 else ""}
     </div>
     </div>
     """
@@ -2898,26 +2957,43 @@ def _render_charts(data: dict[str, Any]) -> bytes:
 
 def _mempool_row_html(tx: dict[str, Any]) -> str:
     tid = tx.get("txid") or "?"
+    fr = tx.get("from")
+    to = tx.get("to")
+    fr_html = _copyable(fr, href=f"/address/{fr}") if fr else '<span class="muted">—</span>'
+    to_html = _copyable(to, href=f"/address/{to}") if to else '<span class="muted">—</span>'
+    rbf = tx.get("rbf")
+    rbf_html = (
+        '<span class="pill xfer">RBF</span>'
+        if rbf is True
+        else '<span class="muted">—</span>'
+    )
     return (
         "<tr>"
         f'<td class="hash-col">{_copyable(tid, href="/tx/" + str(tid), short=False)}</td>'
-        f'<td class="num">{_esc(tx.get("size_bytes") or "—")}</td>'
-        f'<td class="num">{_esc(tx.get("input_count") or "—")}</td>'
-        f'<td class="num">{_esc(tx.get("output_count") or "—")}</td>'
-        f'<td class="num">{_esc(tx.get("amount_mhc") or tx.get("output_value_mhc") or tx.get("fee_mhc") or "—")}</td>'
-        f'<td>{_type_pill(bool(tx.get("coinbase")))}</td>'
+        f"<td>{fr_html}</td>"
+        f"<td>{to_html}</td>"
+        f'<td class="num">{_esc(tx.get("amount_mhc") or tx.get("output_value_mhc") or "—")}</td>'
+        f'<td class="num">{_esc(tx.get("fee_mhc") or "—")}</td>'
+        f'<td class="num">{_esc(tx.get("fee_rate") or "—")}</td>'
+        f'<td class="num">{_esc(tx.get("vsize") or tx.get("size_bytes") or "—")}</td>'
+        f"<td>{rbf_html}</td>"
         "</tr>"
     )
 
 
 def _mempool_table_html(txs: list[dict[str, Any]]) -> str:
     rows = "".join(_mempool_row_html(tx) for tx in txs)
-    empty_row = '<tr><td colspan="6" class="muted">Mempool empty</td></tr>'
+    empty_row = (
+        '<tr><td colspan="8" class="muted">'
+        "Mempool empty — no unconfirmed transactions on this node."
+        "</td></tr>"
+    )
     body_rows = rows or empty_row
     return (
         '<div class="table-wrap"><table class="data-table">'
-        '<tr><th class="hash-col">Txid</th><th class="num">Size</th><th class="num">In</th>'
-        '<th class="num">Out</th><th class="num">Amount</th><th>Type</th></tr>'
+        '<tr><th class="hash-col">Txid</th><th>From</th><th>To</th>'
+        '<th class="num">Amount</th><th class="num">Fee</th><th class="num">Fee rate</th>'
+        '<th class="num">vSize</th><th>RBF</th></tr>'
         f"{body_rows}"
         "</table></div>"
     )
@@ -2926,15 +3002,16 @@ def _mempool_table_html(txs: list[dict[str, Any]]) -> str:
 def _render_mempool(data: dict[str, Any]) -> bytes:
     txs = data.get("transactions") or []
     init_key = "|".join(str(tx.get("txid") or "") for tx in txs)
+    age = data.get("updated_age") or "—"
     body = f"""
     <div class="shell">
       <div class="card">
         <div class="card-head">
           <h1>Mempool</h1>
-          <span class="muted" id="mempoolCount">{_esc(data.get("count") or 0)} unconfirmed · node snapshot</span>
+          <span class="muted" id="mempoolCount">{_esc(data.get("count") or 0)} unconfirmed · snapshot {_esc(age)} ago</span>
         </div>
         <p class="muted" style="margin:0 0 .75rem;font-size:.85rem">
-          Read from <span class="mono">{_esc(data.get("path") or "mempool.json")}</span>
+          Live from node <span class="mono">mempool.json</span>
           · <a href="/api/mempool">JSON</a>
           · <span class="term-live" id="mempoolLive" style="font-size:.7rem">live</span>
         </p>
@@ -2960,20 +3037,26 @@ def _render_mempool(data: dict[str, Any]) -> bytes:
           esc(shortHash(text)) + '</a><button type="button" class="copy-btn" data-copy="' + esc(text) +
           '" title="Copy">\u23d8</button></span>';
       }}
-      function typePill(cb) {{
-        return cb ? '<span class="pill minted">MHC Mined</span>' : '<span class="pill xfer">Transfer</span>';
+      function addrCell(a) {{
+        if (!a) return '<span class="muted">\u2014</span>';
+        return copyable(a, '/address/' + encodeURIComponent(a));
       }}
       function renderRows(txs) {{
-        if (!txs || !txs.length) return '<tr><td colspan="6" class="muted">Mempool empty</td></tr>';
+        if (!txs || !txs.length) {{
+          return '<tr><td colspan="8" class="muted">Mempool empty — no unconfirmed transactions on this node.</td></tr>';
+        }}
         return txs.map(function (tx) {{
-          var amt = tx.amount_mhc || tx.output_value_mhc || tx.fee_mhc || '\u2014';
+          var amt = tx.amount_mhc || tx.output_value_mhc || '\u2014';
+          var rbf = tx.rbf === true ? '<span class="pill xfer">RBF</span>' : '<span class="muted">\u2014</span>';
           return '<tr>' +
             '<td class="hash-col">' + copyable(tx.txid, '/tx/' + encodeURIComponent(tx.txid || '')) + '</td>' +
-            '<td class="num">' + esc(tx.size_bytes || '\u2014') + '</td>' +
-            '<td class="num">' + esc(tx.input_count || '\u2014') + '</td>' +
-            '<td class="num">' + esc(tx.output_count || '\u2014') + '</td>' +
+            '<td>' + addrCell(tx.from) + '</td>' +
+            '<td>' + addrCell(tx.to) + '</td>' +
             '<td class="num">' + esc(amt) + '</td>' +
-            '<td>' + typePill(!!tx.coinbase) + '</td>' +
+            '<td class="num">' + esc(tx.fee_mhc || '\u2014') + '</td>' +
+            '<td class="num">' + esc(tx.fee_rate || '\u2014') + '</td>' +
+            '<td class="num">' + esc(tx.vsize || tx.size_bytes || '\u2014') + '</td>' +
+            '<td>' + rbf + '</td>' +
             '</tr>';
         }}).join('');
       }}
@@ -2988,13 +3071,15 @@ def _render_mempool(data: dict[str, Any]) -> bytes:
           if (wrap && wrap.dataset.key !== key) {{
             wrap.dataset.key = key;
             wrap.innerHTML = '<div class="table-wrap"><table class="data-table">' +
-              '<tr><th class="hash-col">Txid</th><th class="num">Size</th><th class="num">In</th>' +
-              '<th class="num">Out</th><th class="num">Amount</th><th>Type</th></tr>' +
+              '<tr><th class="hash-col">Txid</th><th>From</th><th>To</th>' +
+              '<th class="num">Amount</th><th class="num">Fee</th><th class="num">Fee rate</th>' +
+              '<th class="num">vSize</th><th>RBF</th></tr>' +
               renderRows(txs) + '</table></div>';
           }}
           var cnt = document.getElementById('mempoolCount');
           if (cnt) {{
-            var txt = (d.count || 0) + ' unconfirmed \u00b7 node snapshot';
+            var age = d.updated_age || '\u2014';
+            var txt = (d.count || 0) + ' unconfirmed \u00b7 snapshot ' + age + ' ago';
             if (cnt.textContent !== txt) cnt.textContent = txt;
           }}
         }} catch (e) {{}}
@@ -3089,7 +3174,7 @@ def _render_orphans(data: dict[str, Any]) -> bytes:
     for b in data.get("blocks") or []:
         active_h = b.get("active_hash_at_height")
         active_html = (
-            _copyable(active_h, href="/block/" + str(active_h))
+            _copyable(active_h, short=False, href="/block/" + str(active_h))
             if active_h
             else '<span class="muted">—</span>'
         )
@@ -3102,7 +3187,7 @@ def _render_orphans(data: dict[str, Any]) -> bytes:
             "<tr>"
             f'<td class="num">#{_esc(b.get("height"))}</td>'
             f'<td class="hash-col">{_copyable(b.get("hash"), short=False)}</td>'
-            f"<td>{active_html}</td>"
+            f'<td class="hash-col">{active_html}</td>'
             f'<td class="num">{_esc(b.get("difficulty_display"))}</td>'
             f'<td class="muted nowrap">{_esc(b.get("age") or "—")}</td>'
             f'<td class="muted nowrap">{_esc(b.get("time_utc") or "—")}</td>'
@@ -3122,7 +3207,7 @@ def _render_orphans(data: dict[str, Any]) -> bytes:
         </p>
         <div class="table-wrap"><table class="data-table">
           <tr>
-            <th class="num">Height</th><th class="hash-col">Side-chain hash</th><th>Active hash (won)</th>
+            <th class="num">Height</th><th class="hash-col">Side-chain hash</th><th class="hash-col">Active hash (won)</th>
             <th class="num">Difficulty</th><th>Age</th><th>Time (UTC)</th><th>Branch</th>
           </tr>
           {"".join(rows) or '<tr><td colspan="7" class="muted">No stored side-chain blocks — this node has not seen a reorg (yet).</td></tr>'}
@@ -3473,7 +3558,19 @@ def make_handler(app: ExplorerApp):
                         )
                         return
                     addr = key[len("/address/") :].strip("/")
-                    data = app.address(addr)
+                    page = 1
+                    per_page = D.ADDRESS_PER_PAGE
+                    try:
+                        page = int((qs.get("page") or ["1"])[0])
+                    except ValueError:
+                        page = 1
+                    try:
+                        per_page = int(
+                            (qs.get("per_page") or qs.get("limit") or [str(D.ADDRESS_PER_PAGE)])[0]
+                        )
+                    except ValueError:
+                        per_page = D.ADDRESS_PER_PAGE
+                    data = app.address(addr, page=page, per_page=per_page)
                     if data is None:
                         self._error(404, "Invalid or unknown address.", want_json=want_json)
                         return
