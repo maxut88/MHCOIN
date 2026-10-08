@@ -493,7 +493,52 @@ class MhcoinDesktop(tk.Tk):
         v.skip(8)
         v.label("Network via MHCOIN_NETWORK (localnet for RC).", muted=True)
         v.skip(8)
+        v.button("Import Private Key (WIF)", self._import_wif)
+        v.button("Show Private Key (WIF)", self._export_wif)
+        v.skip(8)
         v.button("Refresh", self.refresh_all)
+
+    def _import_wif(self) -> None:
+        key = simpledialog.askstring(
+            APP_TITLE, "Paste WIF or 64-char hex private key:", parent=self
+        )
+        if not key or not key.strip():
+            return
+        pwd = self._ask_new_password()
+        if not pwd:
+            return
+        try:
+            out = self.ctrl.import_wif(key.strip(), pwd, label="imported")
+        except WalletError as e:
+            messagebox.showerror(APP_TITLE, str(e))
+            return
+        messagebox.showinfo(
+            APP_TITLE,
+            f"Private key imported.\n\nAddress:\n{out['address']}\n\nBack up your password.",
+        )
+        self.refresh_all()
+
+    def _export_wif(self) -> None:
+        if not self.ctrl.wallet_exists():
+            messagebox.showwarning(APP_TITLE, "No wallet found.")
+            return
+        pwd = self._ask_password("Wallet password:")
+        if not pwd:
+            return
+        if not messagebox.askokcancel(
+            APP_TITLE,
+            "Anyone with this WIF can spend your MHC.\n\nShow private key for the active address?",
+        ):
+            return
+        try:
+            out = self.ctrl.export_wif(pwd)
+        except WalletError as e:
+            messagebox.showerror(APP_TITLE, str(e))
+            return
+        messagebox.showinfo(
+            APP_TITLE,
+            f"Active address:\n{out['address']}\n\nWIF (keep secret):\n\n{out['wif']}",
+        )
 
     # --- actions ------------------------------------------------------------
 

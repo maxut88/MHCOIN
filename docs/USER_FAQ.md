@@ -6,16 +6,15 @@ Current software: see [GitHub Releases](https://github.com/maxut88/MHCOIN/releas
 
 ---
 
-## Upgrade (e.g. 0.3.7.3 → 0.4.1.x)
+## Upgrade (e.g. → 0.4.2.0)
+
+**0.4.2.0 is a hard fork** (protocol **v2**, Bitcoin-style difficulty from height **1500**). Every node and miner must upgrade **before** height 1500.
 
 1. **Back up** `wallet.json` first (copy the file, or Desktop → Settings → Download wallet backup).
-2. Install the new Desktop build (same OS).
+2. Install the new Desktop build (same OS), or `git pull` + `pip install -e .` on `main`.
 3. Open the **same** data folder (`~/.mhcoin/mainnet/` — Windows: `%USERPROFILE%\.mhcoin\mainnet\`).
-4. Storage migrates automatically on open:
-   - `utxo.sqlite` → `chainstate/` (LMDB)
-   - block bytes → `blocks/blk*.dat`
-   - peers → `peers.dat`
-5. Unlock with the **same password**. BIP39 seed (if the wallet was created/restored from words) stays encrypted in `wallet.json`.
+4. Unlock with the **same password**. Confirm the node status shows **protocol 2**.
+5. Older 0.4.1.x builds cannot peer with 0.4.2.0.
 
 Do **not** copy another machine’s chain database — each node validates from genesis.
 
@@ -27,12 +26,15 @@ Do **not** copy another machine’s chain database — each node validates from 
 |------|-----|
 | Encrypted wallet file | Settings → **Download wallet backup** (or copy `wallet.json`) |
 | BIP39 seed | Create shows words **once** · Settings → **Show Recovery Seed** (password) |
+| Private key (WIF) | Welcome / Settings → **Import Private Key (WIF)** · Settings → **Show Private Key (WIF)** for the active address |
 | Restore on a new PC | Welcome → **Restore from Seed** · or `mhcoin wallet restore --mnemonic "…"` |
 | Password | Never stored in the backup — keep it separately |
 
 Seed phrase = full control of funds. Store offline. Anyone with seed + empty passphrase can restore the key.
 
-Legacy wallets (pre-BIP39 key import) have **no** mnemonic — only the encrypted key / backup file + password.
+**WIF** = one address key (Electrum/Sparrow-style). Import accepts compressed WIF or 64-char hex. Show WIF needs the wallet password and only reveals the **active** address. Anyone with the WIF can spend that address.
+
+Legacy / imported-key wallets have **no** mnemonic — use WIF export or the encrypted backup file + password.
 
 ---
 

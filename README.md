@@ -7,7 +7,7 @@
 Independent Proof-of-Work cryptocurrency with a full node, encrypted wallet, and Desktop miner.  
 Own consensus, `mhc1…` addresses, and P2P network.
 
-**[Download MHCOIN Core 0.4.1.12](https://github.com/maxut88/MHCOIN/releases/tag/v0.4.1.12)** · [User FAQ](docs/USER_FAQ.md) · [Docs](docs/README.md)
+**[Download MHCOIN Core 0.4.2.0](https://github.com/maxut88/MHCOIN/releases/tag/v0.4.2.0)** · [User FAQ](docs/USER_FAQ.md) · [Docs](docs/README.md)
 
 ---
 
@@ -24,7 +24,7 @@ Own consensus, `mhc1…` addresses, and P2P network.
 | Addresses | `mhc1…` (bech32) |
 | Ledger | UTXO |
 | P2P | port **8333** · magic `MHCN` |
-| Software | **0.4.1.12** |
+| Software | **0.4.2.0** |
 
 ### Mainnet identity (frozen)
 
@@ -56,10 +56,10 @@ Download the build for your OS from the [latest release](https://github.com/maxu
 
 | OS | File |
 |----|------|
-| **Windows** | `MHCOIN-Core-0.4.1.12-windows-x86_64.exe` (or `.zip`) |
-| **macOS** (current) | `MHCOIN-Core-0.4.1.12-macos.dmg` |
-| **macOS** (11+ / older Intel) | `MHCOIN-Core-0.4.1.12-macos110-legacy.dmg` |
-| **Linux** | `MHCOIN-Core-0.4.1.12-x86_64.AppImage` or `.tar.gz` |
+| **Windows** | `MHCOIN-Core-0.4.2.0-windows-x86_64.exe` (or `.zip`) |
+| **macOS** (current) | `MHCOIN-Core-0.4.2.0-macos.dmg` |
+| **macOS** (11+ / older Intel) | `MHCOIN-Core-0.4.2.0-macos110-legacy.dmg` |
+| **Linux** | `MHCOIN-Core-0.4.2.0-x86_64.AppImage` or `.tar.gz` |
 
 **First run**
 

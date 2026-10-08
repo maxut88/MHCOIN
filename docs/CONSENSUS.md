@@ -59,7 +59,7 @@ Data directories are `~/.mhcoin/<network>/` by default.
 | `PROTOCOL_VERSION` | 2 | Advertised wire version (BTC difficulty hard fork) |
 | `MIN_SUPPORTED_PROTOCOL_VERSION` | 2 | Reject older peers |
 | `MAX_SUPPORTED_PROTOCOL_VERSION` | 2 | Reject newer peers |
-| `SOFTWARE_VERSION` | 0.4.1.12 | Informational user-agent |
+| `SOFTWARE_VERSION` | 0.4.2.0 | Informational user-agent |
 
 ### Compatibility rules
 

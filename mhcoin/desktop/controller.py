@@ -388,6 +388,53 @@ class CoreController:
         self._refresh_balance_cache(created.address)
         return created.address
 
+    def import_wif(
+        self,
+        key_text: str,
+        password: str,
+        *,
+        label: str = "imported",
+    ) -> dict[str, str]:
+        """Import WIF or hex private key; returns address + wallet_id."""
+        if not password:
+            raise WalletError("password required")
+        if not (key_text or "").strip():
+            raise WalletError("private key required")
+        if self._mining:
+            self.stop_mining()
+        existing = len(Wallet(self.paths).list_wallets())
+        lab = (label or "").strip() or f"Imported {existing + 1}"
+        w = Wallet(self.paths, password=password)
+        created = w.import_private_key(
+            key_text.strip(),
+            password=password,
+            label=lab,
+            make_default=True,
+        )
+        self._password = password
+        self._reset_session_wallet_stats()
+        self.ensure_chain()
+        self._refresh_balance_cache(created.address)
+        return {
+            "address": created.address,
+            "wallet_id": created.wallet_id,
+        }
+
+    def export_wif(self, password: str | None = None) -> dict[str, str]:
+        """Export compressed WIF for the active (default) spendable address."""
+        pwd = password or self._password
+        if not pwd:
+            raise WalletError("password required")
+        if self.active_watch_only():
+            raise WalletError("active wallet is watch-only — no private key to export")
+        w = Wallet(self.paths, password=pwd)
+        wif = w.export_wif(password=pwd)
+        return {
+            "wif": wif,
+            "address": w.default_address(),
+            "label": "",
+        }
+
     # --- address book (local labels, never broadcast) -----------------------
 
     def address_book(self) -> dict[str, str]:

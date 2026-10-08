@@ -880,6 +880,7 @@ HTML = r"""<!DOCTYPE html>
     <div class="row">
       <button class="primary" id="btnCreate" disabled>Create New Wallet</button>
       <button id="btnRestore" disabled>Restore from Seed</button>
+      <button id="btnImportKey" disabled>Import Private Key (WIF)</button>
       <button id="btnOpen" disabled>Open Existing Wallet</button>
       <button id="btnSupportWelcome">Support</button>
     </div>
@@ -2058,6 +2059,24 @@ $("btnRestore").onclick = async () => {
     enterApp();
   } catch(e){ flash(e.message, false); }
 };
+$("btnImportKey").onclick = async () => {
+  if (!welcomeReady) { flash("Still loading — wait for the progress bar", false); return; }
+  try {
+    const key = await ask("Paste WIF or 64-char hex private key:");
+    if (!key || !String(key).trim()) return;
+    const a = await ask("Choose a wallet password:");
+    if (!a) return;
+    const b = await ask("Confirm password:");
+    if (a !== b) return flash("Passwords do not match", false);
+    const j = await api("wallet/import-key", {password:a, key: String(key).trim(), label:"imported"});
+    flash("Private key imported");
+    let net = "mainnet";
+    try { const s = await api("status"); net = s.network || net; } catch(e){}
+    await walletDetailsBox(j.address, a, net, "");
+    try { await doWalletBackup(); } catch(be){ flash("Imported, but backup failed: "+be.message, false); }
+    enterApp();
+  } catch(e){ flash(e.message, false); }
+};
 $("btnOpen").onclick = async () => {
   if (!welcomeReady) { flash("Still loading — wait for the progress bar", false); return; }
   try {
@@ -2155,7 +2174,7 @@ function setWelcomeBusy(busy, title, meta){
   if (title && $("welcomeLoadTitle")) $("welcomeLoadTitle").textContent = title;
   if (meta && $("welcomeLoadMeta")) $("welcomeLoadMeta").textContent = meta;
   const dis = !!busy;
-  ["welcomeNetSel","btnCreate","btnRestore","btnOpen"].forEach(id => {
+  ["welcomeNetSel","btnCreate","btnRestore","btnImportKey","btnOpen"].forEach(id => {
     const el = $(id); if (el) el.disabled = dis;
   });
   const wsel = $("welcomeWalletSel");
@@ -2618,6 +2637,8 @@ async function render(pre){
         <button id="ref">Refresh</button>
         <button id="newW">Create Another Wallet</button>
         <button id="restoreW">Restore from Seed</button>
+        <button id="importWif">Import Private Key (WIF)</button>
+        <button id="exportWif">Show Private Key (WIF)</button>
         <button id="exportSeed">Show Recovery Seed</button>
         <button id="exportXpub">Show Account xpub</button>
         <button id="importXpub">Import xpub (watch-only)</button>
@@ -2760,6 +2781,39 @@ async function render(pre){
         const j = await api("wallet/restore", {password:a, mnemonic: words});
         flash("Wallet restored from seed");
         render();
+      } catch(e){ flash(e.message, false); }
+    };
+    if ($("importWif")) $("importWif").onclick = async () => {
+      try {
+        const key = await ask("Paste WIF or 64-char hex private key:");
+        if (!key || !String(key).trim()) return;
+        const a = await ask("Password to encrypt imported key:");
+        if (!a) return;
+        const b = await ask("Confirm password:");
+        if (a !== b) return flash("Passwords do not match", false);
+        const j = await api("wallet/import-key", {password:a, key: String(key).trim(), label:"imported"});
+        flash("Imported · "+(j.address||"").slice(0,18)+"…");
+        render();
+      } catch(e){ flash(e.message, false); }
+    };
+    if ($("exportWif")) $("exportWif").onclick = async () => {
+      try {
+        const p = await ask("Wallet password:");
+        if (!p) return;
+        const ok = await confirmBox(
+          "Anyone with this private key (WIF) can spend your MHC.\n\n" +
+          "Show WIF for the active address only?\n\nKeep it offline — never paste into websites."
+        );
+        if (!ok) return;
+        const j = await api("wallet/export-key", {password:p});
+        await showModal({
+          title: "Private key (WIF)",
+          message: "Active address:\n" + (j.address || "") + "\n\nCompressed WIF — treat like cash.",
+          mode: "copy",
+          copyText: j.wif || "",
+          saveName: "MHCOIN-private-key.wif.txt",
+          okLabel: "Done",
+        });
       } catch(e){ flash(e.message, false); }
     };
     if ($("exportSeed")) $("exportSeed").onclick = async () => {
@@ -3163,6 +3217,26 @@ def make_handler(state: DesktopState):
                         "wallets": c.list_wallets(),
                         "receive_addrs": c.list_receive_addresses(),
                     }
+                if path == "/api/wallet/import-key":
+                    out = c.import_wif(
+                        str(body.get("key") or ""),
+                        str(body.get("password") or ""),
+                        label=str(body.get("label") or "imported") or "imported",
+                    )
+                    try:
+                        c.request_history_build(full_chain=True)
+                    except Exception:
+                        pass
+                    return {
+                        "ok": True,
+                        "address": out["address"],
+                        "wallet_id": out.get("wallet_id") or "",
+                        "wallets": c.list_wallets(),
+                        "receive_addrs": c.list_receive_addresses(),
+                    }
+                if path == "/api/wallet/export-key":
+                    out = c.export_wif(str(body.get("password") or "") or None)
+                    return {"ok": True, **out}
                 if path == "/api/wallet/unlock":
                     if not c.wallet_exists():
                         raise WalletError("no wallet found")
