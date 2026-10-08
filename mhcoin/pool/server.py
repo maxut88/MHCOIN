@@ -87,7 +87,17 @@ def run_pool(cfg: PoolConfig) -> None:
 
     json_srv = start_json_server(engine, cfg.listen_host, cfg.listen_port)
     stratum_srv = start_stratum_server(engine, cfg.listen_host, cfg.stratum_port)
-    web_srv = start_web(db, cfg.web_host, cfg.web_port, pool_address=cfg.pool_address)
+    web_srv = start_web(
+        db,
+        cfg.web_host,
+        cfg.web_port,
+        pool_address=cfg.pool_address,
+        json_port=cfg.listen_port,
+        stratum_port=cfg.stratum_port,
+        fee_percent=cfg.fee_percent,
+        share_factor=cfg.share_factor,
+        explorer_url=os.environ.get("MHCOIN_EXPLORER_URL", "http://192.168.0.221:8766"),
+    )
     payouts = PayoutWorker(cfg, db, rt)
     payouts.start()
 

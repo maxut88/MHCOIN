@@ -102,7 +102,7 @@ def _page(title: str, body: str, *, tip: int | None = None, hero: bool = False) 
     _ = hero  # branding is always a single header
     import os
 
-    pool_url = (os.environ.get("MHCOIN_POOL_URL") or "").strip()
+    pool_url = (os.environ.get("MHCOIN_POOL_URL") or "http://192.168.0.221:8888").strip()
     pool_nav = (
         f'\n          <a href="{_esc(pool_url)}" rel="noopener">Pool</a>'
         if pool_url

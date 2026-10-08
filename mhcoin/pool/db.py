@@ -315,6 +315,13 @@ class PoolDB:
                 "SELECT COUNT(*) AS n FROM shares WHERE ts > ?",
                 (now - 3600,),
             ).fetchone()["n"]
+            shares_round = self._conn.execute(
+                "SELECT COUNT(*) AS n FROM shares WHERE round_id=?",
+                (self.current_round_id(),),
+            ).fetchone()["n"]
+            miners_total = self._conn.execute(
+                "SELECT COUNT(DISTINCT address) AS n FROM workers"
+            ).fetchone()["n"]
             blocks = self._conn.execute(
                 """
                 SELECT height, block_hash, reward_sats, ended_ts, status
@@ -322,12 +329,26 @@ class PoolDB:
                 ORDER BY id DESC LIMIT 20
                 """
             ).fetchall()
+            top = self._conn.execute(
+                """
+                SELECT address, worker, hashrate, last_seen
+                FROM workers
+                WHERE last_seen > ?
+                ORDER BY hashrate DESC
+                LIMIT 50
+                """,
+                (now - 600,),
+            ).fetchall()
             return {
                 "workers_active": int(workers),
+                "miners_total": int(miners_total),
                 "pool_hashrate": float(hashrate or 0),
                 "shares_1h": int(shares_1h),
+                "shares_round": int(shares_round),
                 "current_round": self.current_round_id(),
                 "blocks": [dict(b) for b in blocks],
+                "workers": [dict(w) for w in top],
+                "ts": now,
             }
 
     def miner_stats(self, address: str) -> dict:

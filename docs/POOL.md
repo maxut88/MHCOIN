@@ -45,6 +45,11 @@ Env alternatives: `MHCOIN_POOL_ADDRESS`, `MHCOIN_POOL_DATA`, `MHCOIN_POOL_DIR`, 
 
 systemd example: [`rc1_ops/mhcoin-pool.service`](../rc1_ops/mhcoin-pool.service).
 
+## Stats UI
+
+Open **http://POOL_HOST:8888** — explorer-matched dashboard (KPIs, connect howto, workers, blocks, miner lookup).
+Explorer nav **Pool** appears when `MHCOIN_POOL_URL` is set (default on LAN: `http://192.168.0.221:8888`).
+
 ## Miner — terminal only
 
 No Desktop pool UI yet. Mine with CLI:
