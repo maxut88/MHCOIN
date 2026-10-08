@@ -34,6 +34,13 @@ def run_pool(cfg: PoolConfig) -> None:
     params = get_network_params(cfg.network)
     cfg.hrp = params.address_hrp
     peers = default_connect_peers(cfg.network)
+    # Optional override: MHCOIN_CONNECT=host:port,host2:port
+    import os
+
+    extra = (os.environ.get("MHCOIN_CONNECT") or "").strip()
+    if extra:
+        override = [p.strip() for p in extra.split(",") if p.strip()]
+        peers = override + [p for p in peers if p not in override]
 
     logger.info(
         "Starting pool network=%s address=%s data=%s",
@@ -44,8 +51,8 @@ def run_pool(cfg: PoolConfig) -> None:
     rt = NodeRuntime(
         data_dir=Path(cfg.data_dir),
         network=cfg.network,
-        host="0.0.0.0",
-        port=params.default_port,
+        host="127.0.0.1",
+        port=18444,  # unused when listen disabled; avoid colliding with seed :8333
         connect=peers,
         enable_listen=False,
     )
