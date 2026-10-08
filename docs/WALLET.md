@@ -57,9 +57,11 @@ File: `wallet.json` under `~/.mhcoin/<network>/`.
 ## Desktop
 
 - **Create / Restore / Show Recovery Seed / Backup** — as before; restore uses gap-scan
+- **Import Private Key (WIF)** — Welcome + Settings (WIF or 64-char hex; same as CLI `import-key`)
+- **Show Private Key (WIF)** — Settings, for the **active** address (password + confirm; same as CLI `export-key`)
 - **Receive** — list / New address / Use / Copy (external only; change hidden)
 - **Overview balance** — whole HD account
 - **Show Account xpub** / **Import xpub (watch-only)** in Settings
-- Watch-only accounts can view balance/history but cannot send
+- Watch-only accounts can view balance/history but cannot send / export WIF
 
 Same data directory as CLI (`~/.mhcoin/<network>/`).
