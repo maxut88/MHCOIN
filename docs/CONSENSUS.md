@@ -22,7 +22,7 @@ Authoritative source: `mhcoin/consensus/params.py`.
 
 **Mainnet consensus fingerprint** (canonical source-tree hash):
 
-`0f6770b8df40575e458ca78f36f0ee1a40a9173111e49adb5a093df3478b270a`
+`5eb609540c366c94b05b817205bed137fb2496c1d8b48cf2e0081498269c33eb`
 
 **Mainnet genesis:**
 
