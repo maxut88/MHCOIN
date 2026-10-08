@@ -31,7 +31,7 @@ Own consensus, `mhc1…` addresses, and P2P network.
 | | |
 |---|---|
 | Genesis | `62e078a7ca0dfeac4c6451e5852d5ec714c7aacbff4e48f1d8cc8aa9560a0000` |
-| Consensus fingerprint | `21f256498747b313795b65c9e26f0dd1cb23ee762813bc0d593c2c513e787ae9` |
+| Consensus fingerprint | `5eb609540c366c94b05b817205bed137fb2496c1d8b48cf2e0081498269c33eb` |
 | Bootstrap seed | `176.38.3.168:8333` (discovery only — always validate yourself) |
 
 ```bash
