@@ -8,7 +8,7 @@ Current software: see [GitHub Releases](https://github.com/maxut88/MHCOIN/releas
 
 ## Upgrade (e.g. → 0.4.2.0)
 
-**0.4.2.0 is a hard fork** (protocol **v2**, Bitcoin-style difficulty from height **1500**). Every node and miner must upgrade **before** height 1500.
+**0.4.2.0 is a hard fork** (protocol **v2**, epoch difficulty from height **1500**). Every node and miner must upgrade **before** height 1500.
 
 1. **Back up** `wallet.json` first (copy the file, or Desktop → Settings → Download wallet backup).
 2. Install the new Desktop build (same OS), or `git pull` + `pip install -e .` on `main`.

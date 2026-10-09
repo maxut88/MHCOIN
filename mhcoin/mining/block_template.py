@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from mhcoin.blockchain.block import Block, BlockHeader
 from mhcoin.consensus.block_reward import get_block_subsidy
-from mhcoin.constants import BLOCK_VERSION, REGTEST_NBITS
+from mhcoin.constants import BLOCK_VERSION
 from mhcoin.mempool import Mempool
 from mhcoin.transaction.input import TxIn, TxOut
 from mhcoin.transaction.transaction import Transaction
@@ -37,14 +37,20 @@ def build_block_template(
     max_txs: int = 1000,
     coinbase_extra: bytes = b"MHCOIN",
 ) -> Block:
+    """Select mempool txs against a working UTXO that applies each accepted spend.
+
+    Validates with existing ``validate_transaction``, then applies the tx to a
+    memory clone so dependent txs see prior outputs and double-spends fail.
+    """
+    from mhcoin.blockchain.validation import validate_transaction
+
+    working = utxo.clone_memory()
     selected: list[Transaction] = []
     fees = 0
     for tx in mempool.list_txs()[:max_txs]:
-        # re-validate against UTXO
-        from mhcoin.blockchain.validation import validate_transaction
-
         try:
-            fee = validate_transaction(tx, utxo, height=height)
+            fee = validate_transaction(tx, working, height=height)
+            working.apply_transaction(tx, height)
         except Exception:
             continue
         selected.append(tx)

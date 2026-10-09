@@ -20,7 +20,7 @@ Own consensus, `mhc1…` addresses, and P2P network.
 | Block reward | 50 MHC → halves every 210,000 blocks |
 | PoW | HASH256 (double SHA-256) |
 | Block time | ~10 minutes (target 600 s) |
-| Difficulty | retarget every block · window 30 · damping 1/16 |
+| Difficulty | below height 1500: every block · W30 · 1/16 damping; from 1500: epoch every 2016 blocks (protocol v2) |
 | Addresses | `mhc1…` (bech32) |
 | Ledger | UTXO |
 | P2P | port **8333** · magic `MHCN` |
@@ -97,6 +97,7 @@ Helpers: `packaging/mine_mainnet.sh` · `.bat` · `.ps1`
 - Stop Desktop mining (or Quit) before Terminal mining on the **same** data folder.
 - Finding a block is probabilistic (~10 min average for the **network**, not per miner).
 - Only blocks on the active chain pay; stale/side blocks do not.
+- **Pool (optional):** `mhcoin mining pool-start --url POOL_HOST:3333 --address mhc1…` — see [docs/POOL.md](docs/POOL.md).
 
 ---
 

@@ -14,7 +14,9 @@ from collections import defaultdict, deque
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
+import os
 from urllib.parse import parse_qs, unquote, urlparse
+from urllib.request import Request, urlopen
 
 from mhcoin.blockchain.readonly_chain import ReadOnlyChain
 from mhcoin.explorer import decode as D
@@ -31,8 +33,8 @@ STATIC_FILES = {
     "favicon.ico": ASSETS_DIR / "mhcoin.ico",
 }
 
-# Home/stats TTL — home tabs poll often; avoid full-chain rescans every hit.
-_HOME_CACHE_TTL_SEC = 3.0
+# Home/stats TTL — must be > tip poll interval (3s) or every poll rescans the chain.
+_HOME_CACHE_TTL_SEC = 15.0
 _RICH_CACHE_TTL_SEC = 30.0
 # Per-client limits only for expensive scans (not HTML / tip poll / static).
 _RATE_LIMIT_WINDOW_SEC = 60.0
@@ -95,6 +97,187 @@ def _short_addr(addr: str | None, n: int = 10) -> str:
 
 def _esc(s: Any) -> str:
     return html.escape(str(s), quote=True)
+
+def _pool_url() -> str:
+    return (os.environ.get("MHCOIN_POOL_URL") or "http://192.168.0.221:8888").strip().rstrip("/")
+
+
+def _pool_address() -> str:
+    return (os.environ.get("MHCOIN_POOL_ADDRESS") or "mhc1qmyj738aumw42c8yxuvlvuttvveqc40cxdh6p53").strip()
+
+
+def _mode_pill(mode: str) -> str:
+    m = (mode or "").lower()
+    if m == "pool":
+        return '<span class="pill mode pool" title="Pool — summed stratum hashrate">Pool</span>'
+    if m == "solo":
+        return '<span class="pill mode solo" title="Solo miner on P2P (STATUS)">Solo</span>'
+    return '<span class="pill mode none" title="Not mining">—</span>'
+
+
+def _peer_host(addr: str) -> str:
+    a = (addr or "").strip()
+    if not a:
+        return ""
+    if a.startswith("["):
+        end = a.find("]")
+        if end > 0:
+            return a[1:end]
+    if a.count(":") == 1:
+        return a.split(":", 1)[0]
+    return a
+
+
+def _pool_p2p_hosts() -> set[str]:
+    """Hosts that identify the local pool-node P2P link (not a solo miner)."""
+    hosts = {"127.0.0.1", "localhost", "::1"}
+    try:
+        from urllib.parse import urlparse
+
+        h = urlparse(_pool_url()).hostname
+        if h:
+            hosts.add(h)
+    except Exception:
+        pass
+    for part in (os.environ.get("MHCOIN_POOL_P2P_HOSTS") or "").split(","):
+        p = part.strip()
+        if p:
+            hosts.add(p)
+    return hosts
+
+
+def _annotate_p2p_peer_modes(
+    node: dict[str, Any],
+    pool_live: dict[str, Any] | None,
+) -> None:
+    """Label Connected peers: Pool (aggregate H/s) vs Solo (independent STATUS).
+
+    Pool-node P2P link shows Mode=Pool and the summed stratum hashrate from the
+    pool API. Real desktop/solo miners keep Mode=Solo with their own H/s.
+    """
+    peers = list(node.get("peers") or [])
+    pl = pool_live or {}
+    pool_hps = float(pl.get("pool_hashrate_hps") or 0) if pl.get("ok") else 0.0
+    workers_active = int(pl.get("workers_active") or 0) if pl.get("ok") else 0
+    for p in peers:
+        is_pool = bool(p.get("is_pool_node"))
+        status_hps = float(p.get("hps") or 0)
+        if not is_pool and pool_hps > 0 and status_hps > 0 and workers_active > 0:
+            lo, hi = pool_hps * 0.85, pool_hps * 1.15
+            if lo <= status_hps <= hi:
+                is_pool = True
+        if is_pool:
+            p["mode"] = "pool"
+            p["is_pool_node"] = True
+            if pool_hps > 0:
+                p["hps"] = int(pool_hps)
+                p["hashrate"] = D.format_hps(pool_hps)
+                p["mining"] = True
+            elif status_hps > 0 and p.get("mining"):
+                p["hps"] = int(status_hps)
+                p["hashrate"] = D.format_hps(status_hps)
+            else:
+                p["hps"] = 0
+                p["hashrate"] = None
+                p["mining"] = False
+        elif p.get("mining"):
+            p["mode"] = "solo"
+        else:
+            p["mode"] = ""
+    solo_hps = sum(int(p.get("hps") or 0) for p in peers if p.get("mode") == "solo")
+    solo_n = sum(1 for p in peers if p.get("mode") == "solo")
+    pool_n = 1 if any(p.get("mode") == "pool" and p.get("mining") for p in peers) else 0
+    if pl.get("ok") and workers_active > 0:
+        pool_n = max(pool_n, 1)
+    live_hps = solo_hps
+    if pl.get("ok") and pool_hps > 0:
+        live_hps += int(pool_hps)
+    else:
+        live_hps += sum(int(p.get("hps") or 0) for p in peers if p.get("mode") == "pool")
+    node["peers"] = peers
+    node["reported_hashrate_hps"] = int(live_hps)
+    node["reported_hashrate"] = D.format_hps(float(live_hps)) if live_hps > 0 else None
+    node["reported_miners"] = int(solo_n + (workers_active if pl.get("ok") and workers_active else pool_n))
+    node["reported_solo_miners"] = int(solo_n)
+    node["reported_pool_mirrors"] = int(pool_n)
+
+
+_POOL_LIVE_CACHE: dict[str, Any] = {"at": 0.0, "data": None}
+_POOL_LIVE_TTL = 5.0
+
+
+def _fetch_pool_live() -> dict[str, Any] | None:
+    """Best-effort live pool snapshot for explorer Mode labeling (never blocks long)."""
+    url = _pool_url()
+    if not url:
+        return None
+    now = time.time()
+    cached = _POOL_LIVE_CACHE.get("data")
+    if cached is not None and (now - float(_POOL_LIVE_CACHE.get("at") or 0)) < _POOL_LIVE_TTL:
+        return cached  # type: ignore[return-value]
+    out: dict[str, Any] = {
+        "ok": False,
+        "url": url,
+        "pool_address": _pool_address(),
+        "workers_active": 0,
+        "miners_total": 0,
+        "pool_hashrate": None,
+        "pool_hashrate_hps": 0,
+        "shares_1h": 0,
+        "current_round": None,
+        "workers": [],
+    }
+    try:
+        req = Request(url + "/api/stats", headers={"Accept": "application/json", "User-Agent": "mhcoin-explorer"})
+        with urlopen(req, timeout=1.5) as resp:
+            raw = json.loads(resp.read().decode("utf-8", "replace"))
+        hps = float(raw.get("pool_hashrate") or 0)
+        out.update({
+            "ok": True,
+            "workers_active": int(raw.get("workers_active") or 0),
+            "miners_total": int(raw.get("miners_total") or 0),
+            "pool_hashrate_hps": hps,
+            "pool_hashrate": D.format_hps(hps) if hps > 0 else None,
+            "shares_1h": int(raw.get("shares_1h") or 0),
+            "current_round": raw.get("current_round"),
+        })
+        # Prefer rich worker list if API exposes it; else synthesize from known fields.
+        workers = raw.get("workers") or raw.get("live_workers") or []
+        if isinstance(workers, list) and workers:
+            for w in workers:
+                if not isinstance(w, dict):
+                    continue
+                hps = float(w.get("hps") or w.get("hashrate_hps") or w.get("hashrate") or 0)
+                out["workers"].append({
+                    "address": w.get("address") or w.get("addr") or "—",
+                    "worker": w.get("worker") or w.get("name") or "default",
+                    "hps": hps,
+                    "hashrate": D.format_hps(hps) if hps > 0 else None,
+                    "last_seen": w.get("last_seen") or w.get("status"),
+                    "mode": "pool",
+                })
+        _POOL_LIVE_CACHE["at"] = now
+        _POOL_LIVE_CACHE["data"] = out
+        return out
+    except Exception as e:
+        out["error"] = str(e)[:160]
+        # Keep last good cache briefly on transient errors
+        if cached is not None and (now - float(_POOL_LIVE_CACHE.get("at") or 0)) < 30:
+            return cached  # type: ignore[return-value]
+        _POOL_LIVE_CACHE["at"] = now
+        _POOL_LIVE_CACHE["data"] = out
+        return out
+
+
+def _miner_mode(addr: Any, *, pool_address: str | None = None) -> str:
+    a = str(addr or "").strip()
+    pa = (pool_address or _pool_address()).strip()
+    if a and pa and a == pa:
+        return "pool"
+    if a:
+        return "solo"
+    return ""
+
 
 
 def _page(title: str, body: str, *, tip: int | None = None, hero: bool = False) -> bytes:
@@ -698,6 +881,14 @@ def _page(title: str, body: str, *, tip: int | None = None, hero: bool = False) 
     box-shadow: 0 0 0 1px rgba(2,132,199,.22);
   }}
   .pill.xfer {{ background: #0f766e; box-shadow: 0 0 0 1px rgba(15,118,110,.22); }}
+
+  .pill.mode.solo {{ background: #2563eb; box-shadow: 0 0 0 1px rgba(37,99,235,.25); }}
+  .pill.mode.pool {{ background: #0f7a55; box-shadow: 0 0 0 1px rgba(15,122,85,.28); }}
+  .pill.mode.none {{ background: #9ca3af; box-shadow: 0 0 0 1px rgba(156,163,175,.25); color: #111; }}
+  [data-theme="dark"] .pill.mode.none {{ color: #0b0d10; }}
+  .peers-panel th:nth-child(5), .peers-panel td:nth-child(5) {{ text-align: center; }}
+  .peers-panel th:nth-child(6), .peers-panel td:nth-child(6) {{ text-align: center; }}
+  .peers-panel th:nth-child(7), .peers-panel td:nth-child(7) {{ text-align: center; }}
   .pill.recv {{ background: #16a34a; box-shadow: 0 0 0 1px rgba(22,163,74,.25); }}
   .pill.sent {{ background: #dc2626; box-shadow: 0 0 0 1px rgba(220,38,38,.28); }}
   [data-theme="dark"] .pill.minted {{
@@ -916,6 +1107,22 @@ def _page(title: str, body: str, *, tip: int | None = None, hero: bool = False) 
     ul.plain li.io-row .io-amt {{ text-align: left; }}
   }}
   footer.site {{ width: 100%; margin: 0; padding: 0 1.5rem 2rem; color: var(--muted); font-size: .82rem; }}
+  footer.site .footer-row {{
+    display: flex; flex-wrap: wrap; gap: .75rem 1.25rem;
+    align-items: center; justify-content: space-between;
+  }}
+  footer.site .footer-links {{
+    display: flex; flex-wrap: wrap; gap: .55rem .85rem; align-items: center;
+  }}
+  footer.site .footer-links a {{
+    display: inline-flex; align-items: center; gap: .35rem;
+    color: var(--muted); font-weight: 650; text-decoration: none;
+  }}
+  footer.site .footer-links a:hover {{ color: var(--mint, #0f7a55); }}
+  footer.site .gh-ico {{
+    width: 1.1rem; height: 1.1rem; display: inline-block; vertical-align: -2px;
+    fill: currentColor;
+  }}
   @media (max-width: 720px) {{
     .kv {{ grid-template-columns: 1fr; }}
     header.top {{ padding: .85rem 1rem; }}
@@ -1027,7 +1234,19 @@ def _page(title: str, body: str, *, tip: int | None = None, hero: bool = False) 
 <main>
 {body}
 </main>
-<footer class="site">MHCOIN · HASH256 PoW · target 10m · read-only explorer</footer>
+<footer class="site">
+  <div class="footer-row">
+    <div>MHCOIN Explorer · HASH256 PoW · target 10m · read-only</div>
+    <div class="footer-links">
+      <a href="https://github.com/maxut88/MHCOIN/blob/main/docs/USER_QUICKSTART.md" target="_blank" rel="noopener">Docs</a>
+      <a href="https://github.com/maxut88/MHCOIN/releases" target="_blank" rel="noopener">Download</a>
+      <a href="https://github.com/maxut88/MHCOIN" target="_blank" rel="noopener" aria-label="MHCOIN on GitHub">
+        <svg class="gh-ico" viewBox="0 0 16 16" aria-hidden="true"><path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27s1.36.09 2 .27c1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.01 8.01 0 0 0 16 8c0-4.42-3.58-8-8-8"/></svg>
+        GitHub
+      </a>
+    </div>
+  </div>
+</footer>
 
 <script>
 (function(){{
@@ -1215,11 +1434,20 @@ class ExplorerApp:
             out["updated"] = int(path.stat().st_mtime)
             out["updated_age"] = D.format_age(int(path.stat().st_mtime), now=int(time.time()))
             peers_out: list[dict[str, Any]] = []
+            pool_hosts = _pool_p2p_hosts()
             for p in raw.get("peers") or []:
                 addr = str(p.get("addr") or "")
                 peer_id = _peer_public_id(addr or str(p.get("agent") or id(p)))
                 mining = bool(p.get("mining"))
                 hps = int(p.get("hps") or 0) if mining else 0
+                is_pool_node = _peer_host(addr) in pool_hosts
+                # Tentative mode; home() overlays pool aggregate H/s via annotate.
+                if is_pool_node:
+                    mode = "pool"
+                elif mining:
+                    mode = "solo"
+                else:
+                    mode = ""
                 peers_out.append(
                     {
                         # Anonymized public fields only (same table shape).
@@ -1235,6 +1463,8 @@ class ExplorerApp:
                         "network": p.get("network") or "",
                         "protocol": p.get("protocol"),
                         "mining": mining,
+                        "mode": mode,
+                        "is_pool_node": is_pool_node,
                         "hps": hps,
                         "hashrate": D.format_hps(float(hps)) if mining and hps > 0 else None,
                         "status_age": p.get("status_age"),
@@ -1264,22 +1494,37 @@ class ExplorerApp:
                 and (now - self._home_cache_at) < _HOME_CACHE_TTL_SEC
             ):
                 return self._home_cache
-        c = self.chain()
-        try:
-            data = D.chain_stats(c, hrp=self.hrp)
-            data["node"] = self.node_status()
-            data["mempool"] = D.load_mempool(self.data_dir, hrp=self.hrp, chain=c)
-        finally:
-            c.close()
-        with self._home_lock:
+            # Rebuild under the lock so tip polls / page loads cannot stampede
+            # full-chain chain_stats (that froze `/` under 3s poll == 3s TTL).
+            c = self.chain()
+            try:
+                data = D.chain_stats(c, hrp=self.hrp)
+                data["node"] = self.node_status()
+                data["pool_live"] = _fetch_pool_live()
+                _annotate_p2p_peer_modes(data["node"], data["pool_live"])
+                data["pool_address"] = _pool_address()
+                data["mempool"] = D.load_mempool(self.data_dir, hrp=self.hrp, chain=c)
+            finally:
+                c.close()
             self._home_cache = data
             self._home_cache_at = time.time()
-        return data
+            return data
 
     def tip_status(self) -> dict[str, Any]:
-        """Lightweight poll payload for the home live tick."""
+        """Lightweight poll payload for the home live tick.
+
+        Heavy chain_stats come from the home cache; node/pool H/s refresh cheaply
+        every tick without rescanning the chain.
+        """
         home = self.home()
-        node = home.get("node") or {}
+        node = self.node_status()
+        pool_live = _fetch_pool_live()
+        _annotate_p2p_peer_modes(node, pool_live)
+        # Keep cached home's live fields fresh for the next full `/` render.
+        with self._home_lock:
+            if self._home_cache is not None:
+                self._home_cache["node"] = node
+                self._home_cache["pool_live"] = pool_live
         return {
             "tip_height": home.get("tip_height"),
             "tip_hash": home.get("tip_hash"),
@@ -1303,11 +1548,15 @@ class ExplorerApp:
                 "reported_hashrate": node.get("reported_hashrate"),
                 "reported_hashrate_hps": node.get("reported_hashrate_hps"),
                 "reported_miners": node.get("reported_miners"),
+                "reported_solo_miners": node.get("reported_solo_miners"),
+                "reported_pool_mirrors": node.get("reported_pool_mirrors"),
                 "peers": node.get("peers") or [],
                 "updated_age": node.get("updated_age"),
             },
             "mempool_count": (home.get("mempool") or {}).get("count"),
             "live_finds": home.get("live_finds"),
+            "pool_live": pool_live,
+            "pool_address": home.get("pool_address") or _pool_address(),
             "cached": True,
         }
 
@@ -1578,11 +1827,13 @@ def _fmt_size(n: Any) -> str:
     return f"{b / (1024 * 1024):.2f} MB"
 
 
-def _blocks_table(blocks: list[dict[str, Any]]) -> str:
+def _blocks_table(blocks: list[dict[str, Any]], *, pool_address: str | None = None) -> str:
+    pa = pool_address or _pool_address()
     rows = []
     for b in blocks:
         h = b.get("height")
         miner = b.get("miner")
+        mode = _miner_mode(miner, pool_address=pa)
         miner_html = (
             _copyable(miner, href=f"/address/{miner}")
             if miner
@@ -1596,6 +1847,7 @@ def _blocks_table(blocks: list[dict[str, Any]]) -> str:
             f'<td class="num">{b.get("tx_count")}</td>'
             f'<td class="num"><strong class="reward">{_esc(b.get("reward_mhc") or "—")} MHC</strong></td>'
             f"<td>{_type_pill(True)}</td>"
+            f"<td>{_mode_pill(mode)}</td>"
             f'<td class="muted nowrap num">{_esc(_fmt_interval(b.get("interval_seconds")))}</td>'
             f'<td class="muted nowrap num">{_esc(b.get("age") or "—")}</td>'
             f"<td>{miner_html}</td>"
@@ -1605,7 +1857,7 @@ def _blocks_table(blocks: list[dict[str, Any]]) -> str:
     return f"""
     <div class="table-wrap"><table class="data-table">
       <tr>
-        <th class="num">Height</th><th class="hash-col">Hash</th><th class="num">Txs</th><th class="num">Reward</th><th>Type</th>
+        <th class="num">Height</th><th class="hash-col">Hash</th><th class="num">Txs</th><th class="num">Reward</th><th>Type</th><th>Mode</th>
         <th class="num">Time</th><th class="num">Age</th><th>Miner</th><th class="num-conf" title="Confirmations">Conf</th>
       </tr>
       {"".join(rows)}
@@ -1714,14 +1966,16 @@ def _found_terminal(blocks: list[dict[str, Any]]) -> str:
 
 
 def _peers_panel(
-    peers: list[dict[str, Any]] | None,
+    peers: list[dict[str, Any]],
     *,
     peer_count: Any = None,
     total_hps: Any = None,
     total_hashrate: Any = None,
+    pool_live: dict[str, Any] | None = None,
 ) -> str:
     rows: list[str] = []
-    sum_hps = 0
+    solo_n = 0
+    pool_n = 0
     for p in peers or []:
         peer_lbl = p.get("id") or p.get("ip") or "—"
         direction = "in" if p.get("inbound") else "out"
@@ -1730,10 +1984,13 @@ def _peers_panel(
         height_s = "—" if height is None else f"#{height}"
         agent = p.get("agent") or "—"
         state = p.get("state") or "—"
+        mode = str(p.get("mode") or ("solo" if p.get("mining") else ""))
         hr = p.get("hashrate") or ("—" if not p.get("mining") else "…")
         mine = "yes" if p.get("mining") else "no"
-        if p.get("mining"):
-            sum_hps += int(p.get("hps") or 0)
+        if mode == "pool":
+            pool_n += 1
+        elif p.get("mining") and mode == "solo":
+            solo_n += 1
         rows.append(
             "<tr>"
             f'<td class="ip" title="{_esc(peer_lbl)}">{_esc(peer_lbl)}</td>'
@@ -1741,26 +1998,39 @@ def _peers_panel(
             f"<td>{_esc(height_s)}</td>"
             f"<td>{_esc(hr)}</td>"
             f"<td>{mine}</td>"
+            f"<td>{_mode_pill(mode)}</td>"
             f"<td>{_esc(agent)}</td>"
             f"<td>{_esc(state)}</td>"
             "</tr>"
         )
     n = peer_count if peer_count is not None else len(peers or [])
-    total_s = total_hashrate or D.format_hps(float(sum_hps)) or "—"
-    if total_hps is None:
-        total_hps = sum_hps
+    pl = pool_live or {}
+    pool_url = _esc(pl.get("url") or _pool_url() or "")
+    if total_hashrate:
+        total_s = total_hashrate
+    elif total_hps is not None:
+        total_s = D.format_hps(float(total_hps)) or "—"
+    else:
+        total_s = "—"
     body = (
         f"""
     <div class="table-wrap peers-panel"><table>
       <thead><tr>
-        <th>Peer</th><th>Dir</th><th>Height</th><th>H/s</th><th>Mining</th><th>Version</th><th>State</th>
+        <th>Peer</th><th>Dir</th><th>Height</th><th>H/s</th><th>Mining</th><th>Mode</th><th>Version</th><th>State</th>
       </tr></thead>
       <tbody>{"".join(rows)}</tbody>
     </table></div>
-    <p class="peers-total" id="peersTotal">Total live: {_esc(total_s)} · {_esc(sum(1 for p in (peers or []) if p.get("mining")))} miners</p>
+    <p class="peers-total" id="peersTotal">Network live: {_esc(total_s)} · {_esc(solo_n)} solo · {_esc(pool_n)} pool</p>
     """
         if rows
         else '<p class="muted" id="peersEmpty">No peers connected to the seed.</p>'
+    )
+    pool_link = (
+        f'<p class="muted" style="margin:.55rem 0 0;font-size:.75rem">'
+        f'Worker breakdown: <a href="{pool_url}" rel="noopener">pool stats</a>'
+        f"</p>"
+        if pool_url
+        else ""
     )
     return (
         f'<section class="card peers-panel" id="connectedPeers">'
@@ -1769,9 +2039,10 @@ def _peers_panel(
         f'<span class="muted" style="font-size:.85rem" id="peersCount">{_esc(n)} online</span>'
         f"</div>"
         f'<p class="muted" style="margin:0 0 .55rem;font-size:.75rem">'
-        f"Live H/s from each miner (STATUS). Total = sum of rows."
+        f"Pool = summed stratum hashrate. Solo = independent P2P miner."
         f"</p>"
         f'<div id="peersTable">{body}</div>'
+        f"{pool_link}"
         f"</section>"
     )
 
@@ -1789,11 +2060,12 @@ def _render_home(data: dict[str, Any]) -> bytes:
     reported_hr = node.get("reported_hashrate")
     reported_n = int(node.get("reported_miners") or 0)
     # KPI main = live miner sum when available; implied stays in the hint.
+    solo_n_kpi = int(node.get("reported_solo_miners") or 0)
     if reported_hps > 0 and reported_hr:
         hr_lbl = "Hashrate (live)"
         hr = reported_hr
         hr_hint = (
-            f"total {reported_n} miners · implied {hr_implied}"
+            f"total {reported_n} miners · {solo_n_kpi} solo · implied {hr_implied}"
             + (f" · obs {hr_win}" if hr_win else "")
             + (f" · recent {hr_short}" if hr_short else "")
         )
@@ -1815,8 +2087,10 @@ def _render_home(data: dict[str, Any]) -> bytes:
         peer_count=peers,
         total_hps=reported_hps,
         total_hashrate=reported_hr,
+        pool_live=data.get("pool_live"),
     )
     body = f"""
+    <script>window.__MHCOIN_POOL_ADDRESS = {json.dumps(data.get("pool_address") or _pool_address())};</script>
     <div class="shell" id="explorerHome" data-tip="{_esc(data.get("tip_height"))}">
       <div class="kpi">
         <div class="stat k-height">
@@ -1880,7 +2154,7 @@ def _render_home(data: dict[str, Any]) -> bytes:
           <div id="latestBlocks"
                data-page="1"
                data-per-page="100"
-               data-total-blocks="{_esc(data.get("total_blocks") or 0)}">{_blocks_table((data.get("recent") or [])[:25])}</div>
+               data-total-blocks="{_esc(data.get("total_blocks") or 0)}">{_blocks_table((data.get("recent") or [])[:25], pool_address=data.get("pool_address"))}</div>
           <div class="pager" id="latestBlocksPager"></div>
         </section>
       </div>
@@ -1901,12 +2175,17 @@ def _render_home(data: dict[str, Any]) -> bytes:
       <section class="card">
         <div class="card-head">
           <h1>Transfers</h1>
-          <span class="muted" style="font-size:.85rem">sends between addresses</span>
+          <a class="more" href="/transactions?transfers=1">View all →</a>
         </div>
-        <div id="xferOnly">{_txs_table(
-            data.get("recent_transfers") or [],
+        <p class="muted" style="margin:0 0 .75rem;font-size:.85rem">sends between addresses · {data.get("transfer_transactions")} total</p>
+        <div id="xferOnly"
+             data-page="1"
+             data-per-page="100"
+             data-total-txs="{_esc(data.get("transfer_transactions") or 0)}">{_txs_table(
+            (data.get("recent_transfers") or [])[:100],
             empty="No transfers yet — only mined rewards so far.",
         )}</div>
+        <div class="pager" id="xferOnlyPager"></div>
       </section>
 
       <section class="card">
@@ -2025,58 +2304,78 @@ def _render_home(data: dict[str, Any]) -> bytes:
         if (hps >= 1e3) return (hps / 1e3).toFixed(1) + ' kH/s';
         return Math.round(hps).toLocaleString() + ' H/s';
       }}
-      function renderPeers(peers, count) {{
+      function modePill(mode) {{
+        var m = String(mode || '').toLowerCase();
+        if (m === 'pool') return '<span class="pill mode pool" title="Pool — summed stratum hashrate">Pool</span>';
+        if (m === 'solo') return '<span class="pill mode solo" title="Solo miner on P2P (STATUS)">Solo</span>';
+        return '<span class="pill mode none" title="Not mining">—</span>';
+      }}
+      var lastPeersSig = '';
+      function renderPeers(peers, count, netTotal) {{
         var box = document.getElementById('peersTable');
         var cnt = document.getElementById('peersCount');
-        if (cnt) cnt.textContent = String(count != null ? count : (peers ? peers.length : 0)) + ' online';
+        var list = peers || [];
+        var sig = String(count != null ? count : list.length) + '|' + String(netTotal || '') + '|' +
+          list.map(function (p) {{
+            return [p.id || p.ip, p.height, p.hps, p.mining ? 1 : 0, p.mode || '', p.state || ''].join(':');
+          }}).join(';');
+        if (sig === lastPeersSig) return;
+        lastPeersSig = sig;
+        if (cnt) cnt.textContent = String(count != null ? count : list.length) + ' online';
         if (!box) return;
-        if (!peers || !peers.length) {{
+        if (!list.length) {{
           box.innerHTML = '<p class="muted" id="peersEmpty">No peers connected to the seed.</p>';
           return;
         }}
-        var sum = 0, miners = 0;
-        var rows = peers.map(function (p) {{
+        var solo = 0, poolN = 0;
+        var rows = list.map(function (p) {{
           var dir = p.inbound ? 'in' : 'out';
           var height = (p.height == null) ? '—' : ('#' + p.height);
           var peerLbl = p.id || p.ip || '—';
+          var mode = p.mode || (p.mining ? 'solo' : '');
           var hr = p.hashrate || (p.mining ? '…' : '—');
           var mine = p.mining ? 'yes' : 'no';
-          if (p.mining) {{ miners += 1; sum += Number(p.hps) || 0; }}
+          if (mode === 'pool') poolN += 1;
+          else if (p.mining && mode === 'solo') solo += 1;
           return '<tr>' +
             '<td class="ip" title="' + esc(peerLbl) + '">' + esc(peerLbl) + '</td>' +
             '<td><span class="dir ' + dir + '">' + dir + '</span></td>' +
             '<td>' + esc(height) + '</td>' +
             '<td>' + esc(hr) + '</td>' +
             '<td>' + mine + '</td>' +
+            '<td>' + modePill(mode) + '</td>' +
             '<td>' + esc(p.agent || '—') + '</td>' +
             '<td>' + esc(p.state || '—') + '</td>' +
             '</tr>';
         }}).join('');
-        var total = fmtHps(sum) || '—';
+        var total = netTotal || '—';
         box.innerHTML =
           '<div class="table-wrap peers-panel"><table>' +
-          '<thead><tr><th>Peer</th><th>Dir</th><th>Height</th><th>H/s</th><th>Mining</th><th>Version</th><th>State</th></tr></thead>' +
+          '<thead><tr><th>Peer</th><th>Dir</th><th>Height</th><th>H/s</th><th>Mining</th><th>Mode</th><th>Version</th><th>State</th></tr></thead>' +
           '<tbody>' + rows + '</tbody></table></div>' +
-          '<p class="peers-total" id="peersTotal">Total live: ' + esc(total) +
-          ' · ' + miners + ' miners</p>';
+          '<p class="peers-total" id="peersTotal">Network live: ' + esc(total) +
+          ' · ' + solo + ' solo · ' + poolN + ' pool</p>';
       }}
             function renderBlocks(blocks) {{
         var el = document.getElementById('latestBlocks');
         if (!el || !blocks) return;
+        var poolAddr = window.__MHCOIN_POOL_ADDRESS || '';
         var rows = blocks.map(function(b) {{
           var miner = b.miner ? copyable(b.miner, '/address/' + encodeURIComponent(b.miner)) : '<span class="muted">—</span>';
+          var mode = (b.miner && poolAddr && b.miner === poolAddr) ? 'pool' : (b.miner ? 'solo' : '');
           return '<tr>' +
             '<td class="num"><span class="row-ico">' + mintMark('MHC Mined') + '<a href="/block/' + esc(b.height) + '"><strong>' + esc(b.height) + '</strong></a></span></td>' +
             '<td class="hash-col">' + copyable(b.hash, '/block/' + encodeURIComponent(b.hash), true) + '</td>' +
             '<td class="num">' + esc(b.tx_count) + '</td>' +
             '<td class="num"><strong class="reward">' + esc(b.reward_mhc || '—') + ' MHC</strong></td>' +
             '<td><span class="pill minted">MHC Mined</span></td>' +
+            '<td>' + modePill(mode) + '</td>' +
             '<td class="muted nowrap num">' + esc(fmtInterval(b.interval_seconds)) + '</td>' +
             '<td class="muted nowrap num">' + esc(b.age || '—') + '</td>' +
             '<td>' + miner + '</td>' +
             '<td class="muted num-conf">' + esc(b.confirmations) + '</td></tr>';
         }}).join('');
-        el.innerHTML = '<div class="table-wrap"><table class="data-table"><tr><th class="num">Height</th><th class="hash-col">Hash</th><th class="num">Txs</th><th class="num">Reward</th><th>Type</th><th class="num">Time</th><th class="num">Age</th><th>Miner</th><th class="num-conf" title="Confirmations">Conf</th></tr>' + rows + '</table></div>';
+        el.innerHTML = '<div class="table-wrap"><table class="data-table"><tr><th class="num">Height</th><th class="hash-col">Hash</th><th class="num">Txs</th><th class="num">Reward</th><th>Type</th><th>Mode</th><th class="num">Time</th><th class="num">Age</th><th>Miner</th><th class="num-conf" title="Confirmations">Conf</th></tr>' + rows + '</table></div>';
       }}
       function blocksPagerHtml(page, totalPages) {{
         page = Number(page) || 1;
@@ -2177,6 +2476,42 @@ def _render_home(data: dict[str, Any]) -> bytes:
           updateTxsPager(d.page || page, d.total_transactions, d.per_page || 100);
         }} catch (e) {{}}
       }}
+      function xferPagerHtml(page, totalPages) {{
+        page = Number(page) || 1;
+        totalPages = Number(totalPages) || 1;
+        var html = '';
+        if (page > 1) html += '<a href="#" data-xfer-page="' + (page-1) + '">← newer</a>';
+        else html += '<span class="muted">← newer</span>';
+        html += '<span class="muted">page ' + page + ' / ' + totalPages + '</span>';
+        if (page < totalPages) html += '<a href="#" data-xfer-page="' + (page+1) + '">older →</a>';
+        else html += '<span class="muted">older →</span>';
+        return html;
+      }}
+      function updateXferPager(page, totalTxs, perPage) {{
+        var el = document.getElementById('xferOnly');
+        var pg = document.getElementById('xferOnlyPager');
+        if (!el || !pg) return;
+        totalTxs = Number(totalTxs) || 0;
+        perPage = Number(perPage) || Number(el.dataset.perPage) || 100;
+        el.dataset.totalTxs = String(totalTxs);
+        var totalPages = Math.max(1, Math.ceil(totalTxs / perPage) || 1);
+        page = Math.max(1, Math.min(Number(page) || 1, totalPages));
+        el.dataset.page = String(page);
+        el.dataset.perPage = String(perPage);
+        pg.innerHTML = xferPagerHtml(page, totalPages);
+      }}
+      async function loadXferPage(page) {{
+        var el = document.getElementById('xferOnly');
+        if (!el) return;
+        page = Number(page) || 1;
+        try {{
+          var r = await fetch('/api/transactions?transfers=1&page=' + page + '&_=' + Date.now(), {{ cache: 'no-store' }});
+          if (!r.ok) return;
+          var d = await r.json();
+          renderTxs(d.transactions || [], 'xferOnly');
+          updateXferPager(d.page || page, d.total_transactions, d.per_page || 100);
+        }} catch (e) {{}}
+      }}
       function setText(id, text) {{
         var el = document.getElementById(id);
         if (!el || text == null) return;
@@ -2194,6 +2529,7 @@ def _render_home(data: dict[str, Any]) -> bytes:
           if (hrEl && hrEl.textContent !== node.reported_hashrate) hrEl.textContent = node.reported_hashrate;
           if (hh) {{
             var parts = ['total ' + (node.reported_miners || 0) + ' miners'];
+            if (node.reported_solo_miners != null) parts.push(node.reported_solo_miners + ' solo');
             if (d.network_hashrate) parts.push('implied ' + d.network_hashrate);
             if (d.network_hashrate_window) parts.push('obs ' + d.network_hashrate_window);
             if (d.network_hashrate_short) parts.push('recent ' + d.network_hashrate_short);
@@ -2249,11 +2585,10 @@ def _render_home(data: dict[str, Any]) -> bytes:
         }}
         setText('kpiPeers', node.peer_count != null ? String(node.peer_count) : null);
         setText('kpiSync', node.sync_state || '—');
-        // Peers / live finds: only rebuild DOM when tip advances (stops layout jump).
-        if (tipChanged) {{
-          renderPeers(node.peers || [], node.peer_count);
-          if (d.live_finds) renderFinds(d.live_finds);
-        }}
+        // Peers / pool workers: refresh every tick so Mode/H/s stay correct.
+        renderPeers(node.peers || [], node.peer_count, node.reported_hashrate);
+        if (d.pool_address) window.__MHCOIN_POOL_ADDRESS = d.pool_address;
+        if (tipChanged && d.live_finds) renderFinds(d.live_finds);
         var meta = document.getElementById('hdrMeta');
         if (meta && tip != null) {{
           var mtxt = 'Live mainnet · read-only · tip #' + tip;
@@ -2273,7 +2608,12 @@ def _render_home(data: dict[str, Any]) -> bytes:
           if (tcur <= 1) renderTxs(d.recent_txs, 'latestTxs');
           updateTxsPager(tcur <= 1 ? 1 : tcur, d.total_transactions, 100);
         }}
-        if (d.recent_transfers) renderTxs(d.recent_transfers, 'xferOnly');
+        if (d.recent_transfers) {{
+          var xel = document.getElementById('xferOnly');
+          var xcur = xel ? Number(xel.dataset.page || 1) : 1;
+          if (xcur <= 1) renderTxs(d.recent_transfers, 'xferOnly');
+          updateXferPager(xcur <= 1 ? 1 : xcur, d.transfer_transactions, 100);
+        }}
       }}
       async function tick() {{
         try {{
@@ -2311,9 +2651,19 @@ def _render_home(data: dict[str, Any]) -> bytes:
         if (tp) {{
           e.preventDefault();
           loadTxsPage(tp.getAttribute('data-txs-page'));
+          return;
+        }}
+        var xp = e.target && e.target.closest && e.target.closest('[data-xfer-page]');
+        if (xp) {{
+          e.preventDefault();
+          loadXferPage(xp.getAttribute('data-xfer-page'));
         }}
       }});
       // Delay first poll — SSR already painted; avoids flash/jump on refresh.
+            (function() {{
+        var xel = document.getElementById('xferOnly');
+        if (xel) updateXferPager(1, xel.dataset.totalTxs || 0, xel.dataset.perPage || 100);
+      }})();
       setInterval(tick, 3000);
       setTimeout(tick, 3000);
     }})();
@@ -2350,20 +2700,24 @@ def _render_blocks(data: dict[str, Any]) -> bytes:
 def _render_transactions(data: dict[str, Any]) -> bytes:
     page = int(data.get("page") or 1)
     total_pages = int(data.get("total_pages") or 1)
+    transfers_only = bool(data.get("transfers_only"))
+    title = "Transfers" if transfers_only else "All transactions"
+    base = "/transactions?transfers=1" if transfers_only else "/transactions"
+    empty = "No transfers yet." if transfers_only else "No transactions."
     body = f"""
     <div class="shell">
     <div class="card">
       <div class="card-head">
-        <h1>All transactions</h1>
+        <h1>{_esc(title)}</h1>
         <span class="muted">{_esc(data.get("total_transactions"))} total</span>
       </div>
-      {_pager(page, total_pages, base="/transactions")}
-      {_txs_table(data.get("transactions") or [], empty="No transactions.")}
-      {_pager(page, total_pages, base="/transactions")}
+      {_pager(page, total_pages, base=base, chain_links=not transfers_only)}
+      {_txs_table(data.get("transactions") or [], empty=empty)}
+      {_pager(page, total_pages, base=base, chain_links=not transfers_only)}
     </div>
     </div>
     """
-    return _page("Transactions", body, tip=data.get("tip_height"))
+    return _page(title, body, tip=data.get("tip_height"))
 
 
 def _render_block(b: dict[str, Any]) -> bytes:
@@ -3405,7 +3759,9 @@ def make_handler(app: ExplorerApp):
                         page = int((qs.get("page") or ["1"])[0])
                     except ValueError:
                         page = 1
-                    data = app.transactions(page=page)
+                    tr = (qs.get("transfers") or qs.get("transfers_only") or ["0"])[0]
+                    transfers_only = str(tr).lower() in ("1", "true", "yes", "transfers")
+                    data = app.transactions(page=page, transfers_only=transfers_only)
                     if want_json:
                         self._json(200, data)
                     else:

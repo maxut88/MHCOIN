@@ -7,7 +7,7 @@ Native HASH256 / UTXO pool for MHCOIN. Not compatible with Ethereum pools.
 | Port | Role |
 |------|------|
 | `3333` | JSON miner protocol (CLI `mining pool-start`) |
-| `3334` | Bitcoin-style Stratum (phase 2 adapter) |
+| `3334` | Stratum adapter (phase 2) |
 | `8888` | Stats web UI |
 
 Rewards: **PROP** (proportional shares per round), minus pool fee. Immature → matured after N confirmations, then auto-payout when balance ≥ threshold.
@@ -75,8 +75,8 @@ A **Pool** nav link appears when this is set.
 
 ## Stratum notes
 
-Port `3334` speaks a Bitcoin-like Stratum subset (`subscribe` / `authorize` / `notify` / `submit`).  
-Job byte order matches MHCOIN (native), not necessarily every BTC miner’s endian conventions. Prefer the JSON protocol + `mhcoin mining pool-start` for now.
+Port `3334` speaks a Stratum subset (`subscribe` / `authorize` / `notify` / `submit`) for MHCOIN.  
+Job byte order is native MHCOIN. Prefer the JSON protocol + `mhcoin mining pool-start` for now.
 
 ## Fee & payouts
 

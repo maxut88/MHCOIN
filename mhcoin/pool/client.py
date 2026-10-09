@@ -40,6 +40,7 @@ class PoolClient:
         self._id = 0
         self._stop = False
         self.hashrate = 0.0
+        self._hps_ema = 0.0
 
     def request_stop(self, *_args) -> None:
         self._stop = True
@@ -128,6 +129,8 @@ class PoolClient:
         )
         shares = 0
         blocks = 0
+        session_hashes = 0
+        session_mine_sec = 0.0
         while not self._stop:
             try:
                 job = self.getjob()
@@ -141,11 +144,23 @@ class PoolClient:
                 except Exception:
                     time.sleep(5)
                 continue
-            found = self._mine_job(job)
-            if found is None:
+            # Pure mining stats only (exclude getjob/submit network time).
+            hit, mined_hashes, mine_sec = self._mine_job(job)
+            session_hashes += int(mined_hashes)
+            session_mine_sec += float(mine_sec)
+            if hit is None:
                 continue
-            en2, nonce, ntime, hps = found
-            self.hashrate = hps
+            en2, nonce, ntime, hps = hit
+            if self._hps_ema <= 0:
+                self._hps_ema = float(hps)
+            else:
+                self._hps_ema = 0.25 * float(hps) + 0.75 * self._hps_ema
+            # Session H/s over mining-only time (= Desktop-style steady rate).
+            if session_mine_sec > 0.5 and session_hashes > 100_000:
+                display = session_hashes / session_mine_sec
+            else:
+                display = self._hps_ema
+            self.hashrate = display
             try:
                 res = self.submit(job["job_id"], en2, nonce, ntime)
             except Exception as e:
@@ -161,16 +176,22 @@ class PoolClient:
                     )
                 else:
                     print(
-                        f"  share accepted  total={shares}  ~{hps/1000:.1f} kH/s",
+                        f"  share accepted  total={shares}  ~{display/1000:.1f} kH/s",
                         flush=True,
                     )
                 if shares % 5 == 0:
-                    self.report_hashrate(hps)
+                    self.report_hashrate(display)
             else:
                 print(f"  share rejected: {res.get('error')}", flush=True)
 
-    def _mine_job(self, job: dict[str, Any]) -> tuple[bytes, int, int, float] | None:
-        """Search nonces until a share is found or job should refresh."""
+    def _mine_job(
+        self, job: dict[str, Any]
+    ) -> tuple[tuple[bytes, int, int, float] | None, int, float]:
+        """Search nonces until a share is found or job should refresh.
+
+        Returns ``(hit_or_none, hashes, mine_seconds)``. Always reports hashes
+        and mining time so session H/s never includes RPC idle time.
+        """
         coinb1 = bytes.fromhex(job["coinb1"])
         coinb2 = bytes.fromhex(job["coinb2"])
         branches = [bytes.fromhex(x) for x in job.get("merkle_branches") or []]
@@ -196,24 +217,33 @@ class PoolClient:
         target = share_target_int(nbits, share_factor)
         t0 = time.perf_counter()
         hashes = 0
-        # Refresh job after ~30s of searching.
-        deadline = time.perf_counter() + 30.0
         nonce = 0
-        while nonce <= 0xFFFFFFFF and not self._stop:
-            if time.perf_counter() >= deadline:
-                hps = hashes / max(1e-6, time.perf_counter() - t0)
-                return None
-            struct.pack_into("<I", header, 76, nonce)
-            digest = hashlib.sha256(hashlib.sha256(header).digest()).digest()
+        # ~30s job refresh by hash count — no time.perf_counter in the hot loop.
+        hash_budget = 40_000_000
+        sha256 = hashlib.sha256
+        pack_nonce = struct.pack_into
+        from_bytes = int.from_bytes
+
+        def _elapsed() -> float:
+            return max(1e-6, time.perf_counter() - t0)
+
+        # Match Desktop abortable_pow poll cadence (no clock in the hot path).
+        abort_every = 25_000
+        while nonce <= 0xFFFFFFFF:
+            if hashes == 0 or hashes % abort_every == 0:
+                if self._stop:
+                    break
+                if hashes >= hash_budget:
+                    return None, hashes, _elapsed()
+            pack_nonce("<I", header, 76, nonce)
+            digest = sha256(sha256(header).digest()).digest()
             hashes += 1
-            if int.from_bytes(digest, "little") <= target:
-                hps = hashes / max(1e-6, time.perf_counter() - t0)
-                return en2, nonce, ntime, hps
+            if from_bytes(digest, "little") <= target:
+                dt = _elapsed()
+                hps = hashes / dt
+                return (en2, nonce, ntime, hps), hashes, dt
             nonce += 1
-            if hashes & 0xFFFF == 0 and self._stop:
-                break
-        hps = hashes / max(1e-6, time.perf_counter() - t0)
-        return None
+        return None, hashes, _elapsed()
 
 
 def secrets_en2() -> bytes:

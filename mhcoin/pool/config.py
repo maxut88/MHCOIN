@@ -52,6 +52,16 @@ class PoolConfig:
     wallet_password: str = ""
     job_refresh_sec: float = 20.0
     hrp: str = "mhc"
+    # Stratum admission controls (env-overridable; do not starve honest miners).
+    stratum_max_connections: int = 64
+    stratum_max_connections_per_ip: int = 8
+    stratum_max_requests_per_ip_per_sec: float = 40.0
+    stratum_max_submits_per_worker_per_sec: float = 30.0
+    stratum_max_message_bytes: int = 65_536
+    stratum_read_timeout_sec: float = 120.0
+    stratum_idle_timeout_sec: float = 300.0
+    stratum_max_reconnects_per_ip_per_window: int = 30
+    stratum_reconnect_window_sec: float = 10.0
 
     @property
     def db_path(self) -> Path:
@@ -81,6 +91,31 @@ class PoolConfig:
             wallet_password=_env("MHCOIN_POOL_PASSWORD")
             or _env("MHCOIN_WALLET_PASSWORD"),
             job_refresh_sec=_env_float("MHCOIN_POOL_JOB_REFRESH", 20.0),
+            stratum_max_connections=_env_int("MHCOIN_POOL_STRATUM_MAX_CONN", 64),
+            stratum_max_connections_per_ip=_env_int(
+                "MHCOIN_POOL_STRATUM_MAX_CONN_PER_IP", 8
+            ),
+            stratum_max_requests_per_ip_per_sec=_env_float(
+                "MHCOIN_POOL_STRATUM_REQ_PER_IP", 40.0
+            ),
+            stratum_max_submits_per_worker_per_sec=_env_float(
+                "MHCOIN_POOL_STRATUM_SUBMIT_PER_WORKER", 30.0
+            ),
+            stratum_max_message_bytes=_env_int(
+                "MHCOIN_POOL_STRATUM_MAX_MSG_BYTES", 65_536
+            ),
+            stratum_read_timeout_sec=_env_float(
+                "MHCOIN_POOL_STRATUM_READ_TIMEOUT", 120.0
+            ),
+            stratum_idle_timeout_sec=_env_float(
+                "MHCOIN_POOL_STRATUM_IDLE_TIMEOUT", 300.0
+            ),
+            stratum_max_reconnects_per_ip_per_window=_env_int(
+                "MHCOIN_POOL_STRATUM_MAX_RECONNECTS", 30
+            ),
+            stratum_reconnect_window_sec=_env_float(
+                "MHCOIN_POOL_STRATUM_RECONNECT_WINDOW", 10.0
+            ),
         )
         for k, v in overrides.items():
             if v is not None and hasattr(cfg, k):

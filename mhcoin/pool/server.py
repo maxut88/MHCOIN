@@ -97,6 +97,8 @@ def run_pool(cfg: PoolConfig) -> None:
         fee_percent=cfg.fee_percent,
         share_factor=cfg.share_factor,
         explorer_url=os.environ.get("MHCOIN_EXPLORER_URL", "http://192.168.0.221:8766"),
+        payout_threshold_sats=cfg.payout_threshold_sats,
+        mature_confirms=cfg.mature_confirms,
     )
     payouts = PayoutWorker(cfg, db, rt)
     payouts.start()

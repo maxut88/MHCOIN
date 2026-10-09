@@ -11,9 +11,9 @@ Authoritative source: `mhcoin/consensus/params.py`.
 | Initial subsidy | 50 MHC |
 | Halving | every 210,000 blocks |
 | Block interval target | 600 seconds |
-| Difficulty (from height 1500) | Bitcoin-style: retarget every **2016** blocks, full step, timespan clamp ×1/4..×4, no damping |
+| Difficulty (from height 1500) | Epoch retarget every **2016** blocks, full step, timespan clamp ×1/4..×4, no damping |
 | Difficulty (legacy, height &lt; 1500) | Per-block W30 + damping 1/16 (historical mainnet only) |
-| Activation height | `DIFFICULTY_BTC_ACTIVATION_HEIGHT = 1500` |
+| Activation height | **1500** |
 | MTP window | 11 |
 | Max future block time | 7200 seconds |
 | Mainnet POW_LIMIT | genesis target (`bits = 0x1e0fffff`) |
@@ -56,7 +56,7 @@ Data directories are `~/.mhcoin/<network>/` by default.
 
 | Field | Value | Role |
 |-------|-------|------|
-| `PROTOCOL_VERSION` | 2 | Advertised wire version (BTC difficulty hard fork) |
+| `PROTOCOL_VERSION` | 2 | Advertised wire version (epoch difficulty hard fork) |
 | `MIN_SUPPORTED_PROTOCOL_VERSION` | 2 | Reject older peers |
 | `MAX_SUPPORTED_PROTOCOL_VERSION` | 2 | Reject newer peers |
 | `SOFTWARE_VERSION` | 0.4.2.0 | Informational user-agent |

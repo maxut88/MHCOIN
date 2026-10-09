@@ -1674,7 +1674,12 @@ def chain_stats(chain: ReadOnlyChain, *, hrp: str = DEFAULT_HRP) -> dict[str, An
         ),
         "txs_per_page": 100,
         "recent_transfers": recent_transactions(
-            chain, count=max(transfer_tx, 1), tip=tip, hrp=hrp, transfers_only=True
+            chain,
+            count=min(100, max(transfer_tx, 1)),
+            tip=tip,
+            hrp=hrp,
+            transfers_only=True,
         ),
+        "transfers_per_page": 100,
         "live_finds": recent_blocks(chain, count=8, tip=tip, hrp=hrp),
     }
