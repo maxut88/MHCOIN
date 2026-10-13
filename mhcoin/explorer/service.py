@@ -108,7 +108,7 @@ def _pool_url() -> str:
 
 
 def _pool_address() -> str:
-    return (os.environ.get("MHCOIN_POOL_ADDRESS") or "mhc1qmyj738aumw42c8yxuvlvuttvveqc40cxdh6p53").strip()
+    return (os.environ.get("MHCOIN_POOL_ADDRESS") or "mhc1qj846jc348exyx84dgaqagxuq70w9erd4936gjm").strip()
 
 
 def _mode_pill(mode: str) -> str:
