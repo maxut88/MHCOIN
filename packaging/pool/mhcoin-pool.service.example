@@ -1,0 +1,30 @@
+# Example systemd unit for a self-hosted MHCOIN pool.
+# Docs: docs/SELF_HOST_POOL.md
+#
+# 1. Clone repo, create venv, pip install -e .
+# 2. cp packaging/pool/pool.env.example ~/.mhcoin/pool.env && chmod 600
+# 3. Edit User=, WorkingDirectory=, paths below
+# 4. sudo cp packaging/pool/mhcoin-pool.service.example /etc/systemd/system/mhcoin-pool.service
+# 5. sudo systemctl daemon-reload && sudo systemctl enable --now mhcoin-pool
+
+[Unit]
+Description=MHCOIN mining pool (JSON :3333 / Stratum :3334 / Stats :8888)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=YOUR_LINUX_USER
+Group=YOUR_LINUX_USER
+WorkingDirectory=/opt/MHCOIN
+Environment=MHCOIN_POOL_ENV=/home/YOUR_LINUX_USER/.mhcoin/pool.env
+EnvironmentFile=-/home/YOUR_LINUX_USER/.mhcoin/pool.env
+ExecStart=/opt/MHCOIN/packaging/pool/run_pool.sh
+Restart=always
+RestartSec=5
+KillSignal=SIGTERM
+TimeoutStopSec=45
+LimitNOFILE=65535
+
+[Install]
+WantedBy=multi-user.target
