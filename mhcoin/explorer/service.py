@@ -159,25 +159,28 @@ def _annotate_p2p_peer_modes(
     node: dict[str, Any],
     pool_live: dict[str, Any] | None,
 ) -> None:
-    """Label Connected peers: Pool (aggregate H/s) vs Solo (independent STATUS).
+    """Label Connected peers: Pool (host match) vs Solo (everyone else mining).
 
-    Pool-node P2P link shows Mode=Pool and the summed stratum hashrate from the
-    pool API. Real desktop/solo miners keep Mode=Solo with their own H/s.
+    Pool MODE is **only** for P2P peers whose host is in ``_pool_p2p_hosts()``
+    (pool-node / MHCOIN_POOL_URL). Do **not** infer Pool from similar hashrate —
+    that duplicated the stratum aggregate onto desktop peers and flickered
+    1.24↔2.28 MH/s in the UI.
+
+    Live network H/s = sum(solo peer STATUS) + pool API aggregate **once**.
+    Footer solo/pool counts use unique pool (0|1), not number of pool-host rows.
     """
     peers = list(node.get("peers") or [])
     pl = pool_live or {}
-    pool_hps = float(pl.get("pool_hashrate_hps") or 0) if pl.get("ok") else 0.0
-    workers_active = int(pl.get("workers_active") or 0) if pl.get("ok") else 0
+    pool_ok = bool(pl.get("ok"))
+    pool_hps = float(pl.get("pool_hashrate_hps") or 0) if pool_ok else 0.0
+    workers_active = int(pl.get("workers_active") or 0) if pool_ok else 0
     for p in peers:
         is_pool = bool(p.get("is_pool_node"))
         status_hps = float(p.get("hps") or 0)
-        if not is_pool and pool_hps > 0 and status_hps > 0 and workers_active > 0:
-            lo, hi = pool_hps * 0.85, pool_hps * 1.15
-            if lo <= status_hps <= hi:
-                is_pool = True
         if is_pool:
             p["mode"] = "pool"
             p["is_pool_node"] = True
+            # Show stratum aggregate on the pool-node link when API is up.
             if pool_hps > 0:
                 p["hps"] = int(pool_hps)
                 p["hashrate"] = D.format_hps(pool_hps)
@@ -191,22 +194,32 @@ def _annotate_p2p_peer_modes(
                 p["mining"] = False
         elif p.get("mining"):
             p["mode"] = "solo"
+            # Keep raw STATUS hashrate (never overwrite with pool aggregate).
         else:
             p["mode"] = ""
     solo_hps = sum(int(p.get("hps") or 0) for p in peers if p.get("mode") == "solo")
     solo_n = sum(1 for p in peers if p.get("mode") == "solo")
-    pool_n = 1 if any(p.get("mode") == "pool" and p.get("mining") for p in peers) else 0
-    if pl.get("ok") and workers_active > 0:
-        pool_n = max(pool_n, 1)
+    # Unique pool contribution for footnotes (not "how many pool-host peer rows").
+    pool_n = 0
+    if pool_ok and (pool_hps > 0 or workers_active > 0):
+        pool_n = 1
+    elif any(p.get("mode") == "pool" and p.get("mining") for p in peers):
+        pool_n = 1
     live_hps = solo_hps
-    if pl.get("ok") and pool_hps > 0:
+    if pool_ok and pool_hps > 0:
         live_hps += int(pool_hps)
     else:
-        live_hps += sum(int(p.get("hps") or 0) for p in peers if p.get("mode") == "pool")
+        # No pool API: count at most one pool-host peer's displayed H/s.
+        for p in peers:
+            if p.get("mode") == "pool" and p.get("mining"):
+                live_hps += int(p.get("hps") or 0)
+                break
     node["peers"] = peers
     node["reported_hashrate_hps"] = int(live_hps)
     node["reported_hashrate"] = D.format_hps(float(live_hps)) if live_hps > 0 else None
-    node["reported_miners"] = int(solo_n + (workers_active if pl.get("ok") and workers_active else pool_n))
+    node["reported_miners"] = int(
+        solo_n + (workers_active if pool_ok and workers_active > 0 else pool_n)
+    )
     node["reported_solo_miners"] = int(solo_n)
     node["reported_pool_mirrors"] = int(pool_n)
 
@@ -2112,10 +2125,12 @@ def _peers_panel(
     total_hps: Any = None,
     total_hashrate: Any = None,
     pool_live: dict[str, Any] | None = None,
+    solo_miners: Any = None,
+    pool_mirrors: Any = None,
 ) -> str:
     rows: list[str] = []
     solo_n = 0
-    pool_n = 0
+    pool_rows = 0
     for p in peers or []:
         peer_lbl = p.get("id") or p.get("ip") or "—"
         direction = "in" if p.get("inbound") else "out"
@@ -2128,7 +2143,7 @@ def _peers_panel(
         hr = p.get("hashrate") or ("—" if not p.get("mining") else "…")
         mine = "yes" if p.get("mining") else "no"
         if mode == "pool":
-            pool_n += 1
+            pool_rows += 1
         elif p.get("mining") and mode == "solo":
             solo_n += 1
         rows.append(
@@ -2152,6 +2167,13 @@ def _peers_panel(
         total_s = D.format_hps(float(total_hps)) or "—"
     else:
         total_s = "—"
+    # Prefer unique pool/solo counts from annotate (not number of pool-host rows).
+    if solo_miners is not None:
+        solo_n = int(solo_miners)
+    if pool_mirrors is not None:
+        pool_n = int(pool_mirrors)
+    else:
+        pool_n = 1 if pool_rows else 0
     body = (
         f"""
     <div class="table-wrap peers-panel"><table>
@@ -2228,6 +2250,8 @@ def _render_home(data: dict[str, Any]) -> bytes:
         total_hps=reported_hps,
         total_hashrate=reported_hr,
         pool_live=data.get("pool_live"),
+        solo_miners=node.get("reported_solo_miners"),
+        pool_mirrors=node.get("reported_pool_mirrors"),
     )
     body = f"""
     <script>window.__MHCOIN_POOL_ADDRESS = {json.dumps(data.get("pool_address") or _pool_address())};</script>
@@ -2514,7 +2538,7 @@ def _render_home(data: dict[str, Any]) -> bytes:
           if (modeCell && modeCell.innerHTML !== modeHtml) modeCell.innerHTML = modeHtml;
         }}
       }}
-      function renderPeers(peers, count, netTotal) {{
+      function renderPeers(peers, count, netTotal, soloN, poolN) {{
         var box = document.getElementById('peersTable');
         var cnt = document.getElementById('peersCount');
         var list = peers || [];
@@ -2533,14 +2557,21 @@ def _render_home(data: dict[str, Any]) -> bytes:
         var idSig = peersIdSig(list);
         var table = box.querySelector('.table-wrap table');
         var tbody = table ? table.querySelector('tbody') : null;
-        var solo = 0, poolN = 0;
-        for (var i = 0; i < list.length; i++) {{
-          var m = list[i].mode || (list[i].mining ? 'solo' : '');
-          if (m === 'pool') poolN += 1;
-          else if (list[i].mining && m === 'solo') solo += 1;
+        // Prefer server unique counts (reported_*); fall back to row scan.
+        var solo = (soloN != null) ? Number(soloN) : 0;
+        var poolCount = (poolN != null) ? Number(poolN) : 0;
+        if (soloN == null || poolN == null) {{
+          solo = 0; poolCount = 0;
+          var sawPool = false;
+          for (var i = 0; i < list.length; i++) {{
+            var m = list[i].mode || (list[i].mining ? 'solo' : '');
+            if (m === 'pool') sawPool = true;
+            else if (list[i].mining && m === 'solo') solo += 1;
+          }}
+          poolCount = sawPool ? 1 : 0;
         }}
         var total = netTotal || '—';
-        var totalTxt = 'Network live: ' + total + ' · ' + solo + ' solo · ' + poolN + ' pool';
+        var totalTxt = 'Network live: ' + total + ' · ' + solo + ' solo · ' + poolCount + ' pool';
         if (tbody && box.dataset.idSig === idSig) {{
           patchPeers(tbody, list);
           var totEl = document.getElementById('peersTotal');
@@ -2918,7 +2949,13 @@ def _render_home(data: dict[str, Any]) -> bytes:
         setText('kpiPeers', node.peer_count != null ? String(node.peer_count) : null);
         setText('kpiSync', node.sync_state || '—');
         // Peers / pool workers: refresh every tick so Mode/H/s stay correct.
-        renderPeers(node.peers || [], node.peer_count, node.reported_hashrate);
+        renderPeers(
+          node.peers || [],
+          node.peer_count,
+          node.reported_hashrate,
+          node.reported_solo_miners,
+          node.reported_pool_mirrors
+        );
         if (d.pool_address) window.__MHCOIN_POOL_ADDRESS = d.pool_address;
         if (tipChanged && d.live_finds) renderFinds(d.live_finds);
         var meta = document.getElementById('hdrMeta');
@@ -3612,6 +3649,8 @@ def _render_stats(data: dict[str, Any]) -> bytes:
         peer_count=node.get("peer_count"),
         total_hps=node.get("reported_hashrate_hps"),
         total_hashrate=node.get("reported_hashrate"),
+        solo_miners=node.get("reported_solo_miners"),
+        pool_mirrors=node.get("reported_pool_mirrors"),
     )
     body = f"""
     <div class="shell">
