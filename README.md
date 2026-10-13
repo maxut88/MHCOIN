@@ -59,6 +59,7 @@ Download the build for your OS from the [latest release](https://github.com/maxu
 |----|------|
 | **Windows** | `MHCOIN-Core-0.4.2.0-windows-x86_64.exe` (or `.zip`) |
 | **macOS** | `MHCOIN-Core-0.4.2.0-macos.dmg` |
+| **macOS** (11+ / older Intel) | `MHCOIN-Core-0.4.2.0-macos110-legacy.dmg` |
 | **Linux** | `MHCOIN-Core-0.4.2.0-x86_64.AppImage` or `.tar.gz` |
 
 **First run**
