@@ -272,6 +272,13 @@ class UTXOSet:
     def all_entries(self) -> list[UTXOEntry]:
         return list(self._mem.values())
 
+    def reload(self) -> None:
+        """Re-read all coins from LMDB (for external writers in other processes)."""
+        if self._env is None:
+            return
+        with self._lock:
+            self._load()
+
     def all_for_pubkey_hash(self, pubkey_hash: bytes) -> list[UTXOEntry]:
         out = []
         for e in self._mem.values():

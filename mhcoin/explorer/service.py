@@ -76,10 +76,12 @@ def _mint_mark(*, title: str = "MHC Mined") -> str:
     )
 
 
-def _type_pill(coinbase: bool) -> str:
-    """Site-wide type badge — soft sky MHC Mined or teal Transfer."""
+def _type_pill(coinbase: bool, *, change: bool = False) -> str:
+    """Site-wide type badge — MHC Mined / Change / Transfer."""
     if coinbase:
         return '<span class="pill minted">MHC Mined</span>'
+    if change:
+        return '<span class="pill chg">Change</span>'
     return '<span class="pill xfer">Transfer</span>'
 
 
@@ -928,6 +930,8 @@ def _page(title: str, body: str, *, tip: int | None = None, hero: bool = False) 
     box-shadow: 0 0 0 1px rgba(2,132,199,.22);
   }}
   .pill.xfer {{ background: #0f766e; box-shadow: 0 0 0 1px rgba(15,118,110,.22); }}
+  .pill.chg {{ background: #64748b; box-shadow: 0 0 0 1px rgba(100,116,139,.28); }}
+  [data-theme="dark"] .pill.chg {{ background: #475569; }}
 
   /* Mode tags: quiet, fixed width — replaces fat Solo/Pool pills. */
   .mode-tag {{
@@ -1022,15 +1026,44 @@ def _page(title: str, body: str, *, tip: int | None = None, hero: bool = False) 
   }}
   .nowrap {{ white-space: nowrap; }}
   th.num, td.num {{ text-align: center; white-space: nowrap; }}
+  /* Confirmations: fit digits / "Conf" — never clip into the next column (Type). */
   th.num-conf, td.num-conf {{
-    text-align: center; width: 1%; max-width: 3.25rem; white-space: nowrap;
-    padding-left: .25rem; padding-right: .25rem;
+    text-align: center; width: 1%; white-space: nowrap;
+    padding-left: .55rem; padding-right: .55rem;
+    overflow: visible;
+  }}
+  th.type-col, td.type-col {{
+    white-space: nowrap; padding-left: .65rem; min-width: 6.5rem;
   }}
   th.hash-col, td.hash-col {{
     width: auto; min-width: 0; max-width: none;
   }}
   td.hash-col .copy-btn {{ flex-shrink: 0; }}
   .muted {{ color: var(--muted); }}
+  /* Transfer To: payment primary; change = arrow + green address (no box). */
+  .to-stack {{ display: flex; flex-direction: column; gap: .2rem; min-width: 0; }}
+  .to-stack .to-pay {{ color: var(--tbl-link); font-weight: 550; }}
+  .to-change {{
+    display: flex; flex-wrap: wrap; align-items: baseline; gap: .2rem .4rem;
+    min-width: 0; background: none; border: none; padding: 0;
+  }}
+  .to-change .chg-arrow {{
+    color: #4b5563; font-size: .85rem; font-weight: 600; flex-shrink: 0; line-height: 1;
+  }}
+  .to-change a.to-chg, .to-change .to-chg {{
+    color: #16a34a !important; font-size: .72rem; font-weight: 550;
+    background: none !important; border: none !important; padding: 0 !important;
+  }}
+  .to-change a.to-chg:hover {{ color: #15803d !important; text-decoration: underline; }}
+  .to-change .chg-amt {{
+    color: #9ca3af; font-size: .68rem; font-variant-numeric: tabular-nums;
+    font-family: var(--mono);
+  }}
+  [data-theme="dark"] .to-change .chg-arrow {{ color: #8b949e; }}
+  [data-theme="dark"] .to-change a.to-chg,
+  [data-theme="dark"] .to-change .to-chg {{ color: #4ade80 !important; }}
+  [data-theme="dark"] .to-change a.to-chg:hover {{ color: #86efac !important; }}
+  [data-theme="dark"] .to-change .chg-amt {{ color: #6e7681; }}
   .err {{ color: #b42318; }}
   .ok {{ color: #0f766e; font-weight: 650; }}
   .kv {{
@@ -1166,15 +1199,38 @@ def _page(title: str, body: str, *, tip: int | None = None, hero: bool = False) 
   ul.plain {{ list-style: none; padding: 0; margin: 0; }}
   ul.plain li {{ padding: .55rem 0; border-bottom: 1px solid var(--line); }}
   ul.plain li.io-row {{
-    display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: .35rem .85rem;
+    display: grid; grid-template-columns: 1.55rem minmax(0, 1fr) auto; gap: .35rem .65rem;
     align-items: start;
+  }}
+  ul.plain li.io-row .io-idx {{
+    font-size: .75rem; font-weight: 700; color: var(--muted);
+    font-variant-numeric: tabular-nums; line-height: 1.4; padding-top: .12rem; text-align: right;
   }}
   ul.plain li.io-row .io-main {{ min-width: 0; word-break: break-all; }}
   ul.plain li.io-row .io-amt {{ white-space: nowrap; text-align: right; font-variant-numeric: tabular-nums; }}
-  ul.plain li.io-row .io-meta {{ grid-column: 1 / -1; font-size: .8rem; }}
+  ul.plain li.io-row .io-meta {{ font-size: .8rem; margin-top: .2rem; color: var(--muted); }}
+  /* Wallet addresses stand out vs txids / hashes. */
+  ul.plain li.io-row a.addr-link {{
+    color: #0f766e !important; font-weight: 650;
+    background: rgba(15, 118, 110, .10);
+    border: 1px solid rgba(15, 118, 110, .22);
+    border-radius: 6px; padding: .12rem .4rem; display: inline;
+  }}
+  ul.plain li.io-row a.addr-link:hover {{
+    color: #0d9488 !important; background: rgba(15, 118, 110, .16);
+  }}
+  [data-theme="dark"] ul.plain li.io-row a.addr-link {{
+    color: #5eead4 !important; background: rgba(45, 212, 191, .10);
+    border-color: rgba(45, 212, 191, .28);
+  }}
+  [data-theme="dark"] ul.plain li.io-row a.addr-link:hover {{
+    color: #99f6e4 !important; background: rgba(45, 212, 191, .16);
+  }}
+  ul.plain li.io-row .io-amt.chg strong {{ color: #9ca3af; font-weight: 600; }}
+  [data-theme="dark"] ul.plain li.io-row .io-amt.chg strong {{ color: #8b949e; }}
   @media (max-width: 720px) {{
-    ul.plain li.io-row {{ grid-template-columns: 1fr; }}
-    ul.plain li.io-row .io-amt {{ text-align: left; }}
+    ul.plain li.io-row {{ grid-template-columns: 1.4rem minmax(0, 1fr); }}
+    ul.plain li.io-row .io-amt {{ text-align: left; grid-column: 2; }}
   }}
   footer.site {{ width: 100%; margin: 0; padding: 0 1.5rem 2rem; color: var(--muted); font-size: .82rem; }}
   footer.site .footer-row {{
@@ -1482,6 +1538,7 @@ class ExplorerApp:
         self._home_lock = threading.Lock()
         self._rich_cache: dict[str, Any] | None = None
         self._rich_cache_at: float = 0.0
+        self._rich_cache_tip: int | None = None
         self._rich_lock = threading.Lock()
         self._rate: dict[str, deque[float]] = defaultdict(deque)
         self._rate_lock = threading.Lock()
@@ -1753,39 +1810,114 @@ class ExplorerApp:
         finally:
             c.close()
 
-    def richlist(self, *, limit: int = 100, force: bool = False) -> dict[str, Any]:
+    def richlist(
+        self,
+        *,
+        page: int = 1,
+        per_page: int = D.RICHLIST_PER_PAGE,
+        limit: int | None = None,
+        force: bool = False,
+    ) -> dict[str, Any]:
+        """Paginated rich list (100 / page). ``limit`` kept as alias for per_page."""
+        if limit is not None:
+            per_page = int(limit)
+        per_page = max(1, min(int(per_page or D.RICHLIST_PER_PAGE), D.RICHLIST_PER_PAGE_MAX))
+        page = max(1, int(page or 1))
         now = time.time()
-        with self._rich_lock:
-            if (
-                not force
-                and self._rich_cache is not None
-                and (now - self._rich_cache_at) < _RICH_CACHE_TTL_SEC
-            ):
-                return self._rich_cache
         c = self.chain()
         try:
-            data = D.rich_list(self.data_dir, chain=c, hrp=self.hrp, limit=limit)
+            tip = int(c.height)
+            with self._rich_lock:
+                cached = None
+                if (
+                    not force
+                    and self._rich_cache is not None
+                    and self._rich_cache_tip == tip
+                    and (now - self._rich_cache_at) < _RICH_CACHE_TTL_SEC
+                ):
+                    cached = self._rich_cache
+            if cached is not None:
+                return D._rich_list_paginate(cached, page=page, per_page=per_page)
+            # Build full ranking once; slice per request (keeps page-2+ cheap).
+            data = D.rich_list(
+                self.data_dir, chain=c, hrp=self.hrp, page=1, per_page=per_page
+            )
         finally:
             c.close()
         with self._rich_lock:
             self._rich_cache = data
             self._rich_cache_at = time.time()
-        return data
+            self._rich_cache_tip = tip
+        return D._rich_list_paginate(data, page=page, per_page=per_page)
 
     def stats(self) -> dict[str, Any]:
         return self.home()
 
-    def charts(self) -> dict[str, Any]:
-        home = self.home()
+    def charts(self, *, window: int = 30) -> dict[str, Any]:
+        """Full charts payload for ``/charts`` (independent of home cache window)."""
+        try:
+            window = int(window)
+        except (TypeError, ValueError):
+            window = 30
+        window = min(D.CHART_WINDOWS, key=lambda w: abs(w - window))
+        c = self.chain()
+        try:
+            tip = int(c.height)
+            charts = D.chart_series(c, tip=tip, window=window)
+            halv = D.halving_info(tip)
+            hr = D.estimate_network_hashrate(c, tip=tip, window=min(window, 30))
+            # Avg interval from non-null samples in this window.
+            ivs = [int(x) for x in (charts.get("intervals") or []) if x is not None]
+            avg_iv = int(round(sum(ivs) / len(ivs))) if ivs else None
+            minted_sats = 0
+            if charts.get("minted_cum_mhc"):
+                try:
+                    minted_sats = int(
+                        round(float(charts["minted_cum_mhc"][-1]) * D.SATOSHI_PER_COIN)
+                    )
+                except (TypeError, ValueError, IndexError):
+                    minted_sats = 0
+            supply = D.supply_info(tip, minted_sats, avg_interval_seconds=avg_iv)
+            orphans = D.orphan_rate(c, window=window, tip=tip)
+        finally:
+            c.close()
+        mem_rows = D.record_mempool_sample(self.data_dir)
+        tip_diff = None
+        if charts.get("difficulty"):
+            tip_diff = charts["difficulty"][-1]
         return {
-            "tip_height": home.get("tip_height"),
-            "charts": home.get("charts") or {},
-            "halving": home.get("halving") or {},
-            "avg_block_interval_seconds": home.get("avg_block_interval_seconds"),
-            "network_hashrate": home.get("network_hashrate"),
-            "network_hashrate_window": home.get("network_hashrate_window"),
-            "network_hashrate_short": home.get("network_hashrate_short"),
-            "target_block_time_seconds": home.get("target_block_time_seconds"),
+            "tip_height": tip,
+            "window": window,
+            "windows": list(D.CHART_WINDOWS),
+            "charts": charts,
+            "halving": {
+                **halv,
+                "next_halving_eta": supply.get("next_halving_eta"),
+                "next_halving_eta_seconds": supply.get("next_halving_eta_seconds"),
+                "eta_basis": supply.get("eta_basis"),
+            },
+            "avg_block_interval_seconds": avg_iv,
+            "network_hashrate": hr.get("hashrate"),
+            "network_hashrate_hps": hr.get("hashrate_hps"),
+            "network_hashrate_window": hr.get("hashrate_window"),
+            "network_hashrate_short": hr.get("hashrate_short"),
+            "target_block_time_seconds": D.TARGET_BLOCK_TIME_SECONDS,
+            "tip_difficulty": tip_diff,
+            "orphans": orphans,
+            "mempool": {
+                "current": mem_rows[-1] if mem_rows else D.mempool_snapshot(self.data_dir),
+                "samples": mem_rows,
+                "counts": [int(r.get("count") or 0) for r in mem_rows],
+                "fees_mhc": [
+                    float(str(r.get("fees_mhc") or "0").replace(",", "") or 0)
+                    for r in mem_rows
+                ],
+            },
+            "supply": {
+                "minted_mhc": supply.get("minted_mhc"),
+                "minted_pct": supply.get("minted_pct"),
+                "max_supply_mhc": supply.get("max_supply_mhc"),
+            },
         }
 
     def mempool(self) -> dict[str, Any]:
@@ -1852,17 +1984,19 @@ def _pager(
     base: str = "/blocks",
     *,
     chain_links: bool = True,
+    prev_label: str = "← newer",
+    next_label: str = "older →",
 ) -> str:
     sep = "&" if "?" in base else "?"
     prev_l = (
-        f'<a href="{base}{sep}page={page - 1}">← newer</a>'
+        f'<a href="{base}{sep}page={page - 1}">{_esc(prev_label)}</a>'
         if page > 1
-        else '<span class="muted">← newer</span>'
+        else f'<span class="muted">{_esc(prev_label)}</span>'
     )
     next_l = (
-        f'<a href="{base}{sep}page={page + 1}">older →</a>'
+        f'<a href="{base}{sep}page={page + 1}">{_esc(next_label)}</a>'
         if page < total_pages
-        else '<span class="muted">older →</span>'
+        else f'<span class="muted">{_esc(next_label)}</span>'
     )
     extras = ""
     if chain_links:
@@ -1932,6 +2066,64 @@ def _sparkline(values: list, *, width: int = 220, height: int = 48, stroke: str 
         f'aria-hidden="true"><polyline fill="none" stroke="{stroke}" stroke-width="1.6" '
         f'points="{poly}"/></svg>'
     )
+
+
+def _dual_sparkline(
+    a: list,
+    b: list,
+    *,
+    width: int = 420,
+    height: int = 72,
+    stroke_a: str = "#16a34a",
+    stroke_b: str = "#0ea5e9",
+) -> str:
+    """Two series on one SVG (shared Y scale). Gaps (None) break the polyline."""
+    n = max(len(a or []), len(b or []))
+    if n == 0:
+        return '<span class="muted">—</span>'
+
+    def _pad(vals: list) -> list[float | None]:
+        out: list[float | None] = []
+        for i in range(n):
+            v = vals[i] if i < len(vals) else None
+            try:
+                out.append(float(v) if v is not None else None)
+            except (TypeError, ValueError):
+                out.append(None)
+        return out
+
+    aa, bb = _pad(list(a or [])), _pad(list(b or []))
+    nums = [v for v in aa + bb if v is not None]
+    if not nums:
+        return '<span class="muted">—</span>'
+    lo, hi = min(nums), max(nums)
+    span = (hi - lo) or 1.0
+
+    def _poly(vals: list[float | None]) -> str:
+        pts = []
+        for i, v in enumerate(vals):
+            if v is None:
+                continue
+            x = 0 if n == 1 else i * (width - 2) / (n - 1) + 1
+            y = height - 2 - ((v - lo) / span) * (height - 4)
+            pts.append(f"{x:.1f},{y:.1f}")
+        return " ".join(pts)
+
+    pa, pb = _poly(aa), _poly(bb)
+    parts = [
+        f'<svg class="spark" viewBox="0 0 {width} {height}" width="{width}" height="{height}" aria-hidden="true">'
+    ]
+    if pb:
+        parts.append(
+            f'<polyline fill="none" stroke="{stroke_b}" stroke-width="1.5" '
+            f'stroke-dasharray="4 3" points="{pb}"/>'
+        )
+    if pa:
+        parts.append(
+            f'<polyline fill="none" stroke="{stroke_a}" stroke-width="1.8" points="{pa}"/>'
+        )
+    parts.append("</svg>")
+    return "".join(parts)
 
 
 def _fmt_interval(seconds: int | None) -> str:
@@ -2009,6 +2201,27 @@ def _blocks_table(blocks: list[dict[str, Any]], *, pool_address: str | None = No
     """
 
 
+def _to_with_change_html(to: str | None, change: str | None, change_mhc: str | None) -> str:
+    """Payment address + change row (arrow + soft box)."""
+    if to:
+        main = _copyable(to, href=f"/address/{to}", css="mono to-pay")
+    else:
+        main = '<span class="muted">—</span>'
+    if not change:
+        return f'<div class="to-stack">{main}</div>'
+    ch = _copyable(change, href=f"/address/{change}", css="mono to-chg")
+    amt = (
+        f'<span class="chg-amt">{_esc(change_mhc)} MHC</span>'
+        if change_mhc
+        else ""
+    )
+    return (
+        f'<div class="to-stack">{main}'
+        f'<div class="to-change"><span class="chg-arrow" aria-hidden="true">→</span>{ch}{amt}</div>'
+        f"</div>"
+    )
+
+
 def _txs_table(txs: list[dict[str, Any]], *, empty: str = "No transactions yet.") -> str:
     if not txs:
         return f'<p class="muted">{_esc(empty)}</p>'
@@ -2026,7 +2239,7 @@ def _txs_table(txs: list[dict[str, Any]], *, empty: str = "No transactions yet."
             fr_html = _copyable(fr, href=f"/address/{fr}")
         else:
             fr_html = '<span class="muted">—</span>'
-        to_html = _copyable(to, href=f"/address/{to}") if to else '<span class="muted">—</span>'
+        to_html = _to_with_change_html(to, t.get("change"), t.get("change_mhc"))
         fee = t.get("fee_mhc")
         txid = t.get("txid") or ""
         rows.append(
@@ -2047,7 +2260,7 @@ def _txs_table(txs: list[dict[str, Any]], *, empty: str = "No transactions yet."
     <div class="table-wrap"><table class="data-table">
       <thead><tr>
         <th class="hash-col">Txid</th><th>Type</th><th>Block</th><th>From</th><th>To</th>
-        <th>Amount</th><th>Fee</th><th>Age</th><th class="num-conf">Confirmations</th>
+        <th>Amount</th><th>Fee</th><th>Age</th><th class="num-conf" title="Confirmations">Conf</th>
       </tr></thead>
       <tbody>
       {"".join(rows)}
@@ -2415,13 +2628,14 @@ def _render_home(data: dict[str, Any]) -> bytes:
         a = String(a).trim().toLowerCase();
         return a.indexOf('mhc1') === 0 || a.indexOf('mhct1') === 0;
       }}
-      function copyable(text, href, full) {{
+      function copyable(text, href, full, css) {{
         if (!text) return '<span class="muted">—</span>';
         // Full wallet addresses everywhere; block hashes use full=true.
         var shown = (full || isWalletAddr(text)) ? String(text) : shortHash(text);
+        var cls = css || 'mono';
         var link = href
-          ? '<a class="mono" href="' + href + '" title="' + esc(text) + '">' + esc(shown) + '</a>'
-          : '<span class="mono" title="' + esc(text) + '">' + esc(shown) + '</span>';
+          ? '<a class="' + cls + '" href="' + href + '" title="' + esc(text) + '">' + esc(shown) + '</a>'
+          : '<span class="' + cls + '" title="' + esc(text) + '">' + esc(shown) + '</span>';
         return '<span class="copy-wrap">' + link +
           '<button type="button" class="copy-btn" data-copy="' + esc(text) + '" title="Copy">⎘</button></span>';
       }}
@@ -2712,7 +2926,16 @@ def _render_home(data: dict[str, Any]) -> bytes:
         var pill = cb ? '<span class="pill minted">MHC Mined</span>' : '<span class="pill xfer">Transfer</span>';
         var fr = t.from === 'coinbase' ? '<span class="muted">coinbase</span>'
           : (t.from ? copyable(t.from, '/address/' + encodeURIComponent(t.from)) : '<span class="muted">—</span>');
-        var to = t.to ? copyable(t.to, '/address/' + encodeURIComponent(t.to)) : '<span class="muted">—</span>';
+        var to = t.to
+          ? copyable(t.to, '/address/' + encodeURIComponent(t.to), false, 'mono to-pay')
+          : '<span class="muted">—</span>';
+        if (t.change) {{
+          var ch = copyable(t.change, '/address/' + encodeURIComponent(t.change), false, 'mono to-chg');
+          var camt = t.change_mhc ? ('<span class="chg-amt">' + esc(t.change_mhc) + ' MHC</span>') : '';
+          to = '<div class="to-stack">' + to + '<div class="to-change"><span class="chg-arrow" aria-hidden="true">→</span>' + ch + camt + '</div></div>';
+        }} else {{
+          to = '<div class="to-stack">' + to + '</div>';
+        }}
         var mark = mintMark(cb ? 'MHC Mined' : 'Transfer');
         return '<tr data-txid="' + esc(t.txid) + '">' +
           '<td class="hash-col"><span class="row-ico">' + mark + copyable(t.txid, '/tx/' + encodeURIComponent(t.txid), false) + '</span></td>' +
@@ -2791,7 +3014,7 @@ def _render_home(data: dict[str, Any]) -> bytes:
           tbody.innerHTML = rowsHtml;
           return;
         }}
-        el.innerHTML = '<div class="table-wrap"><table class="data-table"><thead><tr><th class="hash-col">Txid</th><th>Type</th><th>Block</th><th>From</th><th>To</th><th>Amount</th><th>Fee</th><th>Age</th><th class="num-conf">Confirmations</th></tr></thead><tbody>' + rowsHtml + '</tbody></table></div>';
+        el.innerHTML = '<div class="table-wrap"><table class="data-table"><thead><tr><th class="hash-col">Txid</th><th class="type-col">Type</th><th>Block</th><th>From</th><th>To</th><th>Amount</th><th>Fee</th><th>Age</th><th class="num-conf" title="Confirmations">Conf</th></tr></thead><tbody>' + rowsHtml + '</tbody></table></div>';
       }}
       function txsPagerHtml(page, totalPages) {{
         page = Number(page) || 1;
@@ -3279,9 +3502,13 @@ def _render_tx(t: dict[str, Any]) -> bytes:
         return href
 
     ins = []
-    for i in t.get("inputs") or []:
+    for i_idx, i in enumerate(t.get("inputs") or [], start=1):
         if i.get("coinbase"):
-            ins.append("<li><span class='muted'>New coins (block reward)</span></li>")
+            ins.append(
+                f'<li class="io-row"><div class="io-idx">{i_idx}</div>'
+                f'<div class="io-main"><span class="muted">New coins (block reward)</span></div>'
+                f'<div class="io-amt"></div></li>'
+            )
             continue
         addr = i.get("address") or "?"
         val = i.get("value_mhc") or "?"
@@ -3295,10 +3522,10 @@ def _render_tx(t: dict[str, Any]) -> bytes:
         )
         focus_cls = " focus-addr" if _is_focus(addr) else ""
         ins.append(
-            f'<li class="io-row{focus_cls}"><div class="io-main">'
-            + _copyable(prev, href=_tx_href(prev), short=False)
-            + f"<div class='io-meta'>{src_meta} → "
-            + _copyable(addr, href=f"/address/{addr}", short=False)
+            f'<li class="io-row{focus_cls}"><div class="io-idx">{i_idx}</div><div class="io-main">'
+            + _copyable(addr, href=f"/address/{addr}", short=False, css="mono addr-link")
+            + f"<div class='io-meta'>{src_meta} · "
+            + _copyable(prev, href=_tx_href(prev), short=True)
             + "</div></div>"
             + f'<div class="io-amt"><strong>{_esc(val)}</strong><span class="unit"> MHC</span></div></li>'
         )
@@ -3309,25 +3536,59 @@ def _render_tx(t: dict[str, Any]) -> bytes:
             from_addr = i.get("address")
             break
     outs = []
-    change_mhc = None
-    for o in t.get("outputs") or []:
+    change_mhc = t.get("change_mhc")
+    raw_outs = list(t.get("outputs") or [])
+    # Prefer summarize_tx classification (pool-style change-first vs wallet pay-first).
+    pay_addr = t.get("to") if not coinbase else None
+    chg_addr = t.get("change") if not coinbase else None
+    pay_mhc = t.get("amount_mhc") if not coinbase else None
+    # Single output back to sender = self-pay / consolidation (change == 0).
+    single_self_pay = (
+        (not coinbase)
+        and len(raw_outs) == 1
+        and from_addr
+        and (raw_outs[0].get("address") == from_addr)
+    )
+    for o_idx, o in enumerate(raw_outs, start=1):
         addr = o.get("address") or "?"
         tag = ""
-        if not coinbase and from_addr and addr == from_addr:
+        n = o.get("n")
+        if n is None:
+            n = o_idx - 1
+        val_mhc = o.get("value_mhc")
+        if not coinbase and chg_addr and addr == chg_addr and (
+            not change_mhc or val_mhc == change_mhc
+        ):
+            tag = " <span class='muted'>(change)</span>"
+            change_mhc = val_mhc
+        elif not coinbase and pay_addr and addr == pay_addr and (
+            pay_mhc is None or val_mhc == pay_mhc or chg_addr is None
+        ):
+            tag = " <span class='muted'>(payment)</span>"
+        elif single_self_pay:
+            tag = " <span class='muted'>(payment)</span>"
+        elif not coinbase and from_addr and addr == from_addr:
             tag = " <span class='muted'>(change back)</span>"
-            change_mhc = o.get("value_mhc")
+            change_mhc = val_mhc
         elif not coinbase and from_addr and addr != from_addr:
             tag = " <span class='muted'>(payment)</span>"
         spent = o.get("spent")
         if spent is None and o.get("status") in ("spent", "unspent"):
             spent = o.get("status") == "spent"
         focus_cls = " focus-addr" if _is_focus(addr) else ""
+        is_change = "(change)" in tag or "(change back)" in tag
+        amt_cls = "io-amt chg" if is_change else "io-amt"
+        amt_strong = (
+            f'<strong>{_esc(o.get("value_mhc"))}</strong>'
+            if is_change
+            else f'<strong class="reward">{_esc(o.get("value_mhc"))}</strong>'
+        )
         outs.append(
-            f'<li class="io-row{focus_cls}"><div class="io-main">'
-            + _copyable(addr, href=f"/address/{addr}", short=False)
+            f'<li class="io-row{focus_cls}"><div class="io-idx">{o_idx}</div><div class="io-main">'
+            + _copyable(addr, href=f"/address/{addr}", short=False, css="mono addr-link")
             + f"{tag}"
             + f" {_status_pill(spent)}</div>"
-            + f'<div class="io-amt"><strong class="reward">{_esc(o.get("value_mhc"))}</strong>'
+            + f'<div class="{amt_cls}">{amt_strong}'
             + '<span class="unit"> MHC</span></div></li>'
         )
     # Collapse long From lists (multi-input payments).
@@ -3526,17 +3787,19 @@ def _render_address(a: dict[str, Any]) -> bytes:
             spent = o.get("status") == "spent"
         txid = o.get("txid") or ""
         tx_href = f"/tx/{txid}?addr={addr}" if addr and txid else (f"/tx/{txid}" if txid else None)
+        time_s = o.get("time_utc") or "—"
         rows.append(
             "<tr>"
-            f'<td class="num"><span class="row-ico">{_mint_mark(title="MHC Mined" if o.get("coinbase") else "Transfer")}'
+            f'<td class="num"><span class="row-ico">{_mint_mark(title="MHC Mined" if o.get("coinbase") else ("Change" if o.get("change") else "Transfer"))}'
             f'<a href="/block/{o.get("height")}">{o.get("height")}</a></span></td>'
             f'<td class="hash-col">{_copyable(txid, short=False, href=tx_href)}</td>'
             f'<td class="num">{o.get("vout")}</td>'
             f'<td class="num"><strong class="reward">{_esc(o.get("value_mhc"))}</strong></td>'
             f'<td>{_status_pill(spent)}</td>'
+            f'<td class="muted nowrap" title="{_esc(time_s)}">{_esc(time_s)}</td>'
             f'<td class="muted nowrap num">{_esc(o.get("age") or "")}</td>'
-            f'<td class="num-conf">{_esc(o.get("confirmations"))}</td>'
-            f"<td>{_type_pill(bool(o.get('coinbase')))}</td>"
+            f'<td class="num-conf muted">{_esc(o.get("confirmations"))}</td>'
+            f'<td class="type-col">{_type_pill(bool(o.get("coinbase")), change=bool(o.get("change")))}</td>'
             "</tr>"
         )
     tip = a.get("tip_height")
@@ -3557,11 +3820,16 @@ def _render_address(a: dict[str, Any]) -> bytes:
         <div>Balance</div><div><strong class="reward">{_esc(a.get("balance_mhc") or "0")} MHC</strong>
           <span class="muted">({_esc(a.get("utxo_count") or 0)} UTXO)</span></div>
         <div>{_flow_pill(received=True)}</div><div>{_esc(a.get("total_received_mhc") or "0")} MHC
-          <span class="muted"> · mining + incoming (no change)</span></div>
+          <span class="muted"> · mining + incoming (change excluded)</span></div>
         <div>{_flow_pill(received=False)}</div><div><strong>{_esc(a.get("total_sent_mhc") or "0")}</strong> MHC
-          <span class="muted"> · payments only</span></div>
+          <span class="muted"> · left this address (not sibling inputs)</span></div>
         <div>Network fees</div><div>{_esc(a.get("total_fees_mhc") or "0")} MHC</div>
+        <div>Transactions</div><div>{_esc(a.get("tx_count") if a.get("tx_count") is not None else a.get("received_count") or 0)}</div>
         <div>Outputs</div><div>{_esc(a.get("received_count"))}</div>
+        <div>First seen</div><div>{_esc(a.get("first_seen_utc") or "—")}
+          <span class="muted">{(' · #' + str(a.get('first_height'))) if a.get('first_height') is not None else ""}{_esc((' · ' + str(a.get('first_seen_age'))) if a.get('first_seen_age') else "")}</span></div>
+        <div>Last active</div><div>{_esc(a.get("last_active_utc") or "—")}
+          <span class="muted">{(' · #' + str(a.get('last_height'))) if a.get('last_height') is not None else ""}{_esc((' · ' + str(a.get('last_active_age'))) if a.get('last_active_age') else "")}</span></div>
         </div>
       </div>
       {flow_html}
@@ -3570,7 +3838,8 @@ def _render_address(a: dict[str, Any]) -> bytes:
         {spark or '<span class="muted">No balance history yet.</span>'}
       </div>
       <p class="muted" style="margin:.75rem 0 0;font-size:.85rem">
-        Balance ≈ Received − Sent − Fees.
+        Balance = Received − Sent − Fees
+        <span class="muted"> (Sent = outflow from this address only).</span>
       </p>
     </div>
     <div class="card">
@@ -3581,8 +3850,8 @@ def _render_address(a: dict[str, Any]) -> bytes:
       {_pager(int(a.get("page") or 1), int(a.get("total_pages") or 1), base=f"/address/{addr}", chain_links=False) if int(a.get("total_pages") or 1) > 1 else ""}
       <div class="table-wrap"><table class="data-table">
         <tr><th class="num">Height</th><th class="hash-col">Txid</th><th class="num">vout</th><th class="num">MHC</th>
-            <th>Status</th><th class="num">Age</th><th class="num-conf">Confirmations</th><th>Type</th></tr>
-        {"".join(rows) or '<tr><td colspan="8" class="muted">No outputs</td></tr>'}
+            <th>Status</th><th>Time (UTC)</th><th class="num">Age</th><th class="num-conf" title="Confirmations">Conf</th><th class="type-col">Type</th></tr>
+        {"".join(rows) or '<tr><td colspan="9" class="muted">No outputs</td></tr>'}
       </table></div>
       {_pager(int(a.get("page") or 1), int(a.get("total_pages") or 1), base=f"/address/{addr}", chain_links=False) if int(a.get("total_pages") or 1) > 1 else ""}
     </div>
@@ -3592,6 +3861,16 @@ def _render_address(a: dict[str, Any]) -> bytes:
 
 
 def _render_richlist(data: dict[str, Any]) -> bytes:
+    def _when(date_s, age_s, height, title_utc):
+        if not date_s and height is None:
+            return '<span class="muted">—</span>'
+        tip = ""
+        if title_utc:
+            tip = f' title="{_esc(title_utc)}"'
+        h = f' · #{_esc(height)}' if height is not None else ""
+        age = f' <span class="muted">{_esc(age_s)}</span>' if age_s else ""
+        return f'<span{tip}>{_esc(date_s or "—")}{h}</span>{age}'
+
     rows = []
     for r in data.get("addresses") or []:
         addr = r.get("address")
@@ -3601,31 +3880,56 @@ def _render_richlist(data: dict[str, Any]) -> bytes:
             f'<td>{_copyable(addr, href="/address/" + str(addr), short=False)}</td>'
             f'<td class="num"><span class="row-ico">{_mint_mark(title="Balance")}'
             f'<strong class="reward">{_esc(r.get("balance_mhc"))}</strong></span></td>'
-            f'<td class="num">{_esc(r.get("utxo_count"))}</td>'
             f'<td class="num">{_esc(r.get("share_pct"))}%</td>'
+            f'<td class="num">{_esc(r.get("utxo_count"))}</td>'
+            f'<td class="num">{_esc(r.get("tx_count") if r.get("tx_count") else "—")}</td>'
+            f'<td>{_when(r.get("first_seen_date"), r.get("first_seen_age"), r.get("first_height"), r.get("first_seen_utc"))}</td>'
+            f'<td>{_when(r.get("last_active_date"), r.get("last_active_age"), r.get("last_height"), r.get("last_active_utc"))}</td>'
             "</tr>"
         )
+    page = int(data.get("page") or 1)
+    total_pages = int(data.get("total_pages") or 1)
+    pager = _pager(
+        page,
+        total_pages,
+        base="/richlist",
+        chain_links=False,
+        prev_label="← prev",
+        next_label="next →",
+    )
     body = f"""
     <div class="shell">
       <div class="card">
         <div class="card-head">
           <h1>Rich list</h1>
-          <span class="muted">top {_esc(data.get("limit"))} by UTXO balance · {_esc(data.get("source"))}</span>
+          <span class="muted">{_esc(data.get("total_addresses") or 0)} addresses ·
+            {_esc(data.get("per_page") or 100)} / page · {_esc(data.get("source"))}</span>
         </div>
         <p class="muted" style="margin:0 0 .75rem;font-size:.85rem">
           Circulating in UTXO set:
           <span class="row-ico">{_mint_mark(title="Supply")}
           <strong class="reward">{_esc(data.get("total_supply_mhc"))} MHC</strong></span>
           · {_esc(data.get("total_utxos"))} UTXOs
+          · ranks addresses (not entities), same idea as Bitcoin rich lists
         </p>
+        <p class="muted" style="margin:0 0 .75rem;font-size:.8rem">
+          First seen = first on-chain receive · Last activity = last receive or spend ·
+          Share = % of UTXO supply
+        </p>
+        {pager}
         <div class="table-wrap"><table class="data-table">
-          <tr><th class="num">#</th><th>Address</th><th class="num">Balance</th><th class="num">UTXOs</th><th class="num">Share</th></tr>
-          {"".join(rows) or '<tr><td colspan="5" class="muted">No balances</td></tr>'}
+          <tr>
+            <th class="num">#</th><th>Address</th><th class="num">Balance</th>
+            <th class="num">Share</th><th class="num">UTXOs</th><th class="num">Txs</th>
+            <th>First seen</th><th>Last activity</th>
+          </tr>
+          {"".join(rows) or '<tr><td colspan="8" class="muted">No balances</td></tr>'}
         </table></div>
+        {pager}
       </div>
     </div>
     """
-    return _page("Rich list", body)
+    return _page("Rich list", body, tip=data.get("tip_height"))
 
 
 def _render_stats(data: dict[str, Any]) -> bytes:
@@ -3689,39 +3993,149 @@ def _render_stats(data: dict[str, Any]) -> bytes:
 def _render_charts(data: dict[str, Any]) -> bytes:
     charts = data.get("charts") or {}
     halv = data.get("halving") or {}
+    orphans = data.get("orphans") or {}
+    mem = data.get("mempool") or {}
+    supply = data.get("supply") or {}
+    window = int(data.get("window") or charts.get("window") or 30)
+    windows = data.get("windows") or list(D.CHART_WINDOWS)
     avg = data.get("avg_block_interval_seconds")
     avg_s = _fmt_interval(avg) if avg is not None else "—"
-    spark_iv = _sparkline(charts.get("intervals") or [], width=320, height=72)
-    spark_hr = _sparkline(charts.get("hashrate_hps") or [], width=320, height=72, stroke="#16a34a")
+
+    def _win_links() -> str:
+        parts = []
+        for w in windows:
+            on = " class=\"on\"" if int(w) == window else ""
+            parts.append(f'<a href="/charts?window={int(w)}"{on}>{int(w)}</a>')
+        return '<div class="chart-wins">Window: ' + " · ".join(parts) + "</div>"
+
+    spark_iv = _sparkline(charts.get("intervals") or [], width=360, height=72)
+    spark_hr = _dual_sparkline(
+        charts.get("observed_hps") or charts.get("hashrate_hps") or [],
+        charts.get("implied_hps") or [],
+        width=420,
+        height=78,
+        stroke_a="#16a34a",
+        stroke_b="#0ea5e9",
+    )
+    spark_diff = _sparkline(charts.get("difficulty") or [], width=360, height=72, stroke="#a21caf")
+    spark_size = _sparkline(charts.get("size_bytes") or [], width=360, height=72, stroke="#0891b2")
+    spark_tx = _dual_sparkline(
+        charts.get("tx_counts") or [],
+        charts.get("transfer_counts") or [],
+        width=360,
+        height=72,
+        stroke_a="#0f766e",
+        stroke_b="#f59e0b",
+    )
+    spark_fee = _sparkline(charts.get("fee_rate") or [], width=360, height=72, stroke="#dc2626")
+    spark_mint = _sparkline(charts.get("minted_cum_mhc") or [], width=360, height=72, stroke="#16a34a")
+    spark_mem = _sparkline(mem.get("counts") or [], width=360, height=72, stroke="#6366f1")
+
+    tip_diff = data.get("tip_difficulty")
+    tip_diff_s = f"{tip_diff:,.4f}" if isinstance(tip_diff, (int, float)) else _esc(tip_diff or "—")
+    mem_cur = mem.get("current") or {}
     body = f"""
     <div class="shell">
+      <div class="card" style="margin-bottom:.85rem">
+        <div class="card-head">
+          <h1>Charts</h1>
+          <span class="muted">tip #{_esc(data.get("tip_height"))} · last {_esc(window)} blocks</span>
+        </div>
+        {_win_links()}
+        <p class="muted" style="margin:.55rem 0 0;font-size:.82rem">
+          Solid = primary series · dashed = secondary ·
+          <a href="/api/charts?window={window}">JSON</a>
+        </p>
+      </div>
       <div class="meta-row">
         <section class="card mini-stat">
-          <div class="card-head"><h1>Block intervals</h1><span class="muted">last { _esc(charts.get("window") or 30) }</span></div>
+          <div class="card-head"><h1>Block intervals</h1><span class="muted">seconds</span></div>
           {spark_iv}
           <p class="muted" style="margin:.5rem 0 0">avg {_esc(avg_s)} · target {_esc(data.get("target_block_time_seconds") or 600)}s</p>
         </section>
         <section class="card mini-stat">
-          <div class="card-head"><h1>Observed hashrate</h1><span class="muted">per block</span></div>
+          <div class="card-head"><h1>Hashrate</h1><span class="muted">observed · implied</span></div>
           {spark_hr}
           <p class="muted" style="margin:.5rem 0 0">
-            recent {_esc(data.get("network_hashrate_short") or "—")} ·
-            window {_esc(data.get("network_hashrate_window") or "—")}
+            <span style="color:#16a34a">●</span> observed {_esc(data.get("network_hashrate_short") or data.get("network_hashrate_window") or "—")}
+            · <span style="color:#0ea5e9">●</span> implied {_esc(data.get("network_hashrate") or "—")}
           </p>
         </section>
         <section class="card mini-stat">
-          <div class="card-head"><h1>Implied hashrate</h1><span class="muted">@ tip bits</span></div>
-          <div class="val">{_esc(data.get("network_hashrate") or "—")}</div>
-          <p class="muted" style="margin:.5rem 0 0">10m target spacing</p>
+          <div class="card-head"><h1>Difficulty</h1><span class="muted">per block · tip {tip_diff_s}</span></div>
+          {spark_diff}
+          <p class="muted" style="margin:.5rem 0 0">relative to genesis work</p>
         </section>
         <section class="card mini-stat">
-          <div class="card-head"><h1>Halving</h1><span class="muted">era {_esc(halv.get("era"))}</span></div>
-          <div class="val">{_esc(halv.get("blocks_to_halving"))} blocks</div>
-          <p class="muted" style="margin:.5rem 0 0">next #{_esc(halv.get("next_halving_height"))}</p>
+          <div class="card-head"><h1>Block size</h1><span class="muted">bytes</span></div>
+          {spark_size}
+          <p class="muted" style="margin:.5rem 0 0">weight = size × 4 (no SegWit)</p>
+        </section>
+        <section class="card mini-stat">
+          <div class="card-head"><h1>Tx / block</h1><span class="muted">all · transfers</span></div>
+          {spark_tx}
+          <p class="muted" style="margin:.5rem 0 0">
+            <span style="color:#0f766e">●</span> all txs ·
+            <span style="color:#f59e0b">●</span> transfers (non-coinbase)
+          </p>
+        </section>
+        <section class="card mini-stat">
+          <div class="card-head"><h1>Fee rate</h1><span class="muted">avg sat/byte</span></div>
+          {spark_fee}
+          <p class="muted" style="margin:.5rem 0 0">from coinbase − subsidy · transfer bytes</p>
+        </section>
+        <section class="card mini-stat">
+          <div class="card-head"><h1>Minted supply</h1><span class="muted">cumulative MHC</span></div>
+          {spark_mint}
+          <p class="muted" style="margin:.5rem 0 0">
+            now {_esc(supply.get("minted_mhc") or "—")} MHC
+            ({_esc(supply.get("minted_pct") or "—")}% of {_esc(supply.get("max_supply_mhc") or "—")})
+          </p>
+        </section>
+        <section class="card mini-stat">
+          <div class="card-head"><h1>Halving ETA</h1><span class="muted">era {_esc(halv.get("era"))}</span></div>
+          <div class="val">{_esc(halv.get("next_halving_eta") or "—")}</div>
+          <p class="muted" style="margin:.5rem 0 0">
+            {_esc(halv.get("blocks_to_halving"))} blocks → #{_esc(halv.get("next_halving_height"))}
+            · {_esc(halv.get("eta_basis") or "target spacing")}
+          </p>
+        </section>
+        <section class="card mini-stat">
+          <div class="card-head"><h1>Mempool depth</h1><span class="muted">samples over time</span></div>
+          {spark_mem}
+          <p class="muted" style="margin:.5rem 0 0">
+            now {_esc(mem_cur.get("count") or 0)} txs · fees {_esc(mem_cur.get("fees_mhc") or "0")} MHC
+            · {_esc(len(mem.get("samples") or []))} samples
+          </p>
+        </section>
+        <section class="card mini-stat">
+          <div class="card-head"><h1>Orphan / reorg</h1><span class="muted">side-chain in window</span></div>
+          <div class="val">{_esc(orphans.get("rate_pct") or 0)}%</div>
+          <p class="muted" style="margin:.5rem 0 0">
+            {_esc(orphans.get("side_blocks") or 0)} side / {_esc(orphans.get("best_blocks") or 0)} best
+            · fork tips {_esc(orphans.get("fork_tips") or 0)}
+            · <a href="/orphans">details</a>
+          </p>
         </section>
       </div>
-      <p class="muted" style="font-size:.85rem"><a href="/api/charts">JSON</a> · heights in series: {len(charts.get("heights") or [])}</p>
     </div>
+    <style>
+      .chart-wins {{ font-size: .88rem; }}
+      .chart-wins a {{
+        display: inline-block; padding: .15rem .55rem; margin-right: .25rem;
+        border-radius: 999px; border: 1px solid var(--line); color: var(--muted);
+        text-decoration: none; font-weight: 650;
+      }}
+      .chart-wins a:hover {{ color: var(--text); border-color: #9ca3af; }}
+      .chart-wins a.on {{
+        color: var(--bg); background: var(--text); border-color: var(--text);
+      }}
+      .meta-row {{
+        display: grid; gap: .85rem;
+        grid-template-columns: repeat(auto-fit, minmax(min(280px, 100%), 1fr));
+      }}
+      .mini-stat .val {{ font-size: 1.45rem; font-weight: 750; }}
+    </style>
     """
     return _page("Charts", body, tip=data.get("tip_height"))
 
@@ -3731,7 +4145,7 @@ def _mempool_row_html(tx: dict[str, Any]) -> str:
     fr = tx.get("from")
     to = tx.get("to")
     fr_html = _copyable(fr, href=f"/address/{fr}") if fr else '<span class="muted">—</span>'
-    to_html = _copyable(to, href=f"/address/{to}") if to else '<span class="muted">—</span>'
+    to_html = _to_with_change_html(to, tx.get("change"), tx.get("change_mhc"))
     rbf = tx.get("rbf")
     rbf_html = (
         '<span class="pill xfer">RBF</span>'
@@ -4039,6 +4453,9 @@ def make_handler(app: ExplorerApp):
                 self.send_header("Content-Encoding", encoding)
                 self.send_header("Vary", "Accept-Encoding")
             self.send_header("Cache-Control", "no-store")
+            # Allow LAN landing / other origins to read public JSON APIs.
+            if content_type.startswith("application/json"):
+                self.send_header("Access-Control-Allow-Origin", "*")
             self._security_headers()
             self.end_headers()
             if self.command != "HEAD":
@@ -4241,11 +4658,20 @@ def make_handler(app: ExplorerApp):
                     return
 
                 if key in ("/richlist", "/richlist/"):
-                    limit = 100
+                    page = 1
+                    per_page = D.RICHLIST_PER_PAGE
                     try:
-                        limit = int((qs.get("limit") or ["100"])[0])
+                        page = int((qs.get("page") or ["1"])[0])
                     except ValueError:
-                        limit = 100
+                        page = 1
+                    try:
+                        # Prefer page size; keep legacy ?limit= as alias.
+                        if qs.get("per_page"):
+                            per_page = int((qs.get("per_page") or ["100"])[0])
+                        elif qs.get("limit"):
+                            per_page = int((qs.get("limit") or ["100"])[0])
+                    except ValueError:
+                        per_page = D.RICHLIST_PER_PAGE
                     if want_json and not app.allow_request(
                         self._client(), bucket="api-home", limit=_RATE_LIMIT_API_HOME
                     ):
@@ -4255,7 +4681,7 @@ def make_handler(app: ExplorerApp):
                             want_json=True,
                         )
                         return
-                    data = app.richlist(limit=limit)
+                    data = app.richlist(page=page, per_page=per_page)
                     if want_json:
                         self._json(200, data)
                     else:
@@ -4289,7 +4715,12 @@ def make_handler(app: ExplorerApp):
                             want_json=True,
                         )
                         return
-                    data = app.charts()
+                    win = 30
+                    try:
+                        win = int((qs.get("window") or ["30"])[0])
+                    except ValueError:
+                        win = 30
+                    data = app.charts(window=win)
                     if want_json:
                         self._json(200, data)
                     else:

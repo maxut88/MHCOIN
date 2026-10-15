@@ -52,25 +52,96 @@ def tx_signals_rbf(tx: Transaction) -> bool | None:
     )
 
 
-def payment_amount_sats(tx: Transaction, *, from_addr: str | None, hrp: str = DEFAULT_HRP) -> int:
-    """Value sent to others (excludes change back to from_addr).
+def _pay_change_indices(
+    tx: Transaction, *, from_addr: str | None, hrp: str = DEFAULT_HRP
+) -> tuple[int, int | None]:
+    """Return ``(payment_vout, change_vout|None)`` for a non-coinbase tx.
 
-    For coinbase: full output value. For a normal send with change: payment only
-    (e.g. 1 MHC), not input/output totals (~50 MHC).
+    Two common 2-output layouts on MHCOIN:
+
+    - **Wallet** ``build_account_send_tx``: vout0 = payment, vout1 = change.
+    - **Pool / many consolidations**: vout0 = change back to funder, vout1 = payment.
+
+    Detect pool-style when vout0 goes to ``from_addr`` and is ≥ vout1 (change is
+    the leftover). Wallet self-pay (payment to self, larger HD change on vout1)
+    keeps vout0 as payment when vout0 < vout1.
     """
+    n = len(tx.outputs)
+    if n == 0:
+        return 0, None
+    if n == 1:
+        return 0, None
+    if n != 2:
+        # Multi-out: treat first external out as payment; no single change field.
+        if from_addr and from_addr != "coinbase":
+            for i, tout in enumerate(tx.outputs):
+                addr = out_address(tout, hrp=hrp)
+                if addr and addr != from_addr:
+                    return i, None
+        return 0, None
+    a0 = out_address(tx.outputs[0], hrp=hrp)
+    a1 = out_address(tx.outputs[1], hrp=hrp)
+    v0 = int(tx.outputs[0].value)
+    v1 = int(tx.outputs[1].value)
+    if from_addr and from_addr != "coinbase" and a0 == from_addr and a1 and a1 != from_addr:
+        if v0 >= v1:
+            return 1, 0  # pool-style: big change first
+        return 0, 1  # wallet self-pay: payment to self, change on vout1
+    if from_addr and from_addr != "coinbase" and a1 == from_addr and a0 and a0 != from_addr:
+        return 0, 1  # classic: payment out, change home
+    # Fresh HD change on vout1 (wallet external send) or ambiguous → wallet order.
+    return 0, 1
+
+
+def payment_amount_sats(tx: Transaction, *, from_addr: str | None, hrp: str = DEFAULT_HRP) -> int:
+    """Declared payment value (not fee, not change leftover)."""
     if tx.is_coinbase():
         return int(tx.output_value())
     if not tx.outputs:
         return 0
     if not from_addr or from_addr == "coinbase":
         return int(tx.output_value())
-    paid = 0
+    pay_i, _chg_i = _pay_change_indices(tx, from_addr=from_addr, hrp=hrp)
+    if 0 <= pay_i < len(tx.outputs):
+        # For 2-out classified txs, payment is a single vout.
+        if len(tx.outputs) == 2:
+            return int(tx.outputs[pay_i].value)
+    self_sats = 0
+    other_sats = 0
     for tout in tx.outputs:
         addr = out_address(tout, hrp=hrp)
-        if addr and addr != from_addr:
-            paid += int(tout.value)
-    # Self-send / consolidation: no external output — show full output value.
-    return paid if paid > 0 else int(tx.output_value())
+        if addr == from_addr:
+            self_sats += int(tout.value)
+        elif addr:
+            other_sats += int(tout.value)
+    if other_sats == 0:
+        return self_sats if self_sats > 0 else int(tx.output_value())
+    return other_sats
+
+
+def change_output(
+    tx: Transaction, *, from_addr: str | None = None, hrp: str = DEFAULT_HRP
+) -> tuple[str | None, int | None]:
+    """Change leftover address/value when a 2-output send has a change vout."""
+    if tx.is_coinbase() or len(tx.outputs) != 2:
+        return None, None
+    _pay_i, chg_i = _pay_change_indices(tx, from_addr=from_addr, hrp=hrp)
+    if chg_i is None:
+        return None, None
+    addr = out_address(tx.outputs[chg_i], hrp=hrp)
+    if not addr:
+        return None, None
+    return addr, int(tx.outputs[chg_i].value)
+
+
+def change_fields(
+    tx: Transaction, *, from_addr: str | None = None, hrp: str = DEFAULT_HRP
+) -> dict[str, Any]:
+    """Compact list fields for change (empty when no change output)."""
+    addr, sats = change_output(tx, from_addr=from_addr, hrp=hrp)
+    if not addr or sats is None:
+        return {"change": None, "change_mhc": None}
+    return {"change": addr, "change_mhc": format_mhc(sats)}
 
 
 def format_hps(hps: float | None) -> str | None:
@@ -304,6 +375,7 @@ def load_mempool(
                 "input_count": len(tx.inputs),
                 "from": None,
                 "to": to_addr,
+                **change_fields(tx, hrp=hrp),
                 "fee_sats": None,
                 "fee_mhc": None,
                 "fee_per_byte": None,
@@ -344,6 +416,8 @@ def load_mempool(
                     ),
                     None,
                 ),
+                "change": row.get("change"),
+                "change_mhc": row.get("change_mhc"),
                 "coinbase": bool(row.get("coinbase")),
                 "rbf": row.get("rbf"),
                 "unconfirmed": True,
@@ -388,34 +462,256 @@ def top_miners(
     return rows[:20]
 
 
+CHART_WINDOWS = (30, 100, 1000)
+
+
 def chart_series(
-    chain: ReadOnlyChain, *, window: int = 30, tip: int | None = None
+    chain: ReadOnlyChain,
+    *,
+    window: int = 30,
+    tip: int | None = None,
+    genesis_bits: int | None = None,
 ) -> dict[str, Any]:
+    """Block metrics for the Charts page (aligned series by height).
+
+    Window is number of tip-relative blocks to scan (30 / 100 / 1000).
+    """
     tip = chain.height if tip is None else tip
-    intervals: list[int] = []
-    hashrates: list[float] = []
+    try:
+        window = int(window)
+    except (TypeError, ValueError):
+        window = 30
+    # Snap to nearest allowed window.
+    window = min(CHART_WINDOWS, key=lambda w: abs(w - window))
+    if genesis_bits is None and tip >= 0:
+        gen = chain.get_block_by_height(0)
+        genesis_bits = int(gen.header.bits) if gen else None
+
     heights: list[int] = []
+    intervals: list[int | None] = []
+    observed_hps: list[float | None] = []
+    implied_hps: list[float] = []
+    difficulty: list[float] = []
+    size_bytes: list[int] = []
+    weight: list[int] = []
+    tx_counts: list[int] = []
+    transfer_counts: list[int] = []
+    fee_rate: list[float | None] = []  # sat/vB (= sat/byte, no SegWit)
+    minted_cum_mhc: list[float] = []
+
     prev_ts: int | None = None
-    start = max(0, tip - window)
+    # Cumulative minted from genesis through tip (subsidy schedule — fast).
+    # For the chart we only need values in the window; seed from start-1.
+    start = max(0, tip - window + 1) if tip >= 0 else 0
+    minted_before = 0
+    for h in range(0, start):
+        minted_before += int(get_block_subsidy(h))
+    minted = minted_before
+
     for h in range(start, tip + 1):
         b = chain.get_block_by_height(h)
         if b is None:
             continue
         ts = int(b.header.timestamp)
-        w = work_for_bits(int(b.header.bits))
+        bits = int(b.header.bits)
+        w = work_for_bits(bits)
+        diff = difficulty_from_bits(bits, genesis_bits=genesis_bits)
+        try:
+            raw_sz = len(b.serialize())
+        except Exception:
+            raw_sz = sum(len(tx.serialize()) for tx in b.transactions)
+        n_tx = len(b.transactions)
+        n_xfer = sum(1 for tx in b.transactions if not tx.is_coinbase())
+        # Fees = coinbase value − subsidy (miner claims fees).
+        subsidy = int(get_block_subsidy(h))
+        minted += subsidy
+        cb_val = 0
+        if b.transactions and b.transactions[0].is_coinbase():
+            cb_val = int(b.transactions[0].output_value())
+        fees = max(0, cb_val - subsidy)
+        xfer_size = 0
+        for tx in b.transactions:
+            if tx.is_coinbase():
+                continue
+            xfer_size += len(tx.serialize())
+        fr: float | None = (fees / xfer_size) if xfer_size > 0 else None
+
+        dt: int | None = None
+        obs: float | None = None
         if prev_ts is not None and h > 0:
-            dt = ts - prev_ts
-            if 0 < dt < 86_400:
-                intervals.append(dt)
-                hashrates.append(w / float(dt))
-                heights.append(h)
+            cand = ts - prev_ts
+            if 0 < cand < 86_400:
+                dt = cand
+                obs = w / float(dt)
         prev_ts = ts
+
+        heights.append(h)
+        intervals.append(dt)
+        observed_hps.append(obs)
+        implied_hps.append(w / float(TARGET_BLOCK_TIME_SECONDS))
+        difficulty.append(float(diff.get("difficulty") or 0))
+        size_bytes.append(int(raw_sz))
+        weight.append(int(raw_sz) * 4)
+        tx_counts.append(n_tx)
+        transfer_counts.append(n_xfer)
+        fee_rate.append(round(fr, 4) if fr is not None else None)
+        minted_cum_mhc.append(minted / float(SATOSHI_PER_COIN))
+
+    # Compact series used by home sparklines (drop None intervals).
+    home_heights: list[int] = []
+    home_intervals: list[int] = []
+    home_hps: list[float] = []
+    for i, h in enumerate(heights):
+        if intervals[i] is not None and observed_hps[i] is not None:
+            home_heights.append(h)
+            home_intervals.append(int(intervals[i] or 0))
+            home_hps.append(float(observed_hps[i] or 0))
+
     return {
         "heights": heights,
         "intervals": intervals,
-        "hashrate_hps": hashrates,
+        "hashrate_hps": home_hps,  # back-compat for home sparkline
+        "observed_hps": observed_hps,
+        "implied_hps": implied_hps,
+        "difficulty": difficulty,
+        "size_bytes": size_bytes,
+        "weight": weight,
+        "tx_counts": tx_counts,
+        "transfer_counts": transfer_counts,
+        "fee_rate": fee_rate,
+        "minted_cum_mhc": minted_cum_mhc,
         "window": window,
+        "windows": list(CHART_WINDOWS),
+        # Home-compatible compact series (no None gaps).
+        "home_heights": home_heights,
+        "home_intervals": home_intervals,
     }
+
+
+def orphan_rate(
+    chain: ReadOnlyChain, *, window: int = 100, tip: int | None = None
+) -> dict[str, Any]:
+    """Side-chain (reorg) rate over the last ``window`` best-chain heights."""
+    tip = chain.height if tip is None else tip
+    window = max(1, int(window))
+    start = max(0, tip - window + 1)
+    try:
+        entries = chain.get_side_chain_entries(limit=max(500, window * 3))
+    except Exception:
+        entries = []
+    in_window = [e for e in entries if start <= int(e.get("height") or -1) <= tip]
+    side_n = len(in_window)
+    best_n = max(0, tip - start + 1)
+    rate_pct = round(100.0 * side_n / best_n, 3) if best_n else 0.0
+    return {
+        "window": window,
+        "start_height": start,
+        "tip_height": tip,
+        "best_blocks": best_n,
+        "side_blocks": side_n,
+        "rate_pct": rate_pct,
+        "fork_tips": sum(
+            1
+            for e in in_window
+            if e.get("hash")
+            not in {x.get("prev_hash") for x in in_window}
+        ),
+    }
+
+
+_MEMPOOL_SAMPLE_MAX = 120
+_MEMPOOL_SAMPLE_MIN_GAP_SEC = 20
+
+
+def mempool_snapshot(data_dir) -> dict[str, Any]:
+    """Current mempool depth: tx count + fee sum (MHC)."""
+    from pathlib import Path
+
+    path = Path(data_dir) / "mempool.json"
+    if not path.is_file():
+        return {"count": 0, "fees_sats": 0, "fees_mhc": format_mhc(0), "path": str(path)}
+    try:
+        raw = path.read_text(encoding="utf-8")
+        data = __import__("json").loads(raw)
+    except Exception:
+        return {"count": 0, "fees_sats": 0, "fees_mhc": format_mhc(0), "path": str(path)}
+    items = data.get("transactions") or data.get("txs") or data
+    if isinstance(items, dict):
+        items = list(items.items())
+    elif isinstance(items, list):
+        items = [(None, x) for x in items]
+    else:
+        items = []
+    fees = 0
+    for key, val in items:
+        tx = _mempool_parse_tx(key, val)
+        if tx is None or tx.is_coinbase():
+            continue
+        # Without chain we cannot resolve inputs — use declared fee fields if present.
+        if isinstance(val, dict):
+            for k in ("fee_sats", "fee"):
+                if val.get(k) is not None:
+                    try:
+                        fees += int(float(val[k]) * (1 if k == "fee_sats" else SATOSHI_PER_COIN))
+                        break
+                    except (TypeError, ValueError):
+                        pass
+    return {
+        "count": len(items),
+        "fees_sats": fees,
+        "fees_mhc": format_mhc(fees),
+        "path": str(path),
+        "ts": int(time.time()),
+    }
+
+
+def load_mempool_samples(data_dir, *, limit: int = _MEMPOOL_SAMPLE_MAX) -> list[dict[str, Any]]:
+    """Ring-buffer samples persisted by the explorer process."""
+    import json
+    from pathlib import Path
+
+    path = Path(data_dir) / "explorer_mempool_samples.json"
+    if not path.is_file():
+        return []
+    try:
+        rows = json.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+        return []
+    if not isinstance(rows, list):
+        return []
+    return rows[-max(1, int(limit)) :]
+
+
+def record_mempool_sample(data_dir) -> list[dict[str, Any]]:
+    """Append a mempool depth sample (throttled) and return the series."""
+    import json
+    from pathlib import Path
+
+    path = Path(data_dir) / "explorer_mempool_samples.json"
+    snap = mempool_snapshot(data_dir)
+    rows = load_mempool_samples(data_dir)
+    now = int(snap.get("ts") or time.time())
+    if rows:
+        try:
+            last_ts = int(rows[-1].get("ts") or 0)
+        except (TypeError, ValueError):
+            last_ts = 0
+        if now - last_ts < _MEMPOOL_SAMPLE_MIN_GAP_SEC:
+            return rows
+    rows.append(
+        {
+            "ts": now,
+            "count": int(snap.get("count") or 0),
+            "fees_sats": int(snap.get("fees_sats") or 0),
+            "fees_mhc": snap.get("fees_mhc"),
+        }
+    )
+    rows = rows[-_MEMPOOL_SAMPLE_MAX:]
+    try:
+        path.write_text(json.dumps(rows), encoding="utf-8")
+    except Exception:
+        pass
+    return rows
 
 
 def estimate_network_hashrate(
@@ -636,6 +932,7 @@ def summarize_block(
                     "fee_per_byte": fee_per_byte,
                     "from": from_a,
                     "to": to_a,
+                    **change_fields(tx, from_addr=from_a, hrp=hrp),
                 }
             )
 
@@ -779,15 +1076,19 @@ def _transfer_endpoints(
     if non_cb_inputs > 0 and resolved == non_cb_inputs and in_sum >= out_v:
         fee_sats = in_sum - out_v
 
+    # Payment destination (not change) — see _pay_change_indices.
     to_addr: str | None = None
     if tx.outputs:
-        for tout in tx.outputs:
-            cand = out_address(tout, hrp=hrp)
-            if cand and cand != from_addr:
-                to_addr = cand
-                break
+        pay_i, _chg_i = _pay_change_indices(tx, from_addr=from_addr, hrp=hrp)
+        to_addr = out_address(tx.outputs[pay_i], hrp=hrp)
         if to_addr is None:
-            to_addr = out_address(tx.outputs[0], hrp=hrp)
+            for tout in tx.outputs:
+                cand = out_address(tout, hrp=hrp)
+                if cand and cand != from_addr:
+                    to_addr = cand
+                    break
+            if to_addr is None:
+                to_addr = out_address(tx.outputs[0], hrp=hrp)
 
     return from_addr, to_addr, fee_sats, (in_sum if resolved else None)
 
@@ -864,6 +1165,12 @@ def summarize_tx(
                 from_addr = entry["address"]
                 break
     pay_sats = payment_amount_sats(tx, from_addr=from_addr, hrp=hrp)
+    to_addr: str | None = None
+    if coinbase:
+        to_addr = out_address(tx.outputs[0], hrp=hrp) if tx.outputs else None
+    elif tx.outputs:
+        pay_i, _chg_i = _pay_change_indices(tx, from_addr=from_addr, hrp=hrp)
+        to_addr = out_address(tx.outputs[pay_i], hrp=hrp)
 
     conf = confirmations(tip, block_height)
     return {
@@ -904,6 +1211,9 @@ def summarize_tx(
         **tx_size_metrics(size),
         "rbf": tx_signals_rbf(tx),
         "fiat": None,
+        "from": from_addr if not coinbase else "coinbase",
+        "to": to_addr,
+        **change_fields(tx, from_addr=from_addr, hrp=hrp),
     }
 
 
@@ -1032,6 +1342,11 @@ def address_history(
     now = int(time.time())
     # Balance after each block that touches this address (sparkline).
     balance_series: list[int] = []
+    first_ts: int | None = None
+    last_ts: int | None = None
+    first_height: int | None = None
+    last_height: int | None = None
+    touched_txids: set[str] = set()
     for h in range(0, tip + 1):
         block = chain.get_block_by_height(h)
         if block is None:
@@ -1042,27 +1357,39 @@ def address_history(
         for tx in block.transactions:
             txh = txid_hex(tx)
             spent_here = 0
+            tx_touched = False
             if not tx.is_coinbase():
                 for tin in tx.inputs:
                     key = (tin.prev_txid.hex(), int(tin.prev_vout))
                     if key in owned:
                         spent_here += owned.pop(key)
                         touched = True
+                        tx_touched = True
                 if spent_here:
                     total_spent_inputs += spent_here
-                    paid_ext = 0
+                    self_out = 0
                     out_sum = 0
                     for tout in tx.outputs:
-                        out_sum += int(tout.value)
+                        val = int(tout.value)
+                        out_sum += val
                         try:
-                            if tout.pubkey_hash() != pkh:
-                                paid_ext += int(tout.value)
+                            if tout.pubkey_hash() == pkh:
+                                self_out += val
                         except Exception:
-                            paid_ext += int(tout.value)
-                    total_paid_external += paid_ext
-                    # Fee only when this address funded the whole tx (typical wallet send).
-                    if spent_here >= out_sum:
-                        total_fees_paid += max(0, spent_here - out_sum)
+                            pass
+                    # Attribute ONLY what left THIS address (not sibling inputs).
+                    # Sole funder → fee = spent_here − out_sum; multi-input → fee 0 here.
+                    fee_here = (
+                        max(0, spent_here - out_sum) if spent_here >= out_sum else 0
+                    )
+                    sent_here = max(0, spent_here - self_out - fee_here)
+                    total_paid_external += sent_here
+                    total_fees_paid += fee_here
+                    # Sibling co-inputs can inflate our change above what we spent.
+                    # That surplus entered this address and must count as Received so
+                    # Balance = Received − Sent − Fees still holds.
+                    if self_out > spent_here:
+                        total_in += self_out - spent_here
             for n, tout in enumerate(tx.outputs):
                 try:
                     if tout.pubkey_hash() != pkh:
@@ -1070,12 +1397,13 @@ def address_history(
                 except Exception:
                     continue
                 val = int(tout.value)
-                # Change back to self is not "Received" — keeps Balance ≈ Received − Sent.
+                # Change back to self is not "Received" — keeps Balance = Received − Sent − Fees.
                 is_change = bool(spent_here) and not tx.is_coinbase()
                 if not is_change:
                     total_in += val
                 owned[(txh, n)] = val
                 touched = True
+                tx_touched = True
                 received.append(
                     {
                         "height": h,
@@ -1092,6 +1420,14 @@ def address_history(
                         "confirmations": confirmations(tip, h),
                     }
                 )
+            if tx_touched:
+                touched_txids.add(txh)
+                if first_ts is None or ts < first_ts:
+                    first_ts = ts
+                    first_height = h
+                if last_ts is None or ts > last_ts:
+                    last_ts = ts
+                    last_height = h
         if touched:
             balance_series.append(sum(owned.values()))
     balance = sum(owned.values())
@@ -1116,9 +1452,18 @@ def address_history(
     return {
         "address": address,
         "received_count": total,
+        "tx_count": len(touched_txids),
+        "first_seen_ts": first_ts,
+        "first_seen_utc": format_utc(first_ts),
+        "first_seen_age": format_age(first_ts, now=now),
+        "first_height": first_height,
+        "last_active_ts": last_ts,
+        "last_active_utc": format_utc(last_ts),
+        "last_active_age": format_age(last_ts, now=now),
+        "last_height": last_height,
         "total_received_sats": total_in,
         "total_received_mhc": format_mhc(total_in),
-        # Sent = paid to others only (e.g. 1.00000000). Fee is separate.
+        # Sent = value that left this address to others (excludes change-to-self & fees).
         "total_sent_sats": total_paid_external,
         "total_sent_mhc": format_mhc(total_paid_external),
         "total_fees_sats": total_fees_paid,
@@ -1275,6 +1620,7 @@ def transactions_page(
                     "fee_mhc": format_mhc(fee_sats) if fee_sats is not None else None,
                     "from": from_addr,
                     "to": to_addr,
+                    **change_fields(tx, from_addr=from_addr, hrp=hrp),
                     "size_bytes": len(tx.serialize()),
                     "index_in_block": tx_i,
                 }
@@ -1346,6 +1692,7 @@ def recent_transactions(
                     "fee_mhc": format_mhc(fee_sats) if fee_sats is not None else None,
                     "from": from_addr,
                     "to": to_addr,
+                    **change_fields(tx, from_addr=from_addr, hrp=hrp),
                     "size_bytes": len(tx.serialize()),
                     "index_in_block": tx_i,
                 }
@@ -1377,14 +1724,107 @@ def qr_svg(data: str, *, border: int = 2) -> str:
     return "".join(parts)
 
 
+RICHLIST_PER_PAGE = 100
+RICHLIST_PER_PAGE_MAX = 100
+RICHLIST_ADDR_CAP = 50_000
+
+
+def _height_timestamps(data_dir) -> dict[int, int]:
+    """Best-effort height → unix timestamp from ``chain.sqlite`` block_index."""
+    import sqlite3
+    from pathlib import Path
+
+    path = Path(data_dir) / "chain.sqlite"
+    if not path.is_file():
+        return {}
+    try:
+        db = sqlite3.connect(f"file:{path}?mode=ro", uri=True)
+        try:
+            db.execute("PRAGMA query_only=ON")
+            # Prefer active/main-chain rows when status exists (1 = active in MHCOIN).
+            try:
+                rows = db.execute(
+                    "SELECT height, timestamp FROM block_index WHERE status = 1"
+                ).fetchall()
+            except Exception:
+                rows = db.execute(
+                    "SELECT height, MAX(timestamp) FROM block_index GROUP BY height"
+                ).fetchall()
+        finally:
+            db.close()
+    except Exception:
+        return {}
+    out: dict[int, int] = {}
+    for h, ts in rows or []:
+        try:
+            out[int(h)] = int(ts)
+        except (TypeError, ValueError):
+            continue
+    return out
+
+
+def _rich_list_activity(
+    chain: ReadOnlyChain, *, hrp: str = DEFAULT_HRP
+) -> dict[str, dict[str, int]]:
+    """Per-address first receive / last touch / tx count (Bitcoin-style rich list).
+
+    Scans the active chain once; fine for current mainnet size and cached in the
+    explorer process.
+    """
+    from collections import defaultdict
+
+    owned: dict[tuple[str, int], str] = {}
+    first_h: dict[str, int] = {}
+    last_h: dict[str, int] = {}
+    tx_counts: dict[str, int] = defaultdict(int)
+    tip = int(chain.height)
+    for h in range(0, tip + 1):
+        block = chain.get_block_by_height(h)
+        if block is None:
+            continue
+        for tx in block.transactions:
+            touched: set[str] = set()
+            if not tx.is_coinbase():
+                for tin in tx.inputs:
+                    prev = owned.pop((tin.prev_txid.hex(), int(tin.prev_vout)), None)
+                    if prev:
+                        touched.add(prev)
+            txh = txid_hex(tx)
+            for n, tout in enumerate(tx.outputs):
+                addr = out_address(tout, hrp=hrp)
+                if not addr:
+                    continue
+                owned[(txh, n)] = addr
+                touched.add(addr)
+            for addr in touched:
+                if addr not in first_h:
+                    first_h[addr] = h
+                last_h[addr] = h
+                tx_counts[addr] += 1
+    return {
+        addr: {
+            "first_height": first_h[addr],
+            "last_height": last_h[addr],
+            "tx_count": int(tx_counts[addr]),
+        }
+        for addr in first_h
+    }
+
+
 def _rich_list_chain_scan(
-    chain: ReadOnlyChain, *, hrp: str = DEFAULT_HRP, limit: int = 100
+    chain: ReadOnlyChain,
+    *,
+    hrp: str = DEFAULT_HRP,
+    page: int = 1,
+    per_page: int = RICHLIST_PER_PAGE,
+    height_ts: dict[int, int] | None = None,
 ) -> dict[str, Any]:
     """Rebuild UTXO balances by scanning the active chain (slow fallback)."""
     from collections import defaultdict
 
-    owned: dict[tuple[str, int], tuple[str, int]] = {}
+    owned: dict[tuple[str, int], tuple[str, int, int]] = {}
     tip = chain.height
+    activity = _rich_list_activity(chain, hrp=hrp)
     for h in range(0, tip + 1):
         block = chain.get_block_by_height(h)
         if block is None:
@@ -1397,29 +1837,70 @@ def _rich_list_chain_scan(
             for n, tout in enumerate(tx.outputs):
                 addr = out_address(tout, hrp=hrp)
                 if addr:
-                    owned[(txh, n)] = (addr, int(tout.value))
+                    owned[(txh, n)] = (addr, int(tout.value), int(h))
     balances: dict[str, int] = defaultdict(int)
     utxo_counts: dict[str, int] = defaultdict(int)
-    for addr, val in owned.values():
+    first_utxo_h: dict[str, int] = {}
+    last_utxo_h: dict[str, int] = {}
+    for addr, val, h in owned.values():
         balances[addr] += val
         utxo_counts[addr] += 1
-    return _rich_list_rows(balances, utxo_counts, limit=limit, source="chain_scan")
+        prev = first_utxo_h.get(addr)
+        if prev is None or h < prev:
+            first_utxo_h[addr] = h
+        prev_l = last_utxo_h.get(addr)
+        if prev_l is None or h > prev_l:
+            last_utxo_h[addr] = h
+    return _rich_list_rows(
+        balances,
+        utxo_counts,
+        source="chain_scan",
+        page=page,
+        per_page=per_page,
+        first_utxo_height=first_utxo_h,
+        last_utxo_height=last_utxo_h,
+        activity=activity,
+        height_ts=height_ts or {},
+        tip_height=int(tip),
+    )
 
 
 def _rich_list_rows(
     balances: dict[str, int],
     utxo_counts: dict[str, int],
     *,
-    limit: int,
     source: str,
+    page: int = 1,
+    per_page: int = RICHLIST_PER_PAGE,
+    first_utxo_height: dict[str, int] | None = None,
+    last_utxo_height: dict[str, int] | None = None,
+    activity: dict[str, dict[str, int]] | None = None,
+    height_ts: dict[int, int] | None = None,
+    tip_height: int | None = None,
 ) -> dict[str, Any]:
+    import math
+
     total_supply = sum(balances.values())
-    rows: list[dict[str, Any]] = []
-    for rank, (addr, sats) in enumerate(
-        sorted(balances.items(), key=lambda x: (-x[1], x[0]))[: max(1, int(limit))],
-        start=1,
-    ):
-        rows.append(
+    first_utxo_height = first_utxo_height or {}
+    last_utxo_height = last_utxo_height or {}
+    activity = activity or {}
+    height_ts = height_ts or {}
+    now = int(time.time())
+    ranked = sorted(balances.items(), key=lambda x: (-x[1], x[0]))
+    if len(ranked) > RICHLIST_ADDR_CAP:
+        ranked = ranked[:RICHLIST_ADDR_CAP]
+    all_rows: list[dict[str, Any]] = []
+    for rank, (addr, sats) in enumerate(ranked, start=1):
+        act = activity.get(addr) or {}
+        first_h = act.get("first_height")
+        if first_h is None:
+            first_h = first_utxo_height.get(addr)
+        last_h = act.get("last_height")
+        if last_h is None:
+            last_h = last_utxo_height.get(addr)
+        first_ts = height_ts.get(int(first_h)) if first_h is not None else None
+        last_ts = height_ts.get(int(last_h)) if last_h is not None else None
+        all_rows.append(
             {
                 "rank": rank,
                 "address": addr,
@@ -1427,21 +1908,85 @@ def _rich_list_rows(
                 "balance_mhc": format_mhc(sats),
                 "utxo_count": utxo_counts.get(addr, 0),
                 "share_pct": round(100.0 * sats / total_supply, 4) if total_supply else 0.0,
+                "tx_count": int(act.get("tx_count") or 0),
+                "first_height": first_h,
+                "first_seen_ts": first_ts,
+                "first_seen_utc": format_utc(first_ts),
+                "first_seen_date": (
+                    time.strftime("%Y-%m-%d", time.gmtime(int(first_ts)))
+                    if first_ts is not None
+                    else None
+                ),
+                "first_seen_age": format_age(first_ts, now=now),
+                "last_height": last_h,
+                "last_active_ts": last_ts,
+                "last_active_utc": format_utc(last_ts),
+                "last_active_date": (
+                    time.strftime("%Y-%m-%d", time.gmtime(int(last_ts)))
+                    if last_ts is not None
+                    else None
+                ),
+                "last_active_age": format_age(last_ts, now=now),
             }
         )
+    total_addresses = len(all_rows)
+    per_page = max(1, min(int(per_page or RICHLIST_PER_PAGE), RICHLIST_PER_PAGE_MAX))
+    total_pages = max(1, math.ceil(total_addresses / per_page) if total_addresses else 1)
+    page = max(1, min(int(page or 1), total_pages))
+    start = (page - 1) * per_page
+    page_rows = all_rows[start : start + per_page]
     return {
-        "addresses": rows,
-        "count": len(rows),
+        "addresses": page_rows,
+        "all_addresses": all_rows,  # explorer cache; stripped before JSON/HTML if needed
+        "count": len(page_rows),
+        "total_addresses": total_addresses,
         "total_utxos": sum(utxo_counts.values()),
         "total_supply_sats": total_supply,
         "total_supply_mhc": format_mhc(total_supply),
         "source": source,
-        "limit": limit,
+        "page": page,
+        "per_page": per_page,
+        "total_pages": total_pages,
+        "tip_height": tip_height,
+        "limit": per_page,
     }
 
 
+def _rich_list_paginate(full: dict[str, Any], *, page: int, per_page: int) -> dict[str, Any]:
+    """Slice a cached full rich-list payload for one page."""
+    import math
+
+    all_rows = full.get("all_addresses")
+    if not isinstance(all_rows, list):
+        all_rows = list(full.get("addresses") or [])
+    total_addresses = int(full.get("total_addresses") or len(all_rows))
+    per_page = max(1, min(int(per_page or RICHLIST_PER_PAGE), RICHLIST_PER_PAGE_MAX))
+    total_pages = max(1, math.ceil(total_addresses / per_page) if total_addresses else 1)
+    page = max(1, min(int(page or 1), total_pages))
+    start = (page - 1) * per_page
+    page_rows = all_rows[start : start + per_page]
+    out = dict(full)
+    out["addresses"] = page_rows
+    out["count"] = len(page_rows)
+    out["page"] = page
+    out["per_page"] = per_page
+    out["total_pages"] = total_pages
+    out["total_addresses"] = total_addresses
+    out["limit"] = per_page
+    # Do not leak the full list into API/HTML payloads.
+    out.pop("all_addresses", None)
+    return out
+
+
 def _rich_list_from_sqlite(
-    data_dir, *, hrp: str = DEFAULT_HRP, limit: int = 100
+    data_dir,
+    *,
+    hrp: str = DEFAULT_HRP,
+    page: int = 1,
+    per_page: int = RICHLIST_PER_PAGE,
+    activity: dict[str, dict[str, int]] | None = None,
+    height_ts: dict[int, int] | None = None,
+    tip_height: int | None = None,
 ) -> dict[str, Any] | None:
     """Prefer live ``utxo.sqlite`` (node may leave LMDB chainstate behind)."""
     import sqlite3
@@ -1455,18 +2000,29 @@ def _rich_list_from_sqlite(
         return None
     balances: dict[str, int] = defaultdict(int)
     utxo_counts: dict[str, int] = defaultdict(int)
+    first_utxo_h: dict[str, int] = {}
+    last_utxo_h: dict[str, int] = {}
     try:
         db = sqlite3.connect(f"file:{path}?mode=ro", uri=True)
         try:
             db.execute("PRAGMA query_only=ON")
-            rows = db.execute("SELECT value, script_pubkey FROM utxo").fetchall()
+            try:
+                rows = db.execute(
+                    "SELECT value, script_pubkey, height FROM utxo"
+                ).fetchall()
+                have_height = True
+            except Exception:
+                rows = db.execute("SELECT value, script_pubkey FROM utxo").fetchall()
+                have_height = False
         finally:
             db.close()
     except Exception:
         return None
     if not rows:
         return None
-    for value, script in rows:
+    for row in rows:
+        value, script = row[0], row[1]
+        height = int(row[2]) if have_height and len(row) > 2 and row[2] is not None else None
         try:
             tout = TxOut(value=int(value), script_pubkey=bytes(script))
             addr = out_address(tout, hrp=hrp)
@@ -1476,10 +2032,26 @@ def _rich_list_from_sqlite(
             continue
         balances[addr] += int(value)
         utxo_counts[addr] += 1
+        if height is not None:
+            prev = first_utxo_h.get(addr)
+            if prev is None or height < prev:
+                first_utxo_h[addr] = height
+            prev_l = last_utxo_h.get(addr)
+            if prev_l is None or height > prev_l:
+                last_utxo_h[addr] = height
     if not balances:
         return None
     return _rich_list_rows(
-        dict(balances), dict(utxo_counts), limit=limit, source="utxo.sqlite"
+        dict(balances),
+        dict(utxo_counts),
+        source="utxo.sqlite",
+        page=page,
+        per_page=per_page,
+        first_utxo_height=first_utxo_h,
+        last_utxo_height=last_utxo_h,
+        activity=activity,
+        height_ts=height_ts,
+        tip_height=tip_height,
     )
 
 
@@ -1488,24 +2060,68 @@ def rich_list(
     *,
     chain: ReadOnlyChain | None = None,
     hrp: str = DEFAULT_HRP,
-    limit: int = 100,
+    page: int = 1,
+    per_page: int = RICHLIST_PER_PAGE,
+    limit: int | None = None,
 ) -> dict[str, Any]:
-    """Top addresses by on-chain UTXO balance (``utxo.sqlite`` preferred)."""
+    """Addresses by on-chain UTXO balance (``utxo.sqlite`` / chainstate), paginated.
+
+    Bitcoin-style extras when ``chain`` is available: first seen, last activity,
+    tx count. Always reloads LMDB into memory and closes the handle so a separate
+    explorer process does not keep a stale UTXO snapshot.
+    """
     from collections import defaultdict
     from pathlib import Path
 
     from mhcoin.utxo import UTXOSet
 
-    limit = max(1, min(int(limit), 500))
-    from_sqlite = _rich_list_from_sqlite(data_dir, hrp=hrp, limit=limit)
+    # Back-compat: old callers passed ``limit`` as page size / top-N.
+    if limit is not None and per_page == RICHLIST_PER_PAGE:
+        per_page = max(1, min(int(limit), RICHLIST_PER_PAGE_MAX))
+    per_page = max(1, min(int(per_page or RICHLIST_PER_PAGE), RICHLIST_PER_PAGE_MAX))
+    page = max(1, int(page or 1))
+
+    height_ts = _height_timestamps(data_dir)
+    tip_height: int | None = None
+    activity: dict[str, dict[str, int]] | None = None
+    if chain is not None:
+        tip_height = int(chain.height)
+        try:
+            activity = _rich_list_activity(chain, hrp=hrp)
+        except Exception:
+            activity = None
+        # Fill any missing height timestamps from live headers.
+        for h in range(0, tip_height + 1):
+            if h in height_ts:
+                continue
+            b = chain.get_block_by_height(h)
+            if b is not None:
+                height_ts[h] = int(b.header.timestamp)
+
+    from_sqlite = _rich_list_from_sqlite(
+        data_dir,
+        hrp=hrp,
+        page=page,
+        per_page=per_page,
+        activity=activity,
+        height_ts=height_ts,
+        tip_height=tip_height,
+    )
     if from_sqlite is not None:
         return from_sqlite
+
     cs = Path(data_dir) / "chainstate"
     if cs.is_dir():
+        utxo = None
         try:
             utxo = UTXOSet(cs)
+            # Node writes LMDB in another process; shared _LIVE mem is stale
+            # unless we re-read from disk on every richlist build.
+            utxo.reload()
             balances: dict[str, int] = defaultdict(int)
             utxo_counts: dict[str, int] = defaultdict(int)
+            first_utxo_h: dict[str, int] = {}
+            last_utxo_h: dict[str, int] = {}
             for entry in utxo.all_entries():
                 addr = out_address(entry.output, hrp=hrp)
                 if not addr:
@@ -1513,22 +2129,55 @@ def rich_list(
                 val = int(entry.output.value)
                 balances[addr] += val
                 utxo_counts[addr] += 1
+                h = int(entry.height)
+                prev = first_utxo_h.get(addr)
+                if prev is None or h < prev:
+                    first_utxo_h[addr] = h
+                prev_l = last_utxo_h.get(addr)
+                if prev_l is None or h > prev_l:
+                    last_utxo_h[addr] = h
             if balances:
                 return _rich_list_rows(
-                    dict(balances), dict(utxo_counts), limit=limit, source="chainstate"
+                    dict(balances),
+                    dict(utxo_counts),
+                    source="chainstate",
+                    page=page,
+                    per_page=per_page,
+                    first_utxo_height=first_utxo_h,
+                    last_utxo_height=last_utxo_h,
+                    activity=activity,
+                    height_ts=height_ts,
+                    tip_height=tip_height,
                 )
         except Exception:
             pass
+        finally:
+            if utxo is not None:
+                try:
+                    utxo.close()
+                except Exception:
+                    pass
     if chain is not None:
-        return _rich_list_chain_scan(chain, hrp=hrp, limit=limit)
+        return _rich_list_chain_scan(
+            chain,
+            hrp=hrp,
+            page=page,
+            per_page=per_page,
+            height_ts=height_ts,
+        )
     return {
         "addresses": [],
         "count": 0,
+        "total_addresses": 0,
         "total_utxos": 0,
         "total_supply_sats": 0,
         "total_supply_mhc": format_mhc(0),
         "source": "unavailable",
-        "limit": limit,
+        "page": 1,
+        "per_page": per_page,
+        "total_pages": 1,
+        "limit": per_page,
+        "tip_height": tip_height,
     }
 
 

@@ -1045,6 +1045,8 @@ class Wallet:
         if not keys_by_pkh:
             raise WalletError("wrong password or corrupt wallet") from last_err
 
+        # Always use HD change chain (BIP84-style), including self-payout —
+        # same pattern as typical Bitcoin wallets (fresh …/1/n change address).
         change_result = self.ensure_change_address(pwd)
         change_pkh = address_to_pubkey_hash(change_result.address, hrp=self.paths.hrp)
 

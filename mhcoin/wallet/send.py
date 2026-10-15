@@ -123,6 +123,7 @@ def build_account_send_tx(
     inputs = [
         TxIn(prev_txid=c.outpoint.txid, prev_vout=c.outpoint.vout) for c in coins
     ]
+    # Payment always vout0; optional change vout1 (HD change address, Bitcoin-style).
     outputs = [TxOut.p2pkh(amount_sats, to_hash)]
     if change > 0:
         outputs.append(TxOut.p2pkh(change, change_pubkey_hash))
