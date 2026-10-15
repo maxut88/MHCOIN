@@ -1,0 +1,59 @@
+# MHCOIN Pool stats — reverse proxy template for a public domain.
+# Copy to /etc/nginx/sites-available/mhcoin-pool and enable.
+#
+# When DNS is ready (example: pool.yourdomain.com → this host):
+#   1) Point A/AAAA to this server
+#   2) sudo cp rc1_ops/nginx-pool.conf.example /etc/nginx/sites-available/mhcoin-pool
+#   3) edit server_name (+ ssl via certbot)
+#   4) Set in ~/.mhcoin/pool.env:
+#        MHCOIN_POOL_URL=https://pool.yourdomain.com
+#   5) Prefer binding stats to localhost once proxy is up:
+#        MHCOIN_POOL_WEB_HOST=127.0.0.1
+#   6) sudo nginx -t && sudo systemctl reload nginx
+#   7) restart pool (systemd or start_pool.sh)
+#
+# Note: JSON :3333 and Stratum :3334 are TCP miner ports — expose via
+# firewall/NAT directly (or a TCP proxy), not this HTTP vhost.
+
+upstream mhcoin_pool_web {
+    server 127.0.0.1:8888;
+    keepalive 8;
+}
+
+server {
+    listen 80;
+    listen [::]:80;
+    server_name pool.example.com;   # <-- change me
+
+    # return 301 https://$host$request_uri;
+
+    location / {
+        proxy_pass http://mhcoin_pool_web;
+        proxy_http_version 1.1;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_read_timeout 60s;
+    }
+
+    limit_req_zone $binary_remote_addr zone=mhcpool:10m rate=10r/s;
+    limit_req zone=mhcpool burst=30 nodelay;
+}
+
+# server {
+#     listen 443 ssl http2;
+#     listen [::]:443 ssl http2;
+#     server_name pool.example.com;
+#     ssl_certificate     /etc/letsencrypt/live/pool.example.com/fullchain.pem;
+#     ssl_certificate_key /etc/letsencrypt/live/pool.example.com/privkey.pem;
+#     add_header Strict-Transport-Security "max-age=31536000" always;
+#     location / {
+#         proxy_pass http://mhcoin_pool_web;
+#         proxy_http_version 1.1;
+#         proxy_set_header Host $host;
+#         proxy_set_header X-Real-IP $remote_addr;
+#         proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+#         proxy_set_header X-Forwarded-Proto $scheme;
+#     }
+# }
