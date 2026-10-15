@@ -1,0 +1,16 @@
+[Unit]
+Description=MHCOIN LAN upload inbox (:8767)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=maxut88
+Group=maxut88
+WorkingDirectory=/data/MHCOIN
+ExecStart=/usr/bin/python3 /data/MHCOIN/rc1_ops/upload_server.py --host 192.168.0.221 --port 8767 --dir /data/MHCOIN/rc1_ops/inbox
+Restart=on-failure
+RestartSec=3
+
+[Install]
+WantedBy=multi-user.target

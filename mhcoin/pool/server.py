@@ -101,9 +101,13 @@ def run_pool(cfg: PoolConfig) -> None:
         stratum_port=cfg.stratum_port,
         fee_percent=cfg.fee_percent,
         share_factor=cfg.share_factor,
-        explorer_url=os.environ.get("MHCOIN_EXPLORER_URL", "http://192.168.0.221:8766"),
+        explorer_url=os.environ.get(
+            "MHCOIN_EXPLORER_URL", "https://explorer.mhcscan.com"
+        ),
         payout_threshold_sats=cfg.payout_threshold_sats,
         mature_confirms=cfg.mature_confirms,
+        public_host=os.environ.get("MHCOIN_POOL_PUBLIC_HOST", "mine.mhcscan.com")
+        or "mine.mhcscan.com",
         engine=engine,
     )
     payouts = PayoutWorker(cfg, db, rt)

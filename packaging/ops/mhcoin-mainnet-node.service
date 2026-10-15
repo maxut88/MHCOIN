@@ -1,0 +1,26 @@
+[Unit]
+Description=MHCOIN Mainnet P2P seed node (:8333)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=maxut88
+Group=maxut88
+WorkingDirectory=/data/MHCOIN
+Environment=PYTHONPATH=/data/MHCOIN
+Environment=MHCOIN_NETWORK=mainnet
+Environment=MHCOIN_DATA_DIR=/data/MHCOIN/mainnet/node-8333
+Environment=MHCOIN_HOST=0.0.0.0
+Environment=MHCOIN_PORT=8333
+Environment=MHCOIN_NO_SEED=1
+Environment=MHCOIN_CONNECT=176.38.3.168:8333,23.237.50.27:8333,5.248.241.7:8333,192.168.0.80:8333
+ExecStart=/usr/bin/python3 /data/MHCOIN/rc1_ops/run_mainnet_node.py
+Restart=on-failure
+RestartSec=5
+KillSignal=SIGTERM
+TimeoutStopSec=30
+LimitNOFILE=65535
+
+[Install]
+WantedBy=multi-user.target

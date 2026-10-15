@@ -51,7 +51,7 @@ systemd example: [`packaging/pool/mhcoin-pool.service.example`](../packaging/poo
 ## Stats UI
 
 Open **http://POOL_HOST:8888** — explorer-matched dashboard (KPIs, connect howto, workers, blocks, miner lookup, **round audit** at `/round/<id>`).
-Explorer nav **Pool** appears when `MHCOIN_POOL_URL` is set (default on LAN: `http://192.168.0.221:8888`).
+Explorer nav **Pool** appears when `MHCOIN_POOL_URL` is set (default: `https://pool.mhcscan.com`; LAN: `http://HOST:8888`).
 
 ### Public domain (optional)
 
@@ -61,7 +61,20 @@ JSON (`3333`) / Stratum (`3334`) stay direct TCP (firewall/NAT), not nginx.
 
 ## Miner — terminal only
 
-No Desktop pool UI yet. Mine with CLI:
+No Desktop pool UI yet. Mine with CLI.
+
+**Public pool (mainnet):**
+
+```bash
+mhcoin mining pool-start \
+  --url mine.mhcscan.com:3333 \
+  --address mhc1YOUR_PAYOUT \
+  --worker rig1
+```
+
+Stats: https://pool.mhcscan.com · full miner guide: [HOW_TO_MINE_POOL.md](HOW_TO_MINE_POOL.md).
+
+**Self-hosted pool:**
 
 ```bash
 mhcoin mining pool-start \
@@ -74,10 +87,11 @@ The miner does **not** write a local chain; it only talks to the pool.
 
 ## Explorer link
 
-Set on the explorer process:
+Set on the explorer process (public default):
 
 ```bash
-export MHCOIN_POOL_URL=http://POOL_HOST:8888
+export MHCOIN_POOL_URL=https://pool.mhcscan.com
+# LAN / self-host: export MHCOIN_POOL_URL=http://POOL_HOST:8888
 ```
 
 A **Pool** nav link appears when this is set.

@@ -1,0 +1,24 @@
+[Unit]
+Description=MHCOIN mining pool (JSON :3333 / Stratum :3334 / Stats :8888)
+After=network-online.target mhcoin-mainnet-node.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=maxut88
+Group=maxut88
+WorkingDirectory=/data/MHCOIN
+Environment=PYTHONPATH=/data/MHCOIN
+# Secrets + public URLs (MHCOIN_POOL_URL, MHCOIN_POOL_PUBLIC_HOST, …):
+EnvironmentFile=-/home/maxut88/.mhcoin/pool.env
+ExecStart=/usr/bin/python3 /data/MHCOIN/rc1_ops/run_pool.py
+Restart=on-failure
+RestartSec=5
+KillSignal=SIGTERM
+TimeoutStopSec=45
+LimitNOFILE=65535
+StandardOutput=append:/home/maxut88/.mhcoin/pool/pool.log
+StandardError=append:/home/maxut88/.mhcoin/pool/pool.log
+
+[Install]
+WantedBy=multi-user.target

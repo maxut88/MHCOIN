@@ -1,0 +1,27 @@
+[Unit]
+Description=MHCOIN block explorer (:8766)
+After=network-online.target mhcoin-mainnet-node.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=maxut88
+Group=maxut88
+WorkingDirectory=/data/MHCOIN
+Environment=PYTHONPATH=/data/MHCOIN
+Environment=MHCOIN_DATA_DIR=/data/MHCOIN/mainnet/node-8333
+# LAN bind; Nginx Proxy Manager fronts https://explorer.mhcscan.com
+Environment=MHCOIN_EXPLORER_HOST=192.168.0.221
+Environment=MHCOIN_EXPLORER_PORT=8766
+Environment=MHCOIN_ADDRESS_HRP=mhc
+Environment=MHCOIN_POOL_ADDRESS=mhc1qj846jc348exyx84dgaqagxuq70w9erd4936gjm
+Environment=MHCOIN_POOL_URL=https://pool.mhcscan.com
+EnvironmentFile=-/home/maxut88/.mhcoin/pool.env
+ExecStart=/usr/bin/python3 /data/MHCOIN/rc1_ops/run_explorer.py
+Restart=on-failure
+RestartSec=3
+KillSignal=SIGTERM
+TimeoutStopSec=15
+
+[Install]
+WantedBy=multi-user.target

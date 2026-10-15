@@ -1,0 +1,16 @@
+[Unit]
+Description=MHCOIN public site / downloads (:8765 → https://mhcscan.com)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=maxut88
+Group=maxut88
+WorkingDirectory=/data/MHCOIN/rc1_ops/download
+ExecStart=/usr/bin/python3 -m http.server 8765 --bind 192.168.0.221 --directory /data/MHCOIN/rc1_ops/download
+Restart=on-failure
+RestartSec=3
+
+[Install]
+WantedBy=multi-user.target

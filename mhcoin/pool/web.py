@@ -76,11 +76,14 @@ def _page_shell(
     mature_confirms: int,
     overview: dict | None = None,
     miner_boot: dict | None = None,
+    public_host: str = "mine.mhcscan.com",
 ) -> bytes:
     """SPA: pool overview + /miner/<addr> dashboard with tabs."""
     addr = _esc(pool_address or "—")
     exp = _esc(explorer_url.rstrip("/")) if explorer_url else ""
-    exp_href = exp or "http://192.168.0.221:8766"
+    exp_href = exp or "https://explorer.mhcscan.com"
+    host_pub = (public_host or "mine.mhcscan.com").strip() or "mine.mhcscan.com"
+    host_pub_esc = _esc(host_pub)
     threshold_mhc = payout_threshold_sats / 1e8
     ov = overview if isinstance(overview, dict) else {}
     mb = miner_boot if isinstance(miner_boot, dict) else None
@@ -1339,19 +1342,20 @@ def _page_shell(
 
     <section class="panel" id="connect">
       <h3>How to connect</h3>
-      <p class="muted">Terminal miner only (Desktop solo is separate). Same machine can solo OR pool — not both on one datadir.</p>
+      <p class="muted">Terminal miner only (Desktop solo is separate). Same machine can solo OR pool — not both on one datadir.
+         Public endpoint: <span class="mono">{host_pub_esc}</span> (LAN also works: 192.168.0.221).</p>
       <div class="connect-grid" style="margin-top:.85rem">
         <div class="connect-card">
           <div class="t">JSON (recommended)</div>
-          <div class="mono">HOST:{json_port}</div>
+          <div class="mono">{host_pub_esc}:{json_port}</div>
           <div class="copy-row">
-            <code class="cmd" id="cmdJson">mhcoin mining pool-start --url 192.168.0.221:{json_port} --address mhc1YOUR_PAYOUT --worker rig1</code>
+            <code class="cmd" id="cmdJson">mhcoin mining pool-start --url {host_pub_esc}:{json_port} --address mhc1YOUR_PAYOUT --worker rig1</code>
             <button type="button" data-copy="cmdJson">Copy</button>
           </div>
         </div>
         <div class="connect-card">
           <div class="t">Stratum</div>
-          <div class="mono">stratum+tcp://HOST:{stratum_port}</div>
+          <div class="mono">stratum+tcp://{host_pub_esc}:{stratum_port}</div>
           <p class="muted" style="margin:.45rem 0 0">Stratum adapter for MHCOIN. Prefer JSON client for best compatibility.</p>
         </div>
         <div class="connect-card">
@@ -3026,9 +3030,10 @@ def start_web(
     stratum_port: int = 3334,
     fee_percent: float = 1.0,
     share_factor: int = 1024,
-    explorer_url: str = "http://192.168.0.221:8766",
+    explorer_url: str = "https://explorer.mhcscan.com",
     payout_threshold_sats: int = 10_000_000_000,
     mature_confirms: int = 20,
+    public_host: str = "mine.mhcscan.com",
     engine: Any | None = None,
 ) -> ThreadingHTTPServer:
     def _attach_live(overview: dict, *, enrich_blocks: bool = True) -> dict:
@@ -3095,6 +3100,7 @@ def start_web(
             mature_confirms=mature_confirms,
             overview=overview,
             miner_boot=miner_boot,
+            public_host=public_host,
         )
 
     class Handler(BaseHTTPRequestHandler):

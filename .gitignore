@@ -36,7 +36,9 @@ credentials*
 # Internal operator tooling (kept locally, not for GitHub)
 rc1_ops/
 docs/internal/
-ops/
+/ops/
+!packaging/ops/
+!packaging/ops/**
 
 # Packaging / OS junk
 packaging/linux/appimagetool

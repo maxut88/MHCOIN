@@ -106,7 +106,7 @@ def _esc(s: Any) -> str:
     return html.escape(str(s), quote=True)
 
 def _pool_url() -> str:
-    return (os.environ.get("MHCOIN_POOL_URL") or "http://192.168.0.221:8888").strip().rstrip("/")
+    return (os.environ.get("MHCOIN_POOL_URL") or "https://pool.mhcscan.com").strip().rstrip("/")
 
 
 def _pool_address() -> str:
@@ -309,7 +309,7 @@ def _page(title: str, body: str, *, tip: int | None = None, hero: bool = False) 
     _ = hero  # branding is always a single header
     import os
 
-    pool_url = (os.environ.get("MHCOIN_POOL_URL") or "http://192.168.0.221:8888").strip()
+    pool_url = (os.environ.get("MHCOIN_POOL_URL") or "https://pool.mhcscan.com").strip()
     pool_nav = (
         f'\n          <a href="{_esc(pool_url)}" rel="noopener">Pool</a>'
         if pool_url

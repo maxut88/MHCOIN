@@ -9,6 +9,19 @@ Own consensus, `mhc1…` addresses, and P2P network.
 
 **[Download MHCOIN Core 0.4.2.0](https://github.com/maxut88/MHCOIN/releases/tag/v0.4.2.0)** · [User FAQ](docs/USER_FAQ.md) · [Docs](docs/README.md)
 
+### Public network
+
+| | |
+|---|---|
+| Website | [mhcscan.com](https://mhcscan.com) |
+| Explorer | [explorer.mhcscan.com](https://explorer.mhcscan.com) |
+| Mining pool (stats) | [pool.mhcscan.com](https://pool.mhcscan.com) |
+| Pool miners (JSON) | `mine.mhcscan.com:3333` |
+| Pool Stratum | `mine.mhcscan.com:3334` |
+| Bootstrap seed | `176.38.3.168:8333` |
+
+Pool how-to: **[docs/HOW_TO_MINE_POOL.md](docs/HOW_TO_MINE_POOL.md)**
+
 ---
 
 ## Specs
@@ -95,7 +108,7 @@ Helpers: `packaging/mine_mainnet.sh` · `.bat` · `.ps1`
 - Stop Desktop mining (or Quit) before Terminal mining on the **same** data folder.
 - Finding a block is probabilistic (~10 min average for the **network**, not per miner).
 - Only blocks on the active chain pay; stale/side blocks do not.
-- **Pool (optional):** `mhcoin mining pool-start --url POOL_HOST:3333 --address mhc1…` — see [docs/POOL.md](docs/POOL.md).
+- **Pool (public):** `mhcoin mining pool-start --url mine.mhcscan.com:3333 --address mhc1… --worker rig1` — see **[docs/HOW_TO_MINE_POOL.md](docs/HOW_TO_MINE_POOL.md)** · stats [pool.mhcscan.com](https://pool.mhcscan.com).
 - **Run your own pool:** [docs/SELF_HOST_POOL.md](docs/SELF_HOST_POOL.md) · templates in `packaging/pool/`.
 
 ---
@@ -137,6 +150,7 @@ Peer discovery: seeds → `peers.dat` → ADDR gossip. Details: [docs/DISCOVERY.
 | [CLI quickstart](docs/USER_QUICKSTART.md) | Wallet · mine · send |
 | [Desktop](docs/DESKTOP.md) | App notes |
 | [Wallet](docs/WALLET.md) | BIP39 / BIP84 · `mhc1…` |
+| [Mine on the pool](docs/HOW_TO_MINE_POOL.md) | Public pool · `mine.mhcscan.com` |
 | [Self-host pool](docs/SELF_HOST_POOL.md) | Run your own mining pool |
 | [Consensus](docs/CONSENSUS.md) · [Genesis](docs/GENESIS.md) | Frozen parameters |
 | [Storage](docs/STORAGE.md) · [Node](docs/NODE.md) · [P2P](docs/NETWORK_PROTOCOL.md) | Internals |

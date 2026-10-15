@@ -8,6 +8,28 @@ wallet create → wallet address → mining start → wallet balance → wallet 
 
 Practice on **localnet** first.
 
+## Public sites & pool
+
+| | |
+|---|---|
+| Website | https://mhcscan.com |
+| Explorer | https://explorer.mhcscan.com |
+| Pool stats | https://pool.mhcscan.com |
+| Pool JSON | `mine.mhcscan.com:3333` |
+| Pool Stratum | `mine.mhcscan.com:3334` |
+| Optional peer | `MHCOIN_CONNECT=176.38.3.168:8333` |
+
+Pool mining (terminal):
+
+```bash
+mhcoin mining pool-start \
+  --url mine.mhcscan.com:3333 \
+  --address mhc1YOUR_PAYOUT \
+  --worker rig1
+```
+
+Full guide: [HOW_TO_MINE_POOL.md](HOW_TO_MINE_POOL.md).
+
 ## Install
 
 ```bash
@@ -52,6 +74,21 @@ mhcoin mining start --network mainnet --address mhc1YOUR_ADDRESS
 
 You should see `MHCOIN Live Miner` / `mode live` / `synced to network tip`.
 Do **not** run Desktop mining and this CLI on the same data-dir at once.
+
+Optional peer if discovery is slow: `export MHCOIN_CONNECT=176.38.3.168:8333`.
+
+## Pool mining (mainnet)
+
+Use the public pool — not a LAN IP:
+
+```bash
+mhcoin mining pool-start \
+  --url mine.mhcscan.com:3333 \
+  --address mhc1YOUR_PAYOUT \
+  --worker rig1
+```
+
+See [HOW_TO_MINE_POOL.md](HOW_TO_MINE_POOL.md) and https://pool.mhcscan.com.
 
 ## Notes
 

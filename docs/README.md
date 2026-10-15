@@ -8,6 +8,7 @@ Start here if you are a **user**: [USER_FAQ.md](USER_FAQ.md) · [USER_QUICKSTART
 |-----|--------|
 | [USER_FAQ.md](USER_FAQ.md) | Install · backup · mining · peers |
 | [USER_QUICKSTART.md](USER_QUICKSTART.md) | CLI: wallet · mine · send |
+| [HOW_TO_MINE_POOL.md](HOW_TO_MINE_POOL.md) | Mine on the public pool (`mine.mhcscan.com`) |
 | [POOL.md](POOL.md) | Mining pool (operator + CLI miners) |
 | [SELF_HOST_POOL.md](SELF_HOST_POOL.md) | Install & configure your own pool |
 | [DESKTOP.md](DESKTOP.md) | MHCOIN Core Desktop |
