@@ -8,6 +8,7 @@ import threading
 import time
 from typing import Any
 
+from mhcoin.consensus.chain_work import work_for_bits
 from mhcoin.consensus.difficulty import hash_meets_target
 from mhcoin.mining.share import (
     EXTRANONCE1_SIZE,
@@ -216,7 +217,20 @@ class PoolEngine:
             is_block=is_block,
             block_hash=block_hash_hex if is_block else None,
         )
-        self.db.touch_worker(address, worker)
+        # Live workers H/s: prefer share-window estimate so miners that never
+        # call hashrate RPC (e.g. older Patoshi C++) still show real rate.
+        try:
+            sf = max(1, int(job.share_factor))
+            share_work = float(work_for_bits(int(job.nbits))) / float(sf)
+            est = self.db.estimate_worker_hashrate(
+                address, worker, share_work=share_work
+            )
+        except Exception:
+            est = 0.0
+        if est > 0:
+            self.db.touch_worker(address, worker, hashrate=est)
+        else:
+            self.db.touch_worker(address, worker)
 
         if not is_block:
             return {"ok": True, "block": False}
@@ -267,6 +281,7 @@ class PoolEngine:
                     block_hash=block_hash_hex,
                     reward_sats=reward,
                     fee_percent=self.cfg.fee_percent,
+                    found_ts=float(block.header.timestamp),
                 )
                 self._fault("after_db_before_commit_mark")
                 self.db.mark_pending_committed(block_hash_hex)
@@ -274,11 +289,19 @@ class PoolEngine:
 
                 self.refresh_template()
                 logger.info("POOL BLOCK height=%s hash=%s", height, block_hash_hex)
+                try:
+                    size_b = len(block.serialize())
+                except Exception:
+                    size_b = 0
                 return {
                     "ok": True,
                     "block": True,
                     "height": int(height),
                     "hash": block_hash_hex,
+                    "reward_sats": int(reward),
+                    "nbits": f"{int(block.header.bits):08x}",
+                    "size": int(size_b),
+                    "time": int(block.header.timestamp),
                 }
             except FaultInjected:
                 raise
@@ -380,6 +403,7 @@ class PoolEngine:
                     block_hash=hx,
                     reward_sats=reward,
                     fee_percent=self.cfg.fee_percent,
+                    found_ts=float(block.header.timestamp),
                 )
                 self.db.mark_pending_committed(hx)
                 recovered += 1
@@ -462,12 +486,36 @@ class PoolEngine:
                 note = f"canonical · {conf} confirmations" if on else "matured"
             elif st == "paid" and on:
                 note = f"canonical · paid · {conf} confirmations"
+            # Attach block header timestamp (= explorer Time); backfill DB if empty.
+            found_ts = b.get("found_ts")
+            if (found_ts is None or found_ts == 0) and h is not None and bh:
+                try:
+                    blk = None
+                    if on:
+                        blk = self.node.chain.get_block_by_height(int(h))
+                    if blk is None:
+                        try:
+                            blk = self.node.chain.get_block_by_hash(bytes.fromhex(bh))
+                        except Exception:
+                            blk = None
+                    if blk is not None and blk.block_hash().hex().lower() == bh:
+                        found_ts = float(blk.header.timestamp)
+                        try:
+                            self.db.set_round_found_ts(bh, found_ts)
+                        except Exception:
+                            logger.debug(
+                                "found_ts backfill persist failed", exc_info=True
+                            )
+                except Exception:
+                    found_ts = None
             extra = {
                 "canonical_hash": canon,
                 "on_best_chain": on,
                 "confirmations": conf,
                 "status_note": note,
             }
+            if found_ts is not None:
+                extra["found_ts"] = float(found_ts)
             if b.get("stale_immature"):
                 extra["stale_immature"] = True
             self._enrich_cache[cache_key] = extra

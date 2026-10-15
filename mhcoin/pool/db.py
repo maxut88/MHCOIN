@@ -108,6 +108,11 @@ class PoolDB:
             if "reject_reason" not in cols:
                 c.execute("ALTER TABLE shares ADD COLUMN reject_reason TEXT")
                 c.commit()
+            # Block header time (matches explorer) — separate from round started/ended wall clock.
+            round_cols = {r[1] for r in c.execute("PRAGMA table_info(rounds)").fetchall()}
+            if "found_ts" not in round_cols:
+                c.execute("ALTER TABLE rounds ADD COLUMN found_ts REAL")
+                c.commit()
             # Crash-recovery intent log + duplicate-block guard (additive / safe).
             c.executescript(
                 """
@@ -202,6 +207,38 @@ class PoolDB:
             # Aggregate address hashrate sample for miner charts.
             self.record_hashrate("miner", address, self.address_hashrate(address))
 
+    def estimate_worker_hashrate(
+        self,
+        address: str,
+        worker: str,
+        *,
+        share_work: float,
+        window: float = 180.0,
+    ) -> float:
+        """Estimate H/s from recent accepted shares.
+
+        ``share_work`` = expected hashes per share (block work / share_factor).
+        Used when the miner does not report ``hashrate`` RPC (e.g. older clients).
+        """
+        work = float(share_work or 0)
+        if work <= 0:
+            return 0.0
+        now = time.time()
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT ts FROM shares WHERE address=? AND worker=? AND ts > ? ORDER BY ts ASC",
+                (address, worker or "default", now - float(window)),
+            ).fetchall()
+        if len(rows) < 3:
+            return 0.0
+        t0 = float(rows[0]["ts"])
+        t1 = float(rows[-1]["ts"])
+        dt = t1 - t0
+        if dt < 2.0:
+            return 0.0
+        # Shares at endpoints span dt; n intervals ≈ n-1, but n/dt is stable for UI.
+        return (len(rows) * work) / dt
+
     def address_hashrate(self, address: str, *, window: float = 600.0) -> float:
         with self._lock:
             row = self._conn.execute(
@@ -244,7 +281,9 @@ class PoolDB:
         *,
         hours: float = 6.0,
         limit: int = 240,
+        bucket_sec: float | None = None,
     ) -> list[dict]:
+        """Return hashrate samples (ASC). Optional ``bucket_sec`` averages into fixed buckets."""
         since = time.time() - max(0.25, float(hours)) * 3600.0
         with self._lock:
             # Newest N samples in the window (ASC for charts). LIMIT on ASC
@@ -261,44 +300,93 @@ class PoolDB:
                 """,
                 (scope, address or "", since, int(limit)),
             ).fetchall()
-        return [{"t": float(r["ts"]), "h": float(r["hashrate"] or 0)} for r in rows]
+        points = [{"t": float(r["ts"]), "h": float(r["hashrate"] or 0)} for r in rows]
+        bs = float(bucket_sec or 0)
+        if bs <= 0 or not points:
+            return points
+        # Average into fixed-width buckets; keep chronological order.
+        buckets: dict[int, list[float]] = {}
+        order: list[int] = []
+        for p in points:
+            key = int(p["t"] // bs) * int(bs)
+            if key not in buckets:
+                buckets[key] = []
+                order.append(key)
+            buckets[key].append(float(p["h"]))
+        order.sort()
+        return [
+            {"t": float(k) + bs / 2.0, "h": sum(buckets[k]) / len(buckets[k])}
+            for k in order
+        ]
 
-    def payments_history(self, address: str, *, limit: int = 100) -> list[dict]:
-        """Cumulative paid series for charts (step after each payout)."""
+    def payments_history(self, address: str, *, limit: int = 500) -> list[dict]:
+        """Cumulative paid series for charts (newest ``limit`` payouts, ASC)."""
         address = (address or "").strip()
+        lim = max(1, int(limit))
         with self._lock:
             rows = self._conn.execute(
                 """
-                SELECT ts, amount_sats FROM payouts
-                WHERE address=? AND status='sent'
-                ORDER BY ts ASC LIMIT ?
+                SELECT ts, amount_sats FROM (
+                  SELECT ts, amount_sats FROM payouts
+                  WHERE address=? AND status='sent'
+                  ORDER BY ts DESC LIMIT ?
+                ) ORDER BY ts ASC
                 """,
-                (address, int(limit)),
+                (address, lim),
             ).fetchall()
+            base = 0
+            if rows:
+                base_row = self._conn.execute(
+                    """
+                    SELECT COALESCE(SUM(amount_sats), 0) AS s FROM payouts
+                    WHERE address=? AND status='sent' AND ts < ?
+                    """,
+                    (address, float(rows[0]["ts"])),
+                ).fetchone()
+                base = int(base_row["s"] or 0) if base_row else 0
         out: list[dict] = []
-        cum = 0
+        cum = base
         for r in rows:
-            cum += int(r["amount_sats"] or 0)
-            out.append({"t": float(r["ts"]), "sats": cum, "amount_sats": int(r["amount_sats"] or 0)})
+            amt = int(r["amount_sats"] or 0)
+            cum += amt
+            out.append({"t": float(r["ts"]), "sats": cum, "amount_sats": amt})
         return out
 
-    def earnings_history(self, address: str, *, limit: int = 100) -> list[dict]:
-        """Cumulative credited (immature+matured awards) over time."""
+    def earnings_history(self, address: str, *, limit: int = 500) -> list[dict]:
+        """Cumulative credited awards for charts (newest ``limit`` credits, ASC).
+
+        Uses DESC…LIMIT then reorders so recent hours are not dropped when a
+        miner has >100 lifetime credits (ASC LIMIT was truncating the tail).
+        """
         address = (address or "").strip()
+        lim = max(1, int(limit))
         with self._lock:
             rows = self._conn.execute(
                 """
-                SELECT created_ts AS ts, amount_sats FROM credits
-                WHERE address=?
-                ORDER BY created_ts ASC LIMIT ?
+                SELECT ts, amount_sats FROM (
+                  SELECT created_ts AS ts, amount_sats FROM credits
+                  WHERE address=?
+                  ORDER BY created_ts DESC LIMIT ?
+                ) ORDER BY ts ASC
                 """,
-                (address, int(limit)),
+                (address, lim),
             ).fetchall()
+            base = 0
+            if rows:
+                base_row = self._conn.execute(
+                    """
+                    SELECT COALESCE(SUM(amount_sats), 0) AS s FROM credits
+                    WHERE address=? AND created_ts < ?
+                    """,
+                    (address, float(rows[0]["ts"])),
+                ).fetchone()
+                base = int(base_row["s"] or 0) if base_row else 0
         out: list[dict] = []
-        cum = 0
+        cum = base
         for r in rows:
-            cum += int(r["amount_sats"] or 0)
-            out.append({"t": float(r["ts"]), "sats": cum})
+            amt = int(r["amount_sats"] or 0)
+            cum += amt
+            out.append({"t": float(r["ts"]), "sats": cum, "amount_sats": amt})
         return out
 
     def add_share(
@@ -492,17 +580,26 @@ class PoolDB:
         block_hash: str,
         reward_sats: int,
         fee_percent: float,
+        found_ts: float | None = None,
     ) -> int:
         """PROP-split reward for current round; open a new round. Returns closed round id.
 
         Idempotent on ``block_hash``: a second call for the same hash returns the
         existing round id and does not create duplicate credits.
+
+        ``found_ts`` should be the block header timestamp (explorer time).
         """
         with self._lock:
             existing = self._conn.execute(
-                "SELECT id FROM rounds WHERE block_hash=?", (block_hash,)
+                "SELECT id, found_ts FROM rounds WHERE block_hash=?", (block_hash,)
             ).fetchone()
             if existing:
+                if found_ts is not None and existing["found_ts"] is None:
+                    self._conn.execute(
+                        "UPDATE rounds SET found_ts=? WHERE id=?",
+                        (float(found_ts), int(existing["id"])),
+                    )
+                    self._conn.commit()
                 return int(existing["id"])
 
             rid = self.current_round_id()
@@ -526,6 +623,7 @@ class PoolDB:
             fee = max(0.0, min(100.0, float(fee_percent))) / 100.0
             distributable = int(int(reward_sats) * (1.0 - fee))
             now = time.time()
+            header_ts = float(found_ts) if found_ts is not None else now
             if total > 0 and distributable > 0:
                 for r in rows:
                     share = float(r["d"] or 0) / total
@@ -551,10 +649,11 @@ class PoolDB:
                     )
             self._conn.execute(
                 """
-                UPDATE rounds SET ended_ts=?, height=?, block_hash=?, reward_sats=?, status='immature'
+                UPDATE rounds SET ended_ts=?, found_ts=?, height=?, block_hash=?,
+                       reward_sats=?, status='immature'
                 WHERE id=?
                 """,
-                (now, int(height), block_hash, int(reward_sats), rid),
+                (now, header_ts, int(height), block_hash, int(reward_sats), rid),
             )
             self._conn.execute(
                 "INSERT INTO rounds(started_ts, status) VALUES (?, 'open')",
@@ -562,6 +661,21 @@ class PoolDB:
             )
             self._conn.commit()
             return rid
+
+    def set_round_found_ts(self, block_hash: str, found_ts: float) -> None:
+        """Persist header timestamp for an existing round (backfill / reconcile)."""
+        hx = (block_hash or "").strip()
+        if not hx:
+            return
+        with self._lock:
+            self._conn.execute(
+                """
+                UPDATE rounds SET found_ts=?
+                WHERE block_hash=? AND (found_ts IS NULL OR found_ts=0)
+                """,
+                (float(found_ts), hx),
+            )
+            self._conn.commit()
 
     def mature_rounds(
         self,
@@ -810,7 +924,8 @@ class PoolDB:
             ).fetchone()["n"]
             blocks = self._conn.execute(
                 """
-                SELECT height, block_hash, reward_sats, ended_ts, status
+                SELECT id AS round_id, height, block_hash, reward_sats,
+                       found_ts, started_ts, ended_ts, status
                 FROM rounds WHERE block_hash IS NOT NULL
                 ORDER BY id DESC LIMIT 200
                 """
@@ -838,8 +953,198 @@ class PoolDB:
                 "workers": [dict(w) for w in top],
                 "ts": now,
             }
-        overview["hashrate_history"] = self.hashrate_history("pool", "", hours=6.0)
+        # ~15s samples → need thousands of raw rows for 24h; return 5‑min averages.
+        overview["hashrate_history"] = self.hashrate_history(
+            "pool", "", hours=24.0, limit=8000, bucket_sec=300.0
+        )
         return overview
+
+    def round_detail(
+        self,
+        round_id: int,
+        *,
+        fee_percent: float | None = None,
+    ) -> dict | None:
+        """Audit payload for one round: per-address shares, PROP %, fee split."""
+        rid = int(round_id)
+        with self._lock:
+            row = self._conn.execute(
+                """
+                SELECT id, started_ts, ended_ts, found_ts, height, block_hash,
+                       reward_sats, status
+                FROM rounds WHERE id=?
+                """,
+                (rid,),
+            ).fetchone()
+            if not row:
+                return None
+            share_rows = self._conn.execute(
+                """
+                SELECT address,
+                       COUNT(*) AS n,
+                       COALESCE(SUM(difficulty), 0) AS d
+                FROM shares WHERE round_id=?
+                GROUP BY address
+                ORDER BY d DESC, address ASC
+                """,
+                (rid,),
+            ).fetchall()
+            credit_rows = self._conn.execute(
+                """
+                SELECT address, amount_sats, status
+                FROM credits WHERE round_id=?
+                """,
+                (rid,),
+            ).fetchall()
+            share_count = self._conn.execute(
+                "SELECT COUNT(*) AS n FROM shares WHERE round_id=?",
+                (rid,),
+            ).fetchone()["n"]
+            prev_row = self._conn.execute(
+                "SELECT id FROM rounds WHERE id < ? ORDER BY id DESC LIMIT 1",
+                (rid,),
+            ).fetchone()
+            next_row = self._conn.execute(
+                "SELECT id FROM rounds WHERE id > ? ORDER BY id ASC LIMIT 1",
+                (rid,),
+            ).fetchone()
+            # Newest-first list page that contains this round (20/page default).
+            newer_or_eq = int(
+                self._conn.execute(
+                    "SELECT COUNT(*) AS n FROM rounds WHERE id >= ?",
+                    (rid,),
+                ).fetchone()["n"]
+                or 0
+            )
+            rounds_total = int(
+                self._conn.execute("SELECT COUNT(*) AS n FROM rounds").fetchone()["n"]
+                or 0
+            )
+
+        credits_by: dict[str, dict] = {}
+        distributable = 0
+        for c in credit_rows:
+            addr = str(c["address"])
+            amt = int(c["amount_sats"] or 0)
+            distributable += amt
+            credits_by[addr] = {
+                "amount_sats": amt,
+                "status": str(c["status"] or ""),
+            }
+
+        total_diff = sum(float(r["d"] or 0) for r in share_rows)
+        reward = int(row["reward_sats"] or 0) if row["reward_sats"] is not None else 0
+        fee_sats = max(0, reward - distributable) if reward > 0 else None
+        # Prefer reconstructed fee % from ledger; fall back to configured fee.
+        if reward > 0 and fee_sats is not None:
+            fee_pct = 100.0 * float(fee_sats) / float(reward)
+        elif fee_percent is not None:
+            fee_pct = float(fee_percent)
+        else:
+            fee_pct = None
+
+        miners: list[dict] = []
+        for r in share_rows:
+            addr = str(r["address"])
+            diff = float(r["d"] or 0)
+            prop = (100.0 * diff / total_diff) if total_diff > 0 else 0.0
+            cred = credits_by.get(addr)
+            miners.append(
+                {
+                    "address": addr,
+                    "shares": int(r["n"] or 0),
+                    "difficulty": diff,
+                    "prop_percent": prop,
+                    "credit_sats": int(cred["amount_sats"]) if cred else 0,
+                    "credit_status": cred["status"] if cred else None,
+                }
+            )
+        # Credits with zero shares (shouldn't happen, but keep audit-complete).
+        for addr, cred in credits_by.items():
+            if any(m["address"] == addr for m in miners):
+                continue
+            miners.append(
+                {
+                    "address": addr,
+                    "shares": 0,
+                    "difficulty": 0.0,
+                    "prop_percent": 0.0,
+                    "credit_sats": int(cred["amount_sats"]),
+                    "credit_status": cred["status"],
+                }
+            )
+
+        return {
+            "id": int(row["id"]),
+            "started_ts": float(row["started_ts"] or 0),
+            "ended_ts": float(row["ended_ts"]) if row["ended_ts"] is not None else None,
+            "found_ts": float(row["found_ts"]) if row["found_ts"] is not None else None,
+            "height": row["height"],
+            "block_hash": row["block_hash"],
+            "reward_sats": reward if row["reward_sats"] is not None else None,
+            "status": str(row["status"] or ""),
+            "shares_total": int(share_count or 0),
+            "difficulty_total": total_diff,
+            "miners_count": len(miners),
+            "distributable_sats": distributable,
+            "fee_sats": fee_sats,
+            "fee_percent": fee_pct,
+            "miners": miners,
+            "prev_id": int(prev_row["id"]) if prev_row else None,
+            "next_id": int(next_row["id"]) if next_row else None,
+            "rounds_total": rounds_total,
+            "list_page": max(1, (newer_or_eq - 1) // 20 + 1) if newer_or_eq else 1,
+        }
+
+    def rounds_list(self, *, page: int = 1, per_page: int = 20) -> dict:
+        """Paginated rounds index for audit browsing (newest first)."""
+        per = max(1, min(100, int(per_page)))
+        pg = max(1, int(page))
+        with self._lock:
+            total = int(
+                self._conn.execute("SELECT COUNT(*) AS n FROM rounds").fetchone()["n"]
+                or 0
+            )
+            total_pages = max(1, (total + per - 1) // per) if total else 1
+            if pg > total_pages:
+                pg = total_pages
+            offset = (pg - 1) * per
+            rows = self._conn.execute(
+                """
+                SELECT r.id, r.started_ts, r.ended_ts, r.found_ts, r.height,
+                       r.block_hash, r.reward_sats, r.status,
+                       (SELECT COUNT(*) FROM shares s WHERE s.round_id = r.id) AS shares,
+                       (SELECT COUNT(DISTINCT s.address) FROM shares s WHERE s.round_id = r.id) AS miners
+                FROM rounds r
+                ORDER BY r.id DESC
+                LIMIT ? OFFSET ?
+                """,
+                (per, offset),
+            ).fetchall()
+        out = []
+        for r in rows:
+            reward = r["reward_sats"]
+            out.append(
+                {
+                    "id": int(r["id"]),
+                    "started_ts": float(r["started_ts"] or 0),
+                    "ended_ts": float(r["ended_ts"]) if r["ended_ts"] is not None else None,
+                    "found_ts": float(r["found_ts"]) if r["found_ts"] is not None else None,
+                    "height": r["height"],
+                    "block_hash": r["block_hash"],
+                    "reward_sats": int(reward) if reward is not None else None,
+                    "status": str(r["status"] or ""),
+                    "shares": int(r["shares"] or 0),
+                    "miners": int(r["miners"] or 0),
+                }
+            )
+        return {
+            "rounds": out,
+            "page": pg,
+            "per_page": per,
+            "total": total,
+            "total_pages": total_pages,
+        }
 
     def miner_stats(
         self,
