@@ -50,8 +50,14 @@ systemd example: [`packaging/pool/mhcoin-pool.service.example`](../packaging/poo
 
 ## Stats UI
 
-Open **http://POOL_HOST:8888** — explorer-matched dashboard (KPIs, connect howto, workers, blocks, miner lookup).
+Open **http://POOL_HOST:8888** — explorer-matched dashboard (KPIs, connect howto, workers, blocks, miner lookup, **round audit** at `/round/<id>`).
 Explorer nav **Pool** appears when `MHCOIN_POOL_URL` is set (default on LAN: `http://192.168.0.221:8888`).
+
+### Public domain (optional)
+
+HTTP reverse-proxy template: [`packaging/pool/nginx-pool.conf.example`](../packaging/pool/nginx-pool.conf.example).
+After DNS + TLS, set `MHCOIN_POOL_URL=https://pool.yourdomain.com` in `~/.mhcoin/pool.env`.
+JSON (`3333`) / Stratum (`3334`) stay direct TCP (firewall/NAT), not nginx.
 
 ## Miner — terminal only
 
