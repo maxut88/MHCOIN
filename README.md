@@ -1,6 +1,7 @@
 # MHCOIN (MHC)
 
 [![Desktop release](https://github.com/maxut88/MHCOIN/actions/workflows/desktop-release.yml/badge.svg)](https://github.com/maxut88/MHCOIN/actions/workflows/desktop-release.yml)
+[![Wallet/UTXO guards](https://github.com/maxut88/MHCOIN/actions/workflows/wallet-utxo-guards.yml/badge.svg)](https://github.com/maxut88/MHCOIN/actions/workflows/wallet-utxo-guards.yml)
 [![Latest release](https://img.shields.io/github/v/release/maxut88/MHCOIN)](https://github.com/maxut88/MHCOIN/releases/latest)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 
