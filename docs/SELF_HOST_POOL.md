@@ -34,15 +34,19 @@ pip install -e .
 
 ## 2. Create the pool wallet (once)
 
-The pool node datadir holds the wallet that receives coinbases and sends payouts:
+The pool node datadir holds the wallet that receives coinbases and sends payouts.
+Use the **same path** for both variables: the pool runtime reads `MHCOIN_POOL_DATA`,
+while `mhcoin wallet create` follows `MHCOIN_DATA`.
 
 ```bash
 export MHCOIN_NETWORK=mainnet
-export MHCOIN_DATA="$HOME/.mhcoin/pool-node"
+export MHCOIN_POOL_DATA="$HOME/.mhcoin/pool-node"
+export MHCOIN_DATA="$MHCOIN_POOL_DATA"   # wallet CLI → same datadir as the pool
 mhcoin wallet create --network mainnet
 ```
 
 Save the printed **address** and **password**. That address becomes `MHCOIN_POOL_ADDRESS`.
+In `pool.env`, set `MHCOIN_POOL_DATA` to this same directory (see `packaging/pool/pool.env.example`).
 
 ## 3. Configure environment
 
@@ -55,11 +59,14 @@ nano "$HOME/.mhcoin/pool.env"
 
 Set at least:
 
+- `MHCOIN_POOL_DATA` — same path as above (`~/.mhcoin/pool-node`)  
 - `MHCOIN_POOL_ADDRESS` — your pool coinbase / fee address  
 - `MHCOIN_POOL_PASSWORD` — wallet password for auto-payouts  
 - `MHCOIN_CONNECT` — one or more `host:8333` mainnet peers (seed / friends)
 
-Optional: fee %, share factor, mature confirms, payout threshold (sats).
+Optional: fee %, share factor, mature confirms, and  
+`MHCOIN_POOL_PAYOUT_THRESHOLD` in **sats** (example in `pool.env.example` is
+`10000000` = **0.1 MHC**; set your own policy — e.g. `100000000000` = **1000 MHC**).
 
 ## 4. Start the pool
 
@@ -104,15 +111,15 @@ Stratum (optional): `stratum+tcp://YOUR_HOST:3334` — prefer JSON + `pool-start
 | `/api/stats` | `mainnet_tip`, `pool_hashrate`, `blocks` |
 | Pool log | `POOL BLOCK` when you find a block |
 | Immature → matured | After `MHCOIN_POOL_MATURE_CONFIRMS` (default 20) |
-| Payout | When matured ≥ `MHCOIN_POOL_PAYOUT_THRESHOLD` |
+| Payout | When matured ≥ `MHCOIN_POOL_PAYOUT_THRESHOLD` (sats; see §3) |
 
 ## Security checklist
 
-- Dedicated datadir: `MHCOIN_POOL_DATA` ≠ Desktop / solo miner datadir  
+- Dedicated datadir: `MHCOIN_POOL_DATA` (and matching `MHCOIN_DATA` when using wallet CLI) ≠ Desktop / solo miner datadir  
 - `chmod 600` on `pool.env` (contains wallet password)  
 - Firewall: only expose 3333/3334/8888 as needed; do not expose wallet files  
 - Back up `~/.mhcoin/pool-node/` (wallet) and `~/.mhcoin/pool/pool.sqlite`  
-- Fee and threshold are **your** policy — document them for your miners  
+- Fee and payout threshold are **your** policy — document them for your miners  
 
 ## What is shared vs private
 
