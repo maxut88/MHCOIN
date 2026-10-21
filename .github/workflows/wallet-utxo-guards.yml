@@ -1,0 +1,31 @@
+# Blocks merges that regress Wallet/UTXO fixes or silently activate maturity.
+name: wallet-utxo-guards
+
+on:
+  pull_request:
+  push:
+    branches: [main, "stabilization/**"]
+
+jobs:
+  regression:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install
+        run: |
+          python -m pip install -U pip
+          pip install -e ".[dev]"
+      - name: Wallet/UTXO + payout recovery + consensus guards
+        run: |
+          python -m pytest -q \
+            tests/test_wallet_utxo_regression.py \
+            tests/test_payout_intent_recovery.py \
+            tests/test_consensus_guards.py \
+            tests/test_wallet.py \
+            tests/test_subsidy.py \
+            tests/test_difficulty_consensus.py
+      - name: Behavioral guard script
+        run: python tools/check_utxo_fix_guards.py
