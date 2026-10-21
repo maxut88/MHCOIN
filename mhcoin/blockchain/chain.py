@@ -1356,8 +1356,18 @@ class Blockchain:
     def refresh_from_disk(self) -> list[Block]:
         old_height = self._height
         old_tip = self._tip_hash
-        self.utxo.close()
-        self.utxo = UTXOSet(self.data_dir / "chainstate")
+        # Reload in-place. close()+new UTXOSet() invalidated any other holder of the
+        # previous handle (e.g. Wallet.send mid-unlock) via the shared _LIVE registry,
+        # leaving callers with an empty _mem and spurious "insufficient funds".
+        try:
+            self.utxo.reload()
+        except Exception:
+            # Fallback for a fully detached handle — recreate once.
+            try:
+                self.utxo.close()
+            except Exception:
+                pass
+            self.utxo = UTXOSet(self.data_dir / "chainstate")
         self._load_tip()
         self._repair_utxo_if_needed()
         if self._tip_hash == old_tip and self._height <= old_height:

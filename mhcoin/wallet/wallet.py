@@ -718,11 +718,22 @@ class Wallet:
             use_wallet_id_as_account=False,
         )
 
-    def ensure_change_address(self, password: str | None = None) -> WalletCreateResult:
+    def ensure_change_address(
+        self,
+        password: str | None = None,
+        *,
+        utxo: "UTXOSet | None" = None,
+    ) -> WalletCreateResult:
         """Return an unused internal change address (``…/1/n``) for the active account.
 
         Prefers an already-stored change address with zero current balance;
         otherwise derives the next unused change index from the seed.
+
+        When ``utxo`` is provided (e.g. the live node set), balance checks use it
+        and **do not** open a second LMDB handle on the same chainstate (avoids
+        torn snapshots / false ``insufficient funds`` during concurrent sync).
+        Without ``utxo``, prefer the newest stored change address rather than
+        opening chainstate — safer when a node already holds the live UTXO set.
         """
         pwd = password or self._password
         if not pwd:
@@ -738,23 +749,20 @@ class Wallet:
             key=lambda r: path_index(r.derivation_path) or 0,
         )
 
-        cs = self.paths.utxo_path
-        legacy = cs.with_name("utxo.sqlite")
-        has_chain = cs.is_dir() or legacy.is_file()
         picked: WalletRecord | None = None
         if change_recs:
-            if has_chain:
-                utxo = UTXOSet(cs)
-                try:
-                    for w in change_recs:
-                        pkh = address_to_pubkey_hash(w.address, hrp=self.paths.hrp)
-                        if utxo.balance_for_pubkey_hash(pkh) == 0:
-                            picked = w
-                            break
-                finally:
-                    utxo.close()
+            if utxo is not None:
+                for w in change_recs:
+                    pkh = address_to_pubkey_hash(w.address, hrp=self.paths.hrp)
+                    if utxo.balance_for_pubkey_hash(pkh) == 0:
+                        picked = w
+                        break
+                if picked is None:
+                    # All change addresses have balance — fall through to derive next.
+                    picked = None
             else:
-                picked = change_recs[0]
+                # Do not open a second UTXOSet on a live datadir; reuse newest change.
+                picked = change_recs[-1]
         if picked is not None:
             return WalletCreateResult(
                 address=picked.address,
@@ -1047,9 +1055,6 @@ class Wallet:
 
         # Always use HD change chain (BIP84-style), including self-payout —
         # same pattern as typical Bitcoin wallets (fresh …/1/n change address).
-        change_result = self.ensure_change_address(pwd)
-        change_pkh = address_to_pubkey_hash(change_result.address, hrp=self.paths.hrp)
-
         own_utxo = utxo
         close = False
         if own_utxo is None:
@@ -1060,6 +1065,11 @@ class Wallet:
             own_utxo = UTXOSet(cs)
             close = True
         try:
+            # Pass live utxo so we never open a second chainstate handle.
+            change_result = self.ensure_change_address(pwd, utxo=own_utxo)
+            change_pkh = address_to_pubkey_hash(
+                change_result.address, hrp=self.paths.hrp
+            )
             return build_account_send_tx(
                 utxo=own_utxo,
                 keys_by_pkh=keys_by_pkh,

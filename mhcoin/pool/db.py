@@ -20,6 +20,8 @@ class PoolDB:
         self._conn = sqlite3.connect(str(self.path), check_same_thread=False)
         self._conn.row_factory = sqlite3.Row
         self._conn.execute("PRAGMA journal_mode=WAL")
+        # Wait on contention instead of failing shares under multi-miner load.
+        self._conn.execute("PRAGMA busy_timeout=5000")
         self._migrate()
 
     def close(self) -> None:
@@ -150,7 +152,70 @@ class PoolDB:
                 logger.warning(
                     "cannot create unique rounds.block_hash index — duplicates exist"
                 )
+            # Miner dashboard: avoid full-table scans over 1M+ shares per address.
+            c.execute(
+                "CREATE INDEX IF NOT EXISTS idx_shares_addr_worker_ts "
+                "ON shares(address, worker, ts)"
+            )
+            c.execute(
+                "CREATE INDEX IF NOT EXISTS idx_shares_addr_block "
+                "ON shares(address) WHERE is_block=1"
+            )
+            wcols = {r[1] for r in c.execute("PRAGMA table_info(workers)").fetchall()}
+            if "last_share_ts" not in wcols:
+                c.execute(
+                    "ALTER TABLE workers ADD COLUMN last_share_ts REAL NOT NULL DEFAULT 0"
+                )
+            c.executescript(
+                """
+                CREATE TABLE IF NOT EXISTS miner_rollup (
+                    address TEXT PRIMARY KEY,
+                    shares_n INTEGER NOT NULL DEFAULT 0,
+                    shares_d REAL NOT NULL DEFAULT 0,
+                    last_share_ts REAL NOT NULL DEFAULT 0,
+                    blocks_found INTEGER NOT NULL DEFAULT 0
+                );
+                CREATE TABLE IF NOT EXISTS payout_intents (
+                    id TEXT PRIMARY KEY,
+                    address TEXT NOT NULL,
+                    amount_sats INTEGER NOT NULL,
+                    status TEXT NOT NULL,
+                    txid TEXT,
+                    created_ts REAL NOT NULL,
+                    updated_ts REAL NOT NULL,
+                    error TEXT,
+                    attempts INTEGER NOT NULL DEFAULT 0,
+                    next_attempt_ts REAL NOT NULL DEFAULT 0
+                );
+                CREATE INDEX IF NOT EXISTS idx_payout_intents_status
+                    ON payout_intents(status, next_attempt_ts);
+                CREATE INDEX IF NOT EXISTS idx_payout_intents_addr
+                    ON payout_intents(address, status);
+                """
+            )
+            # Harden legacy payouts table for idempotent completion.
+            pcols = {r[1] for r in c.execute("PRAGMA table_info(payouts)").fetchall()}
+            if "intent_id" not in pcols:
+                c.execute("ALTER TABLE payouts ADD COLUMN intent_id TEXT")
+            c.execute(
+                "CREATE UNIQUE INDEX IF NOT EXISTS idx_payouts_intent_id "
+                "ON payouts(intent_id) WHERE intent_id IS NOT NULL"
+            )
+            c.execute(
+                "CREATE UNIQUE INDEX IF NOT EXISTS idx_payouts_txid "
+                "ON payouts(txid) WHERE txid IS NOT NULL AND txid != ''"
+            )
+            # Crash-safe broadcast: keep raw tx + reserved inputs for resubmit /
+            # reconcile without rebuilding a conflicting spend.
+            intent_cols = {
+                r[1] for r in c.execute("PRAGMA table_info(payout_intents)").fetchall()
+            }
+            if "raw_tx_hex" not in intent_cols:
+                c.execute("ALTER TABLE payout_intents ADD COLUMN raw_tx_hex TEXT")
+            if "input_keys" not in intent_cols:
+                c.execute("ALTER TABLE payout_intents ADD COLUMN input_keys TEXT")
             c.commit()
+            self._ensure_miner_rollups(c)
             row = c.execute("SELECT id FROM rounds WHERE status='open' ORDER BY id DESC LIMIT 1").fetchone()
             if row is None:
                 c.execute(
@@ -158,6 +223,74 @@ class PoolDB:
                     (time.time(),),
                 )
                 c.commit()
+
+    def _ensure_miner_rollups(self, c: sqlite3.Connection) -> None:
+        """One-time backfill of miner_rollup + workers.last_share_ts (idempotent)."""
+        done = c.execute(
+            "SELECT value FROM meta WHERE key='miner_rollup_v1'"
+        ).fetchone()
+        if done and str(done["value"]) == "1":
+            return
+        t0 = time.perf_counter()
+        c.execute("DELETE FROM miner_rollup")
+        c.execute(
+            """
+            INSERT INTO miner_rollup(address, shares_n, shares_d, last_share_ts, blocks_found)
+            SELECT address,
+                   COUNT(*),
+                   COALESCE(SUM(difficulty), 0),
+                   COALESCE(MAX(ts), 0),
+                   COALESCE(SUM(CASE WHEN is_block=1 THEN 1 ELSE 0 END), 0)
+            FROM shares
+            GROUP BY address
+            """
+        )
+        c.execute(
+            """
+            UPDATE workers SET last_share_ts = COALESCE((
+                SELECT MAX(s.ts) FROM shares s
+                WHERE s.address = workers.address AND s.worker = workers.worker
+            ), 0)
+            """
+        )
+        c.execute(
+            """
+            INSERT INTO meta(key, value) VALUES ('miner_rollup_v1', '1')
+            ON CONFLICT(key) DO UPDATE SET value=excluded.value
+            """
+        )
+        c.commit()
+        logger.info(
+            "miner_rollup backfill done in %.2fs (%d addresses)",
+            time.perf_counter() - t0,
+            c.execute("SELECT COUNT(*) FROM miner_rollup").fetchone()[0],
+        )
+
+    def _bump_miner_rollup(
+        self,
+        address: str,
+        *,
+        difficulty: float,
+        ts: float,
+        is_block: bool,
+    ) -> None:
+        """Incremental share totals (caller holds ``_lock``)."""
+        self._conn.execute(
+            """
+            INSERT INTO miner_rollup(address, shares_n, shares_d, last_share_ts, blocks_found)
+            VALUES (?, 1, ?, ?, ?)
+            ON CONFLICT(address) DO UPDATE SET
+                shares_n = miner_rollup.shares_n + 1,
+                shares_d = miner_rollup.shares_d + excluded.shares_d,
+                last_share_ts = CASE
+                    WHEN excluded.last_share_ts > miner_rollup.last_share_ts
+                    THEN excluded.last_share_ts
+                    ELSE miner_rollup.last_share_ts
+                END,
+                blocks_found = miner_rollup.blocks_found + excluded.blocks_found
+            """,
+            (address, float(difficulty), float(ts), 1 if is_block else 0),
+        )
 
     def current_round_id(self) -> int:
         with self._lock:
@@ -207,6 +340,15 @@ class PoolDB:
             # Aggregate address hashrate sample for miner charts.
             self.record_hashrate("miner", address, self.address_hashrate(address))
 
+    def worker_stored_hashrate(self, address: str, worker: str) -> float:
+        """Last stored H/s for a worker (0 if unknown)."""
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT hashrate FROM workers WHERE address=? AND worker=?",
+                (address, worker or "default"),
+            ).fetchone()
+            return float(row["hashrate"] or 0) if row else 0.0
+
     def estimate_worker_hashrate(
         self,
         address: str,
@@ -232,12 +374,34 @@ class PoolDB:
         if len(rows) < 3:
             return 0.0
         t0 = float(rows[0]["ts"])
-        t1 = float(rows[-1]["ts"])
-        dt = t1 - t0
-        if dt < 2.0:
+        # Use full observation to *now*, not (t_last - t_first). Endpoint-only
+        # dt inflates H/s when shares arrive in bursts (common with 2+ miners
+        # on a shared uplink) — UI jumps 10↔22 while real rate is flat.
+        elapsed = now - t0
+        if elapsed < 2.0:
             return 0.0
-        # Shares at endpoints span dt; n intervals ≈ n-1, but n/dt is stable for UI.
-        return (len(rows) * work) / dt
+        elapsed = min(elapsed, float(window))
+        return (len(rows) * work) / elapsed
+
+    @staticmethod
+    def sanitize_hashrate(reported: float, estimated: float) -> float:
+        """Keep client-reported H/s only when it agrees with share reality.
+
+        Some miners (or old Bitcoin ``diff×2^32`` formulas) report ~100× inflated
+        H/s while share rate stays normal — that produced fake ~1 GH/s spikes.
+        """
+        rep = max(0.0, float(reported or 0))
+        est = max(0.0, float(estimated or 0))
+        if est <= 0:
+            # No share baseline yet — still cap absurd solo reports for this pool.
+            return min(rep, 100e9)  # 100 GH/s hard ceiling
+        if rep <= 0:
+            return est
+        # Allow modest optimism (UI lag / burst), reject order-of-magnitude lies.
+        ceiling = max(est * 4.0, est + 25e6)
+        if rep > ceiling:
+            return est
+        return rep
 
     def address_hashrate(self, address: str, *, window: float = 600.0) -> float:
         with self._lock:
@@ -401,6 +565,7 @@ class PoolDB:
         block_hash: str | None = None,
     ) -> int:
         rid = self.current_round_id()
+        ts = time.time()
         with self._lock:
             cur = self._conn.execute(
                 """
@@ -408,7 +573,7 @@ class PoolDB:
                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
-                    time.time(),
+                    ts,
                     address,
                     worker,
                     job_id,
@@ -418,6 +583,16 @@ class PoolDB:
                     block_hash,
                     rid,
                 ),
+            )
+            self._bump_miner_rollup(
+                address, difficulty=float(difficulty), ts=ts, is_block=bool(is_block)
+            )
+            self._conn.execute(
+                """
+                UPDATE workers SET last_share_ts=?
+                WHERE address=? AND worker=? AND last_share_ts < ?
+                """,
+                (ts, address, worker, ts),
             )
             self._conn.commit()
             return int(cur.lastrowid)
@@ -432,6 +607,10 @@ class PoolDB:
         """
         reason_s = (reason or "rejected")[:240]
         with self._lock:
+            row = self._conn.execute(
+                "SELECT address, is_block FROM shares WHERE id=?",
+                (int(share_id),),
+            ).fetchone()
             self._conn.execute(
                 """
                 UPDATE shares
@@ -441,6 +620,16 @@ class PoolDB:
                 """,
                 (reason_s, int(share_id)),
             )
+            if row and int(row["is_block"] or 0) == 1:
+                self._conn.execute(
+                    """
+                    UPDATE miner_rollup
+                    SET blocks_found = CASE
+                        WHEN blocks_found > 0 THEN blocks_found - 1 ELSE 0 END
+                    WHERE address=?
+                    """,
+                    (str(row["address"]),),
+                )
             self._conn.commit()
 
     def reconcile_rejected_block_shares(self) -> int:
@@ -870,21 +1059,226 @@ class PoolDB:
         )
 
     def balances_above(self, threshold: int) -> list[tuple[str, int]]:
+        """Return (address, matured_sats) at/above threshold, minus open intent locks."""
         with self._lock:
             rows = self._conn.execute(
                 "SELECT address, matured_sats FROM balances WHERE matured_sats >= ?",
                 (int(threshold),),
             ).fetchall()
-            return [(str(r["address"]), int(r["matured_sats"])) for r in rows]
+            out: list[tuple[str, int]] = []
+            for r in rows:
+                addr = str(r["address"])
+                matured = int(r["matured_sats"])
+                locked = self._locked_intent_sats_unlocked(addr)
+                avail = max(0, matured - locked)
+                if avail >= int(threshold):
+                    out.append((addr, avail))
+            return out
 
-    def record_payout(self, address: str, amount: int, txid: str) -> None:
+    def _locked_intent_sats_unlocked(self, address: str) -> int:
+        row = self._conn.execute(
+            """
+            SELECT COALESCE(SUM(amount_sats), 0) AS s FROM payout_intents
+            WHERE address=? AND status IN ('pending', 'broadcast')
+            """,
+            (address,),
+        ).fetchone()
+        return int(row["s"] if row else 0)
+
+    def locked_intent_sats(self, address: str) -> int:
+        with self._lock:
+            return self._locked_intent_sats_unlocked(address)
+
+    def create_payout_intent(self, address: str, amount_sats: int) -> str:
+        """Persist payout intent before broadcast. Returns stable intent id."""
+        import uuid
+
+        intent_id = f"po_{uuid.uuid4().hex}"
+        now = time.time()
+        with self._lock:
+            # Cap: never lock more than current matured − already locked.
+            row = self._conn.execute(
+                "SELECT matured_sats FROM balances WHERE address=?", (address,)
+            ).fetchone()
+            matured = int(row["matured_sats"]) if row else 0
+            locked = self._locked_intent_sats_unlocked(address)
+            room = max(0, matured - locked)
+            amt = min(int(amount_sats), room)
+            if amt <= 0:
+                raise ValueError("no matured balance available for intent")
+            self._conn.execute(
+                """
+                INSERT INTO payout_intents(
+                    id, address, amount_sats, status, txid, created_ts, updated_ts,
+                    error, attempts, next_attempt_ts
+                ) VALUES (?, ?, ?, 'pending', NULL, ?, ?, NULL, 0, ?)
+                """,
+                (intent_id, address, amt, now, now, now),
+            )
+            self._conn.commit()
+            return intent_id
+
+    def get_payout_intent(self, intent_id: str) -> dict | None:
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT * FROM payout_intents WHERE id=?", (intent_id,)
+            ).fetchone()
+            return dict(row) if row else None
+
+    def list_open_payout_intents(self, *, due_only: bool = True) -> list[dict]:
+        with self._lock:
+            now = time.time()
+            if due_only:
+                rows = self._conn.execute(
+                    """
+                    SELECT * FROM payout_intents
+                    WHERE status IN ('pending', 'broadcast')
+                      AND next_attempt_ts <= ?
+                    ORDER BY created_ts
+                    """,
+                    (now,),
+                ).fetchall()
+            else:
+                rows = self._conn.execute(
+                    """
+                    SELECT * FROM payout_intents
+                    WHERE status IN ('pending', 'broadcast')
+                    ORDER BY created_ts
+                    """
+                ).fetchall()
+            return [dict(r) for r in rows]
+
+    def mark_intent_broadcast(
+        self,
+        intent_id: str,
+        txid: str,
+        *,
+        raw_tx_hex: str | None = None,
+        input_keys: list[str] | None = None,
+    ) -> None:
+        """Mark intent broadcast and persist signed body + reserved outpoints."""
+        import json as _json
+
+        now = time.time()
+        keys_json = _json.dumps(list(input_keys or []))
         with self._lock:
             self._conn.execute(
                 """
-                INSERT INTO payouts(ts, address, amount_sats, txid, status)
-                VALUES (?, ?, ?, ?, 'sent')
+                UPDATE payout_intents SET
+                    status='broadcast', txid=?, updated_ts=?, error=NULL,
+                    attempts=attempts + 1,
+                    raw_tx_hex=COALESCE(?, raw_tx_hex),
+                    input_keys=COALESCE(?, input_keys)
+                WHERE id=? AND status IN ('pending', 'broadcast')
                 """,
-                (time.time(), address, int(amount), txid),
+                (txid, now, raw_tx_hex, keys_json, intent_id),
+            )
+            self._conn.commit()
+
+    def mark_intent_failed(
+        self, intent_id: str, error: str, *, backoff_sec: float = 60.0
+    ) -> None:
+        now = time.time()
+        with self._lock:
+            self._conn.execute(
+                """
+                UPDATE payout_intents SET
+                    updated_ts=?, error=?, attempts=attempts + 1,
+                    next_attempt_ts=?
+                WHERE id=? AND status IN ('pending', 'broadcast')
+                """,
+                (now, str(error)[:500], now + float(backoff_sec), intent_id),
+            )
+            self._conn.commit()
+
+    def cancel_intent(self, intent_id: str, reason: str) -> None:
+        now = time.time()
+        with self._lock:
+            self._conn.execute(
+                """
+                UPDATE payout_intents SET
+                    status='cancelled', updated_ts=?, error=?
+                WHERE id=? AND status IN ('pending', 'broadcast')
+                """,
+                (now, str(reason)[:500], intent_id),
+            )
+            self._conn.commit()
+
+    def complete_payout_intent(self, intent_id: str, txid: str) -> bool:
+        """Mark intent sent and debit balances once. Returns False if already done."""
+        with self._lock:
+            intent = self._conn.execute(
+                "SELECT * FROM payout_intents WHERE id=?", (intent_id,)
+            ).fetchone()
+            if intent is None:
+                return False
+            if str(intent["status"]) == "sent":
+                return False
+            # Already recorded under this intent?
+            exists = self._conn.execute(
+                "SELECT id FROM payouts WHERE intent_id=? OR (txid=? AND txid IS NOT NULL)",
+                (intent_id, txid),
+            ).fetchone()
+            if exists:
+                self._conn.execute(
+                    """
+                    UPDATE payout_intents SET status='sent', txid=?, updated_ts=?, error=NULL
+                    WHERE id=?
+                    """,
+                    (txid, time.time(), intent_id),
+                )
+                self._conn.commit()
+                return False
+            address = str(intent["address"])
+            amount = int(intent["amount_sats"])
+            now = time.time()
+            self._conn.execute(
+                """
+                INSERT INTO payouts(ts, address, amount_sats, txid, status, intent_id)
+                VALUES (?, ?, ?, ?, 'sent', ?)
+                """,
+                (now, address, amount, txid, intent_id),
+            )
+            self._conn.execute(
+                """
+                UPDATE balances SET
+                    matured_sats = MAX(0, matured_sats - ?),
+                    paid_sats = paid_sats + ?
+                WHERE address=?
+                """,
+                (amount, amount, address),
+            )
+            self._conn.execute(
+                """
+                UPDATE payout_intents SET
+                    status='sent', txid=?, updated_ts=?, error=NULL
+                WHERE id=?
+                """,
+                (txid, now, intent_id),
+            )
+            self._conn.commit()
+            return True
+
+    def record_payout(
+        self, address: str, amount: int, txid: str, *, intent_id: str | None = None
+    ) -> None:
+        """Legacy helper — prefer ``complete_payout_intent`` for new code."""
+        if intent_id:
+            self.complete_payout_intent(intent_id, txid)
+            return
+        with self._lock:
+            dup = self._conn.execute(
+                "SELECT id FROM payouts WHERE txid=? AND txid IS NOT NULL AND txid != ''",
+                (txid,),
+            ).fetchone()
+            if dup:
+                return
+            self._conn.execute(
+                """
+                INSERT INTO payouts(ts, address, amount_sats, txid, status, intent_id)
+                VALUES (?, ?, ?, ?, 'sent', ?)
+                """,
+                (time.time(), address, int(amount), txid, intent_id),
             )
             self._conn.execute(
                 """
@@ -897,17 +1291,18 @@ class PoolDB:
             )
             self._conn.commit()
 
-    def stats_overview(self) -> dict:
+    def stats_overview(self, *, share_factor: int = 1024) -> dict:
+        sw = float(1 << 32) / float(max(1, int(share_factor)))
         with self._lock:
             now = time.time()
             workers = self._conn.execute(
                 "SELECT COUNT(*) AS n FROM workers WHERE last_seen > ?",
                 (now - 600,),
             ).fetchone()["n"]
-            hashrate = self._conn.execute(
-                "SELECT COALESCE(SUM(hashrate),0) AS h FROM workers WHERE last_seen > ?",
+            online = self._conn.execute(
+                "SELECT address, worker, hashrate, last_seen FROM workers WHERE last_seen > ?",
                 (now - 600,),
-            ).fetchone()["h"]
+            ).fetchall()
             shares_1h = self._conn.execute(
                 "SELECT COUNT(*) AS n FROM shares WHERE ts > ?",
                 (now - 3600,),
@@ -930,29 +1325,41 @@ class PoolDB:
                 ORDER BY id DESC LIMIT 200
                 """
             ).fetchall()
-            top = self._conn.execute(
-                """
-                SELECT address, worker, hashrate, last_seen
-                FROM workers
-                WHERE last_seen > ?
-                ORDER BY hashrate DESC
-                LIMIT 50
-                """,
-                (now - 600,),
-            ).fetchall()
-            overview = {
-                "workers_active": int(workers),
-                "miners_total": int(miners_total),
-                "pool_hashrate": float(hashrate or 0),
-                "shares_1h": int(shares_1h),
-                "shares_round": int(shares_round),
-                "current_round": self.current_round_id(),
-                "blocks": [dict(b) for b in blocks],
-                "blocks_total": int(blocks_total),
-                "blocks_per_page": 20,
-                "workers": [dict(w) for w in top],
-                "ts": now,
-            }
+        # Sanitize outside the write lock (estimate queries take their own lock).
+        top_clean: list[dict] = []
+        hashrate = 0.0
+        for w in online:
+            addr = str(w["address"])
+            name = str(w["worker"] or "default")
+            raw = float(w["hashrate"] or 0)
+            try:
+                est = self.estimate_worker_hashrate(addr, name, share_work=sw)
+            except Exception:
+                est = 0.0
+            cleaned = self.sanitize_hashrate(raw, est)
+            hashrate += cleaned
+            top_clean.append(
+                {
+                    "address": addr,
+                    "worker": name,
+                    "hashrate": cleaned,
+                    "last_seen": float(w["last_seen"] or 0),
+                }
+            )
+        top_clean.sort(key=lambda r: float(r["hashrate"]), reverse=True)
+        overview = {
+            "workers_active": int(workers),
+            "miners_total": int(miners_total),
+            "pool_hashrate": float(hashrate or 0),
+            "shares_1h": int(shares_1h),
+            "shares_round": int(shares_round),
+            "current_round": self.current_round_id(),
+            "blocks": [dict(b) for b in blocks],
+            "blocks_total": int(blocks_total),
+            "blocks_per_page": 20,
+            "workers": top_clean[:50],
+            "ts": time.time(),
+        }
         # ~15s samples → need thousands of raw rows for 24h; return 5‑min averages.
         overview["hashrate_history"] = self.hashrate_history(
             "pool", "", hours=24.0, limit=8000, bucket_sec=300.0
@@ -1154,24 +1561,36 @@ class PoolDB:
         mature_confirms: int = 20,
         short_window: float = 1800.0,
         long_window: float = 10800.0,
+        share_factor: int = 1024,
+        share_work: float | None = None,
+        light: bool = False,
     ) -> dict:
-        """Full miner dashboard payload (balances, workers, payments, blocks)."""
+        """Full miner dashboard payload (balances, workers, payments, blocks).
+
+        ``light=True`` skips chart histories (SSR boot / first paint).
+        Lifetime share totals come from ``miner_rollup`` — O(1), not a 1M-row scan.
+        """
         address = (address or "").strip()
         now = time.time()
         short_w = max(60.0, float(short_window))
         long_w = max(short_w, float(long_window))
         sick_after = short_w / 2.0  # highlight if silent for ½ short window
+        # Expected hashes/share at current easy nbits≈diff1 (2^32 / share_factor).
+        sw = float(share_work) if share_work and share_work > 0 else (
+            float(1 << 32) / float(max(1, int(share_factor)))
+        )
         with self._lock:
             bal = self._conn.execute(
                 "SELECT * FROM balances WHERE address=?", (address,)
             ).fetchone()
             workers_rows = self._conn.execute(
-                "SELECT worker, hashrate, last_seen FROM workers WHERE address=? ORDER BY worker",
+                "SELECT worker, hashrate, last_seen, last_share_ts "
+                "FROM workers WHERE address=? ORDER BY worker",
                 (address,),
             ).fetchall()
-            shares = self._conn.execute(
-                "SELECT COUNT(*) AS n, COALESCE(SUM(difficulty),0) AS d, MAX(ts) AS last_ts "
-                "FROM shares WHERE address=?",
+            rollup = self._conn.execute(
+                "SELECT shares_n, shares_d, last_share_ts, blocks_found "
+                "FROM miner_rollup WHERE address=?",
                 (address,),
             ).fetchone()
             short_row = self._conn.execute(
@@ -1184,7 +1603,7 @@ class PoolDB:
                 "WHERE address=? AND ts > ?",
                 (address, now - long_w),
             ).fetchone()
-            # Per-worker last share + short/long difficulty sums
+            # Per-worker short/long difficulty sums (time-bounded — cheap with idx).
             per_short = {
                 str(r["worker"]): float(r["d"] or 0)
                 for r in self._conn.execute(
@@ -1202,11 +1621,7 @@ class PoolDB:
                 ).fetchall()
             }
             per_last = {
-                str(r["worker"]): float(r["last_ts"] or 0)
-                for r in self._conn.execute(
-                    "SELECT worker, MAX(ts) AS last_ts FROM shares WHERE address=? GROUP BY worker",
-                    (address,),
-                ).fetchall()
+                str(r["worker"]): float(r["last_share_ts"] or 0) for r in workers_rows
             }
             payments = self._conn.execute(
                 """
@@ -1226,15 +1641,15 @@ class PoolDB:
                 """,
                 (address,),
             ).fetchall()
-            blocks_found = self._conn.execute(
-                """
-                SELECT COUNT(*) AS n
-                FROM shares s
-                INNER JOIN rounds r ON r.block_hash = s.block_hash
-                WHERE s.address=? AND s.is_block=1 AND s.block_hash IS NOT NULL
-                """,
-                (address,),
-            ).fetchone()["n"]
+            # Accepted network blocks ≈ shares still flagged is_block=1 (partial idx).
+            if rollup is not None:
+                blocks_found = int(rollup["blocks_found"] or 0)
+            else:
+                blocks_found = self._conn.execute(
+                    "SELECT COUNT(*) AS n FROM shares "
+                    "WHERE address=? AND is_block=1",
+                    (address,),
+                ).fetchone()["n"]
             payments_count = self._conn.execute(
                 "SELECT COUNT(*) AS n FROM payouts WHERE address=?",
                 (address,),
@@ -1272,11 +1687,18 @@ class PoolDB:
         immature = int(bal["immature_sats"]) if bal else 0
         pending = int(bal["matured_sats"]) if bal else 0  # awaiting payout
         paid = int(bal["paid_sats"]) if bal else 0
-        last_share = float(shares["last_ts"] or 0) if shares else 0.0
+        if rollup is not None:
+            last_share = float(rollup["last_share_ts"] or 0)
+            shares_n = int(rollup["shares_n"] or 0)
+            shares_d = float(rollup["shares_d"] or 0)
+        else:
+            last_share = max((float(v) for v in per_last.values()), default=0.0)
+            shares_n = 0
+            shares_d = 0.0
 
-        # Hashrate: prefer client-reported (share_factor is NOT bitcoin-diff;
-        # the old diff*2^32 formula showed TH/s falsely).
-        # Only ONLINE workers count — dead rows kept stale H/s and inflated totals.
+        # Hashrate: client-reported, but MUST match share reality (sanitize).
+        # Fake ~1 GH/s spikes came from miners reporting inflated H/s while
+        # share rate stayed ~9 MH/s — share-window estimate is ground truth.
         workers_out: list[dict] = []
         workers_online = 0
         reported_total = 0.0
@@ -1291,7 +1713,16 @@ class PoolDB:
                 status = "sick"
             else:
                 status = "dead"
-            reported = float(w["hashrate"] or 0) if status == "online" else 0.0
+            raw = float(w["hashrate"] or 0) if status == "online" else 0.0
+            est = 0.0
+            if status == "online":
+                try:
+                    est = self.estimate_worker_hashrate(
+                        address, name, share_work=sw, window=min(180.0, short_w)
+                    )
+                except Exception:
+                    est = 0.0
+            reported = self.sanitize_hashrate(raw, est) if status == "online" else 0.0
             if status == "online":
                 reported_total += reported
             # Per-worker short/long from that worker's own shares only.
@@ -1366,18 +1797,20 @@ class PoolDB:
             "hashrate_long": hps_long,
             "blocks_found": int(blocks_found),
             "payments_count": int(payments_count),
-            "shares": int(shares["n"] or 0) if shares else 0,
+            "shares": shares_n,
             "shares_short": short_n,
             "shares_long": long_n,
-            "share_difficulty": float(shares["d"] or 0) if shares else 0.0,
+            "share_difficulty": shares_d,
             "windows": {"short_sec": short_w, "long_sec": long_w, "sick_sec": sick_after},
             "workers": workers_out,
             "payments": [dict(p) for p in payments],
             "blocks": [dict(b) for b in blocks],
             "last_credit": last_credit_out,
-            "hashrate_history": self.hashrate_history("miner", address, hours=6.0),
-            "payments_history": self.payments_history(address),
-            "earnings_history": self.earnings_history(address),
+            "hashrate_history": (
+                [] if light else self.hashrate_history("miner", address, hours=6.0)
+            ),
+            "payments_history": [] if light else self.payments_history(address),
+            "earnings_history": [] if light else self.earnings_history(address),
             "ts": now,
         }
 
