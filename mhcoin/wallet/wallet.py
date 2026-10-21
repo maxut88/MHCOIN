@@ -1070,6 +1070,18 @@ class Wallet:
             change_pkh = address_to_pubkey_hash(
                 change_result.address, hrp=self.paths.hrp
             )
+            from mhcoin.consensus.params import get_coinbase_maturity_activation
+            import os
+
+            net = (os.environ.get("MHCOIN_NETWORK") or self.paths.network or "mainnet")
+            tip_h = None
+            # Best-effort tip from meta if available
+            try:
+                tip_raw = own_utxo.get_meta("height")
+                if tip_raw is not None:
+                    tip_h = int(tip_raw)
+            except Exception:
+                tip_h = None
             return build_account_send_tx(
                 utxo=own_utxo,
                 keys_by_pkh=keys_by_pkh,
@@ -1079,6 +1091,10 @@ class Wallet:
                 change_pubkey_hash=change_pkh,
                 hrp=self.paths.hrp,
                 exclude_outpoints=exclude_outpoints,
+                tip_height=tip_h,
+                coinbase_maturity_activation=get_coinbase_maturity_activation(
+                    str(net)
+                ),
             )
         except ValueError as e:
             raise WalletError(str(e)) from e

@@ -119,8 +119,15 @@ def build_account_send_tx(
     change_pubkey_hash: bytes,
     hrp: str = DEFAULT_ADDRESS_HRP,
     exclude_outpoints: set[str] | None = None,
+    tip_height: int | None = None,
+    coinbase_maturity_activation: int = 0,
+    coinbase_maturity: int | None = None,
 ) -> SendResult:
-    """Spend UTXOs from any account key; send change to ``change_pubkey_hash``."""
+    """Spend UTXOs from any account key; send change to ``change_pubkey_hash``.
+
+    When maturity is active and ``tip_height`` is set, immature coinbase UTXOs
+    are excluded (policy aligned with consensus spend-at tip+1).
+    """
     if amount_sats <= 0:
         raise ValueError("amount must be positive")
     if fee_sats < 0:
@@ -137,6 +144,28 @@ def build_account_send_tx(
             available.extend(utxo.all_for_pubkey_hash(pkh))
     if exclude_outpoints:
         available = [e for e in available if e.outpoint.key() not in exclude_outpoints]
+    if tip_height is not None and coinbase_maturity_activation > 0:
+        from mhcoin.consensus.params import (
+            COINBASE_MATURITY,
+            coinbase_maturity_enforced,
+            is_coinbase_mature,
+        )
+
+        mat = COINBASE_MATURITY if coinbase_maturity is None else int(coinbase_maturity)
+        spend_h = int(tip_height) + 1
+        if coinbase_maturity_enforced(
+            spend_height=spend_h, activation_height=coinbase_maturity_activation
+        ):
+            available = [
+                e
+                for e in available
+                if (not e.coinbase)
+                or is_coinbase_mature(
+                    coinbase_height=int(e.height),
+                    spend_height=spend_h,
+                    maturity=mat,
+                )
+            ]
     need = amount_sats + fee_sats
     coins = select_coins(available, need)
     total_in = sum(c.output.value for c in coins)

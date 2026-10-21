@@ -43,13 +43,27 @@ def build_block_template(
     memory clone so dependent txs see prior outputs and double-spends fail.
     """
     from mhcoin.blockchain.validation import validate_transaction
+    from mhcoin.consensus.params import (
+        COINBASE_MATURITY,
+        get_coinbase_maturity_activation,
+    )
+    import os
+
+    net = (os.environ.get("MHCOIN_NETWORK") or "regtest").strip().lower()
+    activation = get_coinbase_maturity_activation(net)
 
     working = utxo.clone_memory()
     selected: list[Transaction] = []
     fees = 0
     for tx in mempool.list_txs()[:max_txs]:
         try:
-            fee = validate_transaction(tx, working, height=height)
+            fee = validate_transaction(
+                tx,
+                working,
+                height=height,
+                coinbase_maturity_activation=activation,
+                coinbase_maturity=COINBASE_MATURITY,
+            )
             working.apply_transaction(tx, height)
         except Exception:
             continue

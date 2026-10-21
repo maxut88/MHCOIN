@@ -36,7 +36,9 @@ class LocalNode:
 
     def submit_tx(self, tx: Transaction) -> str:
         height = max(self.chain.height, 0)
-        return self.mempool.add(tx, self.chain.utxo, height=height)
+        return self.mempool.add(
+            tx, self.chain.utxo, height=height, network=self.network
+        )
 
     def mine_one(self, miner_address: str) -> tuple[int, str]:
         if self.chain.height < 0:

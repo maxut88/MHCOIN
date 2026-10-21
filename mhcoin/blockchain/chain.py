@@ -1079,6 +1079,11 @@ class Blockchain:
         else:
             utxo_view = self._utxo_at(prev)
 
+        from mhcoin.consensus.params import (
+            COINBASE_MATURITY,
+            get_coinbase_maturity_activation,
+        )
+
         validate_block(
             block,
             utxo_view,
@@ -1087,6 +1092,8 @@ class Blockchain:
             expected_bits=expected_bits,
             median_time_past=mtp,
             pow_limit=limit,
+            coinbase_maturity_activation=get_coinbase_maturity_activation(self.network),
+            coinbase_maturity=COINBASE_MATURITY,
         )
 
         # Apply on view to ensure UTXO transition works (side: temp; tip: real later)
@@ -1250,6 +1257,11 @@ class Blockchain:
                 parent_hash = block.header.previous_block_hash
                 expected_bits = self.get_next_work_for_parent(parent_hash)
                 mtp = self.median_time_past_for_parent(parent_hash)
+                from mhcoin.consensus.params import (
+                    COINBASE_MATURITY,
+                    get_coinbase_maturity_activation,
+                )
+
                 validate_block(
                     block,
                     self.utxo,
@@ -1258,6 +1270,10 @@ class Blockchain:
                     expected_bits=expected_bits,
                     median_time_past=mtp,
                     pow_limit=pow_limit_for_network(self.network),
+                    coinbase_maturity_activation=get_coinbase_maturity_activation(
+                        self.network
+                    ),
+                    coinbase_maturity=COINBASE_MATURITY,
                 )
                 undo = self.utxo.apply_block_with_undo(block.transactions, entry.height)
                 self._store_undo(bh, undo)
@@ -1322,7 +1338,12 @@ class Blockchain:
                 if mempool.contains(hx):
                     continue
                 try:
-                    mempool.add(tx, self.utxo, height=max(self._height, 0))
+                    mempool.add(
+                        tx,
+                        self.utxo,
+                        height=max(self._height, 0),
+                        network=self.network,
+                    )
                 except MempoolError:
                     pass  # invalid / conflict under new UTXO — discard
 

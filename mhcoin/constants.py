@@ -6,6 +6,8 @@ This module re-exports for backward compatibility with existing imports.
 
 from mhcoin.consensus.params import (  # noqa: F401
     BLOCK_VERSION,
+    COINBASE_MATURITY,
+    COINBASE_MATURITY_ACTIVATION,
     DECIMALS,
     HALVING_INTERVAL,
     INITIAL_BLOCK_REWARD_COINS,
@@ -24,7 +26,9 @@ from mhcoin.consensus.params import (  # noqa: F401
     TARGET_BLOCK_TIME_SECONDS,
     TX_VERSION,
     USER_AGENT,
+    get_coinbase_maturity_activation,
     get_network_params,
+    is_coinbase_mature,
 )
 
 DEFAULT_ADDRESS_HRP = "mhc"

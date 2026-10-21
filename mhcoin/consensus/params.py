@@ -63,6 +63,20 @@ DIFFICULTY_DAMPING_NUMERATOR = DIFFICULTY_LEGACY_DAMPING_NUMERATOR
 DIFFICULTY_DAMPING_DENOMINATOR = DIFFICULTY_LEGACY_DAMPING_DENOMINATOR
 MTP_WINDOW = 11
 
+# Coinbase maturity (Bitcoin-class). Soft-fork style: enforce only at/after
+# activation height so historical early spends remain valid forever.
+# Semantics: coinbase created in block H may be spent in block (H + COINBASE_MATURITY)
+# and later; spending in (H + COINBASE_MATURITY - 1) is rejected once active.
+COINBASE_MATURITY = 100
+# Activation height per network. 0 = rule inactive (pre-activation / no enforcement).
+# Mainnet MUST stay 0 until operators agree a future tip+N and ship a coordinated release.
+COINBASE_MATURITY_ACTIVATION: dict[str, int] = {
+    "mainnet": 0,
+    "testnet": 0,
+    "regtest": 0,
+    "localnet": 0,
+}
+
 # PoW: double SHA-256 (HASH256) of the block header; UTXO accounting model
 POW_ALGORITHM = "HASH256"
 LEDGER_MODEL = "UTXO"
@@ -210,6 +224,31 @@ def list_networks() -> list[str]:
     return sorted(NETWORKS)
 
 
+def get_coinbase_maturity_activation(network: str) -> int:
+    """Return activation height for coinbase maturity (0 = inactive)."""
+    return int(COINBASE_MATURITY_ACTIVATION.get(network.strip().lower(), 0))
+
+
+def is_coinbase_mature(
+    *,
+    coinbase_height: int,
+    spend_height: int,
+    maturity: int = COINBASE_MATURITY,
+) -> bool:
+    """True iff coinbase from ``coinbase_height`` may be spent at ``spend_height``."""
+    return int(spend_height) >= int(coinbase_height) + int(maturity)
+
+
+def coinbase_maturity_enforced(
+    *,
+    spend_height: int,
+    activation_height: int,
+) -> bool:
+    """True when the maturity rule applies to a spend in ``spend_height``."""
+    act = int(activation_height)
+    return act > 0 and int(spend_height) >= act
+
+
 # Consensus-critical field names (for docs / checklist)
 CONSENSUS_CRITICAL_SHARED = (
     "MAX_SUPPLY_COINS",
@@ -226,6 +265,8 @@ CONSENSUS_CRITICAL_SHARED = (
     "DIFFICULTY_LEGACY_DAMPING_DENOMINATOR",
     "DIFFICULTY_WINDOW",
     "MTP_WINDOW",
+    "COINBASE_MATURITY",
+    "COINBASE_MATURITY_ACTIVATION",
     "MAX_FUTURE_BLOCK_TIME",
     "POW_ALGORITHM",
     "LEDGER_MODEL",

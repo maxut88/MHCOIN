@@ -133,7 +133,13 @@ class TxRelay:
         existing = self.mempool.get(txid_hex)
         if existing is None:
             try:
-                self.mempool.add(tx, self._get_utxo(), height=max(self._get_height(), 0))
+                net = getattr(self.chain, "network", None) if self.chain else None
+                self.mempool.add(
+                    tx,
+                    self._get_utxo(),
+                    height=max(self._get_height(), 0),
+                    network=net,
+                )
             except MempoolError as e:
                 if "duplicate" not in str(e).lower():
                     logger.info("Rejected TX txid=%s reason=%s", txid_hex, e)
@@ -388,7 +394,13 @@ class TxRelay:
             if txid_hex in self._known_tx and self.mempool.get(txid_hex) is not None:
                 return
         try:
-            self.mempool.add(tx, self._get_utxo(), height=max(self._get_height(), 0))
+            net = getattr(self.chain, "network", None) if self.chain else None
+            self.mempool.add(
+                tx,
+                self._get_utxo(),
+                height=max(self._get_height(), 0),
+                network=net,
+            )
         except MempoolError as e:
             if "duplicate" in str(e).lower():
                 self.mark_known(txid_hex)
