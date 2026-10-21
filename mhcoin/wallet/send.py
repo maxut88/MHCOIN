@@ -89,6 +89,26 @@ def build_send_tx(
     )
 
 
+def spendable_total(
+    utxo: UTXOSet,
+    keys_by_pkh: dict[bytes, tuple[bytes, bytes]],
+    *,
+    exclude_outpoints: set[str] | None = None,
+) -> int:
+    """Sum of wallet-controlled UTXO value (excludes mempool-reserved outpoints)."""
+    if not keys_by_pkh:
+        return 0
+    if hasattr(utxo, "coins_for_pubkey_hashes"):
+        available = utxo.coins_for_pubkey_hashes(keys_by_pkh.keys())
+    else:
+        available = []
+        for pkh in keys_by_pkh:
+            available.extend(utxo.all_for_pubkey_hash(pkh))
+    if exclude_outpoints:
+        available = [e for e in available if e.outpoint.key() not in exclude_outpoints]
+    return sum(int(e.output.value) for e in available)
+
+
 def build_account_send_tx(
     *,
     utxo: UTXOSet,
@@ -108,9 +128,13 @@ def build_account_send_tx(
     if not keys_by_pkh:
         raise ValueError("no signing keys")
     to_hash = address_to_pubkey_hash(to_address, hrp=hrp)
-    available: list[UTXOEntry] = []
-    for pkh in keys_by_pkh:
-        available.extend(utxo.all_for_pubkey_hash(pkh))
+    # Single locked snapshot across all account keys (avoids torn reads mid-block).
+    if hasattr(utxo, "coins_for_pubkey_hashes"):
+        available = utxo.coins_for_pubkey_hashes(keys_by_pkh.keys())
+    else:
+        available = []
+        for pkh in keys_by_pkh:
+            available.extend(utxo.all_for_pubkey_hash(pkh))
     if exclude_outpoints:
         available = [e for e in available if e.outpoint.key() not in exclude_outpoints]
     need = amount_sats + fee_sats

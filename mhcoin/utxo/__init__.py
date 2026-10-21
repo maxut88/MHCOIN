@@ -270,7 +270,9 @@ class UTXOSet:
         return outpoint.key() in self._mem
 
     def all_entries(self) -> list[UTXOEntry]:
-        return list(self._mem.values())
+        # Snapshot under lock — concurrent apply_block mutates ``_mem``.
+        with self._lock:
+            return list(self._mem.values())
 
     def reload(self) -> None:
         """Re-read all coins from LMDB (for external writers in other processes)."""
@@ -280,10 +282,35 @@ class UTXOSet:
             self._load()
 
     def all_for_pubkey_hash(self, pubkey_hash: bytes) -> list[UTXOEntry]:
-        out = []
-        for e in self._mem.values():
+        """Return coins for ``pubkey_hash`` (stable snapshot under UTXO lock).
+
+        Unlocked iteration raced with block apply / ``clear_all`` rebuilds and
+        could yield an empty or partial set → spurious ``insufficient funds``.
+        """
+        out: list[UTXOEntry] = []
+        with self._lock:
+            entries = list(self._mem.values())
+        for e in entries:
             try:
                 if e.output.pubkey_hash() == pubkey_hash:
+                    out.append(e)
+            except ValueError:
+                continue
+        return out
+
+    def coins_for_pubkey_hashes(
+        self, pubkey_hashes: set[bytes] | list[bytes]
+    ) -> list[UTXOEntry]:
+        """One locked snapshot for many account keys (pool/wallet coin select)."""
+        want = set(pubkey_hashes)
+        if not want:
+            return []
+        out: list[UTXOEntry] = []
+        with self._lock:
+            entries = list(self._mem.values())
+        for e in entries:
+            try:
+                if e.output.pubkey_hash() in want:
                     out.append(e)
             except ValueError:
                 continue
