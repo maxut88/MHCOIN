@@ -21,25 +21,27 @@ def test_mainnet_reward_and_timing_unchanged():
     assert P.ASERT_ACTIVATION_HEIGHT == 1
 
 
-def test_coinbase_maturity_activation_inactive_or_absent():
-    """Production must not silently enforce maturity on mainnet."""
+def test_coinbase_maturity_activation_h_star_2000():
+    """Activation RC: mainnet H*=2000; other nets remain inactive."""
     fn = getattr(P, "get_coinbase_maturity_activation", None)
     if fn is None:
-        # Prod-style: no activation API → maturity not activated.
-        return
-    assert fn("mainnet") == 0, "mainnet maturity activation must stay 0 until coordinated"
+        pytest.fail("activation API missing on activation RC")
+    assert fn("mainnet") == 2000
+    assert P.COINBASE_MATURITY == 100
+    assert fn("testnet") == 0
+    assert fn("regtest") == 0
+    assert fn("localnet") == 0
 
 
-def test_wallet_send_does_not_wire_maturity_unless_activation_api_returns_nonzero():
-    """Behavioral: if send imports maturity, activation default must be inactive path."""
+def test_wallet_send_wires_maturity_with_mainnet_activation():
+    """Behavioral: wallet send path must consult activation when API is present."""
     from mhcoin.wallet import wallet as wallet_mod
 
     src = inspect.getsource(wallet_mod.Wallet.send)
     if "get_coinbase_maturity_activation" not in src:
-        return  # production shape — OK
-    # Worktree shape: still safe if activation height is 0
+        pytest.fail("Wallet.send must consult maturity activation on this RC")
     assert hasattr(P, "get_coinbase_maturity_activation")
-    assert P.get_coinbase_maturity_activation("mainnet") == 0
+    assert P.get_coinbase_maturity_activation("mainnet") == 2000
 
 
 def test_ensure_change_contract_no_second_utxoset_open():

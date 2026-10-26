@@ -108,8 +108,11 @@ def test_final_boundary_h_plus_100_exact(activate_maturity_from_1):
     assert is_coinbase_mature(coinbase_height=42, spend_height=142) is True
 
 
-def test_final_mainnet_activation_untouched():
-    assert COINBASE_MATURITY_ACTIVATION["mainnet"] == 0
+def test_final_mainnet_activation_h_star_2000():
+    assert COINBASE_MATURITY_ACTIVATION["mainnet"] == 2000
+    assert COINBASE_MATURITY_ACTIVATION["testnet"] == 0
+    assert COINBASE_MATURITY_ACTIVATION["regtest"] == 0
+    assert COINBASE_MATURITY_ACTIVATION["localnet"] == 0
 
 
 # ---------------------------------------------------------------------------

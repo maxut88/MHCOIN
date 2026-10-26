@@ -226,8 +226,12 @@ def test_pool_20_conf_still_immature_under_consensus_100():
     assert is_coinbase_mature(coinbase_height=100, spend_height=200) is True
 
 
-def test_mainnet_activation_still_zero():
-    assert COINBASE_MATURITY_ACTIVATION["mainnet"] == 0
+def test_mainnet_activation_h_star_2000():
+    assert COINBASE_MATURITY_ACTIVATION["mainnet"] == 2000
+    assert COINBASE_MATURITY == 100
+    assert COINBASE_MATURITY_ACTIVATION["testnet"] == 0
+    assert COINBASE_MATURITY_ACTIVATION["regtest"] == 0
+    assert COINBASE_MATURITY_ACTIVATION["localnet"] == 0
 
 
 def test_mempool_rejects_immature_coinbase_spend(

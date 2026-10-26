@@ -1,34 +1,22 @@
-# Activation height H* — proposal methodology (no value written to mainnet)
+# Activation height H* — locked value
 
-**Current code must keep** `COINBASE_MATURITY_ACTIVATION["mainnet"] = 0`.
+**Owner decision (2026-10-26):** `H* = 2000`
 
-## Inputs (refresh at announce time)
+`COINBASE_MATURITY_ACTIVATION["mainnet"] = 2000` in this activation RC.
 
-- `tip` from seed `node_status.json`
-- `t_median` over last ≥50 best-chain blocks
-- Independent full-node readiness (not stratum miner count)
-- Wall-clock for: RC deploy, pool 20→100, desktop distribution, operator notice, buffer
+## Height rule
 
-## Formula
+- Block / spend height **1999**: legacy (no maturity check)
+- Block / spend height **2000+**: enforce `spend_height >= coinbase_height + 100`
 
-```
-H* = tip_announce + max(2016, ceil(T_wall / t_median)) + buffer_ops
-```
+## Methodology (historical)
 
-## Illustrative snapshot only (2026-10-22, NOT approved)
+Previous provisional formula (tip + lead time) is superseded by the owner lock at 2000. Recompute only if tip is already too close or past 2000 at deploy time → STOP and pick a new height with owner approval.
 
-- tip ≈ 1702
-- t_median ≈ 266 s
-- T_wall = 7 days = 604800 s → ceil(604800/266) ≈ 2274
-- raw ≈ 1702 + max(2016,2274) = 1702 + 2274 = **3976**
-- With +1000 ops buffer → illustrative ~**5000**
+## Rollout order (production requires separate approval)
 
-Prior “8500” (from tip≈1270 / faster interval) is **obsolete** — recompute; do not auto-use 8500.
-
-## Activation release plan (separate approval)
-
-1. Network runs RC with activation 0 + pool at 100.
-2. Owner locks H*.
-3. New commit sets `COINBASE_MATURITY_ACTIVATION["mainnet"]=H*` only.
-4. Upgrade all controlled nodes **before** H*; notify external operators (e.g. reachable peer 176.38.3.168).
-5. Monitor rejects `immature coinbase` after H*.
+1. All controlled consensus nodes run this activation RC **before** tip 2000
+2. Confirm live still had activation=0 until deploy window
+3. Deploy activation code; verify `get_coinbase_maturity_activation("mainnet")==2000` on every validator
+4. Do **not** resume mining until owner gate (C)
+5. Monitor blocks 1999–2001 and first 100+ post-activation blocks

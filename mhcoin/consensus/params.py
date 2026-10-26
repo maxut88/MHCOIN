@@ -69,9 +69,10 @@ MTP_WINDOW = 11
 # and later; spending in (H + COINBASE_MATURITY - 1) is rejected once active.
 COINBASE_MATURITY = 100
 # Activation height per network. 0 = rule inactive (pre-activation / no enforcement).
-# Mainnet MUST stay 0 until operators agree a future tip+N and ship a coordinated release.
+# Mainnet H*=2000 (owner lock 2026-10-26): spends in blocks height>=2000 enforce maturity;
+# height 1999 and below remain legacy (no maturity check). Does not rewrite history.
 COINBASE_MATURITY_ACTIVATION: dict[str, int] = {
-    "mainnet": 0,
+    "mainnet": 2000,
     "testnet": 0,
     "regtest": 0,
     "localnet": 0,

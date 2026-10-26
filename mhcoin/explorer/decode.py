@@ -847,10 +847,10 @@ def coinbase_maturity_label(
 ) -> str | None:
     """UI label for coinbase maturity (explorer prep; does not alter consensus).
 
-    Returns ``None`` for non-applicable rows. When mainnet activation is still
-    ``0``, returns ``\"maturity_inactive\"`` so UIs do not pretend consensus
-    enforces 100 confirms yet. After activation, returns ``\"immature\"`` or
-    ``\"mature\"`` using spendability at ``tip_height + 1``.
+    Returns ``None`` for non-applicable rows. When activation is inactive for
+    the network, or ``tip_height + 1`` is still below the activation height,
+    returns ``\"maturity_inactive\"``. Once enforcement applies, returns
+    ``\"immature\"`` or ``\"mature\"`` using spendability at ``tip_height + 1``.
     """
     if coinbase_height is None or int(coinbase_height) < 0:
         return None
