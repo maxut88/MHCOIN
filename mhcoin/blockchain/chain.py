@@ -73,7 +73,13 @@ class BlockIndexEntry:
 
 @dataclass
 class AcceptResult:
-    """Result of accept_block."""
+    """Result of accept_block.
+
+    ``height`` is the active-chain tip height after processing (legacy callers).
+    ``block_height`` is the indexed height of the submitted block when known
+    (preferred for pool accounting). Orphans that are only buffered may leave
+    ``block_height`` as None.
+    """
 
     height: int
     tip_hash: bytes
@@ -84,6 +90,7 @@ class AcceptResult:
     duplicate: bool
     disconnect: list[bytes]
     connect: list[bytes]
+    block_height: int | None = None
 
 
 class Blockchain:
@@ -1023,7 +1030,8 @@ class Blockchain:
         self, block: Block, *, mempool: Mempool | None
     ) -> AcceptResult:
         bh = block.block_hash()
-        if self.get_index(bh) is not None:
+        existing_idx = self.get_index(bh)
+        if existing_idx is not None:
             assert self._tip_hash is not None
             return AcceptResult(
                 height=self._height,
@@ -1035,6 +1043,7 @@ class Blockchain:
                 duplicate=True,
                 disconnect=[],
                 connect=[],
+                block_height=int(existing_idx.height),
             )
         if self.orphans.contains(bh):
             tip = self._tip_hash or b"\x00" * 32
@@ -1048,6 +1057,7 @@ class Blockchain:
                 duplicate=True,
                 disconnect=[],
                 connect=[],
+                block_height=None,
             )
 
         prev = block.header.previous_block_hash
@@ -1066,6 +1076,7 @@ class Blockchain:
                 duplicate=False,
                 disconnect=[],
                 connect=[],
+                block_height=None,
             )
 
         height = parent.height + 1
@@ -1174,6 +1185,8 @@ class Blockchain:
             duplicate=False,
             disconnect=disconnect,
             connect=connect,
+            # Indexed height of *this* block (parent.height+1), not merely tip.
+            block_height=int(height),
         )
 
     def _reorg_to(

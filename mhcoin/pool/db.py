@@ -873,18 +873,29 @@ class PoolDB:
         *,
         canonical_hash_at: Callable[[int], str | None] | None = None,
         tip_height_now: Callable[[], int] | None = None,
+        lookup_indexed_hash: Callable[[str], dict | None] | None = None,
+        events: list | None = None,
     ) -> int:
         """Move immature rounds/credits to matured when tip is deep enough.
 
         Canonical outcomes when ``canonical_hash_at`` is set:
-          * CANONICAL — hash matches → mature
-          * NON_CANONICAL — different non-empty hash → orphan (void immature credits)
-          * UNKNOWN — None / exception → defer (no DB changes)
+          * CANONICAL — hash matches at stored height → mature
+          * HEIGHT_MISMATCH — hash is active at a *different* indexed height →
+            repair ``rounds.height`` (immature only) and defer/mature; **never void**
+          * SIDE / NON_CANONICAL — hash not active on best chain → orphan (void)
+          * UNKNOWN — None / exception / lookup unavailable → defer (no void)
 
         Node lookups run outside the DB lock. Before write, outcomes are
         re-checked to reduce tip/hash races.
         """
         confirms_i = int(confirms)
+
+        def _emit(code: str, message: str, **extra: object) -> None:
+            if events is not None:
+                ev = {"code": code, "message": message}
+                ev.update(extra)
+                events.append(ev)
+
         with self._lock:
             rows = [
                 dict(r)
@@ -896,12 +907,16 @@ class PoolDB:
 
         to_mature: list[tuple[int, int, str]] = []
         to_void: list[tuple[int, int, str, str]] = []
+        to_repair: list[tuple[int, int, str]] = []  # rid, new_height, stored_hash
         for r in rows:
             h = int(r["height"])
-            if tip_height < h + confirms_i:
-                continue
             rid = int(r["id"])
             stored = str(r["block_hash"] or "").lower()
+            if not stored:
+                continue
+
+            # Depth gate uses *effective* height (may repair below).
+            eff_h = h
             if canonical_hash_at is not None:
                 try:
                     canon = canonical_hash_at(h)
@@ -911,6 +926,11 @@ class PoolDB:
                         rid,
                         h,
                     )
+                    _emit(
+                        "canonical_lookup_failed",
+                        f"defer round {rid}: canonical lookup error",
+                        round_id=rid,
+                    )
                     continue  # UNKNOWN → defer
                 if not canon:
                     logger.info(
@@ -918,19 +938,128 @@ class PoolDB:
                         rid,
                         h,
                     )
+                    _emit(
+                        "canonical_unavailable",
+                        f"defer round {rid}: canonical hash unavailable",
+                        round_id=rid,
+                    )
                     continue  # UNKNOWN → defer
                 canon_l = str(canon).lower()
                 if canon_l != stored:
+                    # Distinguish false height vs true side-chain orphan.
+                    indexed = None
+                    if lookup_indexed_hash is not None:
+                        try:
+                            indexed = lookup_indexed_hash(stored)
+                        except Exception:
+                            logger.exception(
+                                "indexed lookup failed round id=%s hash=%s — defer",
+                                rid,
+                                stored[:16],
+                            )
+                            _emit(
+                                "index_lookup_failed",
+                                f"defer round {rid}: index lookup error",
+                                round_id=rid,
+                            )
+                            continue
+                        if indexed is None:
+                            logger.info(
+                                "hash unknown in index for round id=%s hash=%s — defer",
+                                rid,
+                                stored[:16],
+                            )
+                            _emit(
+                                "hash_unknown",
+                                f"defer round {rid}: hash not in index",
+                                round_id=rid,
+                            )
+                            continue  # UNKNOWN → defer, do not void
+                        if indexed.get("active"):
+                            new_h = int(indexed["height"])
+                            if new_h != h:
+                                to_repair.append((rid, new_h, stored))
+                                _emit(
+                                    "height_mismatch_repair",
+                                    f"round {rid}: stored height {h} → indexed {new_h}",
+                                    round_id=rid,
+                                    stored_height=h,
+                                    indexed_height=new_h,
+                                )
+                                eff_h = new_h
+                                # Fall through to mature check at corrected height.
+                            # Verify canon at corrected height matches before mature.
+                            try:
+                                canon2 = canonical_hash_at(eff_h)
+                            except Exception:
+                                continue
+                            if not canon2 or str(canon2).lower() != stored:
+                                # Ambiguous — fail closed for void; defer.
+                                _emit(
+                                    "height_mismatch_ambiguous",
+                                    f"defer round {rid}: active hash but canon mismatch",
+                                    round_id=rid,
+                                )
+                                continue
+                            if tip_height < eff_h + confirms_i:
+                                continue
+                            to_mature.append((rid, eff_h, stored))
+                            continue
+                        # Present but not active → legitimate side / losing fork.
+                        to_void.append((rid, h, stored, canon_l))
+                        continue
+                    # No lookup callback (legacy tests): keep prior void-on-mismatch.
                     to_void.append((rid, h, stored, canon_l))
-                    continue  # NON_CANONICAL
-            to_mature.append((rid, h, stored))
+                    continue
+            if tip_height < eff_h + confirms_i:
+                continue
+            to_mature.append((rid, eff_h, stored))
 
         matured = 0
         now = time.time()
         with self._lock:
+            # Apply height repairs for immature rounds only (never touch paid).
+            for rid, new_h, stored in to_repair:
+                row = self._conn.execute(
+                    "SELECT status, block_hash, height FROM rounds WHERE id=?",
+                    (rid,),
+                ).fetchone()
+                if not row or str(row["status"]) != "immature":
+                    continue
+                if str(row["block_hash"] or "").lower() != stored:
+                    continue
+                # Refuse repair if any credit left immature state already.
+                paidish = self._conn.execute(
+                    "SELECT COUNT(*) FROM credits WHERE round_id=? "
+                    "AND status IN ('matured','paid','orphaned')",
+                    (rid,),
+                ).fetchone()[0]
+                if int(paidish) > 0:
+                    _emit(
+                        "height_repair_refused",
+                        f"round {rid}: credits already finalized",
+                        round_id=rid,
+                    )
+                    continue
+                old_h = int(row["height"]) if row["height"] is not None else None
+                if old_h == int(new_h):
+                    continue
+                self._conn.execute(
+                    "UPDATE rounds SET height=? WHERE id=? AND status='immature'",
+                    (int(new_h), rid),
+                )
+                logger.warning(
+                    "repaired round height id=%s hash=%s %s → %s",
+                    rid,
+                    stored[:16],
+                    old_h,
+                    new_h,
+                )
+
             for rid, h, stored, canon_l in to_void:
                 row = self._conn.execute(
-                    "SELECT status, block_hash FROM rounds WHERE id=?", (rid,)
+                    "SELECT status, block_hash, height FROM rounds WHERE id=?",
+                    (rid,),
                 ).fetchone()
                 if not row or str(row["status"]) != "immature":
                     continue
@@ -941,6 +1070,28 @@ class PoolDB:
                             continue
                     except Exception:
                         continue
+                stored_now = str(row["block_hash"] or "").lower()
+                # Re-check indexed active at any height — never void an active hash.
+                if lookup_indexed_hash is not None:
+                    try:
+                        indexed = lookup_indexed_hash(stored_now)
+                    except Exception:
+                        continue
+                    if indexed is None:
+                        continue  # UNKNOWN
+                    if indexed.get("active"):
+                        new_h = int(indexed["height"])
+                        self._conn.execute(
+                            "UPDATE rounds SET height=? WHERE id=? AND status='immature'",
+                            (new_h, rid),
+                        )
+                        to_mature.append((rid, new_h, stored_now))
+                        _emit(
+                            "height_mismatch_repair",
+                            f"round {rid}: void aborted; repaired height → {new_h}",
+                            round_id=rid,
+                        )
+                        continue
                 if canonical_hash_at is not None:
                     try:
                         again = canonical_hash_at(h)
@@ -949,7 +1100,6 @@ class PoolDB:
                     if not again:
                         continue
                     again_l = str(again).lower()
-                    stored_now = str(row["block_hash"] or "").lower()
                     if again_l == stored_now:
                         # Became canonical — mature on a later tick / below.
                         to_mature.append((rid, h, stored_now))
@@ -972,31 +1122,44 @@ class PoolDB:
                     continue
                 seen_mature.add(rid)
                 row = self._conn.execute(
-                    "SELECT status, block_hash FROM rounds WHERE id=?", (rid,)
+                    "SELECT status, block_hash, height FROM rounds WHERE id=?",
+                    (rid,),
                 ).fetchone()
                 if not row or str(row["status"]) != "immature":
                     continue
+                # Use repaired height from DB when present.
+                h_eff = int(row["height"]) if row["height"] is not None else int(h)
                 if tip_height_now is not None:
                     try:
-                        if int(tip_height_now()) < h + confirms_i:
+                        if int(tip_height_now()) < h_eff + confirms_i:
                             continue
                     except Exception:
                         continue
                 if canonical_hash_at is not None:
                     try:
-                        again = canonical_hash_at(h)
+                        again = canonical_hash_at(h_eff)
                     except Exception:
                         continue
                     if not again:
                         continue
                     stored_now = str(row["block_hash"] or "").lower()
                     if str(again).lower() != stored_now:
-                        # Flipped non-canonical — void instead of mature.
+                        # Still mismatched at effective height — check index again.
+                        if lookup_indexed_hash is not None:
+                            try:
+                                indexed = lookup_indexed_hash(stored_now)
+                            except Exception:
+                                continue
+                            if indexed is None:
+                                continue
+                            if indexed.get("active"):
+                                # Should not void; leave for next tick.
+                                continue
                         logger.warning(
                             "voiding non-canonical immature round id=%s height=%s "
                             "stored=%s canonical=%s (pre-write recheck)",
                             rid,
-                            h,
+                            h_eff,
                             stored_now[:16] if stored_now else None,
                             str(again).lower()[:16],
                         )

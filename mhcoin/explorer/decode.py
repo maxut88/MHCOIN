@@ -839,6 +839,44 @@ def confirmations(
     return max(0, tip - height + 1)
 
 
+def coinbase_maturity_label(
+    *,
+    coinbase_height: int | None,
+    tip_height: int,
+    network: str = "mainnet",
+) -> str | None:
+    """UI label for coinbase maturity (explorer prep; does not alter consensus).
+
+    Returns ``None`` for non-applicable rows. When mainnet activation is still
+    ``0``, returns ``\"maturity_inactive\"`` so UIs do not pretend consensus
+    enforces 100 confirms yet. After activation, returns ``\"immature\"`` or
+    ``\"mature\"`` using spendability at ``tip_height + 1``.
+    """
+    if coinbase_height is None or int(coinbase_height) < 0:
+        return None
+    try:
+        from mhcoin.consensus.params import (
+            COINBASE_MATURITY,
+            get_coinbase_maturity_activation,
+            is_coinbase_mature,
+        )
+    except Exception:
+        return None
+    act = int(get_coinbase_maturity_activation(network))
+    if act <= 0:
+        return "maturity_inactive"
+    spend_h = int(tip_height) + 1
+    if spend_h < act:
+        return "maturity_inactive"
+    if is_coinbase_mature(
+        coinbase_height=int(coinbase_height),
+        spend_height=spend_h,
+        maturity=COINBASE_MATURITY,
+    ):
+        return "mature"
+    return "immature"
+
+
 def block_on_best_chain(chain: ReadOnlyChain, block: Block, height: int | None) -> bool:
     """True iff ``block`` is the canonical block at ``height`` (or active tip)."""
     bh = block.block_hash()
@@ -1600,31 +1638,36 @@ def transactions_page(
                 chain, tx, hrp=hrp, idx=tx_idx
             )
             pay_sats = payment_amount_sats(tx, from_addr=from_addr, hrp=hrp)
-            out.append(
-                {
-                    "txid": txid_hex(tx),
-                    "coinbase": cb,
-                    "height": h,
-                    "block_hash": bh,
-                    "timestamp": ts,
-                    "time_utc": format_utc(ts),
-                    "age": format_age(ts, now=now),
-                    "confirmations": confirmations(tip, h),
-                    "input_count": len(tx.inputs),
-                    "output_count": len(tx.outputs),
-                    "output_value_sats": out_v,
-                    "output_value_mhc": format_mhc(out_v),
-                    "amount_sats": pay_sats,
-                    "amount_mhc": format_mhc(pay_sats),
-                    "fee_sats": fee_sats,
-                    "fee_mhc": format_mhc(fee_sats) if fee_sats is not None else None,
-                    "from": from_addr,
-                    "to": to_addr,
-                    **change_fields(tx, from_addr=from_addr, hrp=hrp),
-                    "size_bytes": len(tx.serialize()),
-                    "index_in_block": tx_i,
-                }
-            )
+            row = {
+                "txid": txid_hex(tx),
+                "coinbase": cb,
+                "height": h,
+                "block_hash": bh,
+                "timestamp": ts,
+                "time_utc": format_utc(ts),
+                "age": format_age(ts, now=now),
+                "confirmations": confirmations(tip, h),
+                "input_count": len(tx.inputs),
+                "output_count": len(tx.outputs),
+                "output_value_sats": out_v,
+                "output_value_mhc": format_mhc(out_v),
+                "amount_sats": pay_sats,
+                "amount_mhc": format_mhc(pay_sats),
+                "fee_sats": fee_sats,
+                "fee_mhc": format_mhc(fee_sats) if fee_sats is not None else None,
+                "from": from_addr,
+                "to": to_addr,
+                **change_fields(tx, from_addr=from_addr, hrp=hrp),
+                "size_bytes": len(tx.serialize()),
+                "index_in_block": tx_i,
+            }
+            if cb:
+                row["maturity"] = coinbase_maturity_label(
+                    coinbase_height=h,
+                    tip_height=tip,
+                    network=getattr(chain, "network", "mainnet") or "mainnet",
+                )
+            out.append(row)
             seen += 1
             if len(out) >= per_page:
                 break
@@ -1672,31 +1715,36 @@ def recent_transactions(
                 chain, tx, hrp=hrp, idx=tx_idx
             )
             pay_sats = payment_amount_sats(tx, from_addr=from_addr, hrp=hrp)
-            out.append(
-                {
-                    "txid": txid_hex(tx),
-                    "coinbase": cb,
-                    "height": h,
-                    "block_hash": bh,
-                    "timestamp": ts,
-                    "time_utc": format_utc(ts),
-                    "age": format_age(ts, now=now),
-                    "confirmations": confirmations(tip, h),
-                    "input_count": len(tx.inputs),
-                    "output_count": len(tx.outputs),
-                    "output_value_sats": out_v,
-                    "output_value_mhc": format_mhc(out_v),
-                    "amount_sats": pay_sats,
-                    "amount_mhc": format_mhc(pay_sats),
-                    "fee_sats": fee_sats,
-                    "fee_mhc": format_mhc(fee_sats) if fee_sats is not None else None,
-                    "from": from_addr,
-                    "to": to_addr,
-                    **change_fields(tx, from_addr=from_addr, hrp=hrp),
-                    "size_bytes": len(tx.serialize()),
-                    "index_in_block": tx_i,
-                }
-            )
+            row = {
+                "txid": txid_hex(tx),
+                "coinbase": cb,
+                "height": h,
+                "block_hash": bh,
+                "timestamp": ts,
+                "time_utc": format_utc(ts),
+                "age": format_age(ts, now=now),
+                "confirmations": confirmations(tip, h),
+                "input_count": len(tx.inputs),
+                "output_count": len(tx.outputs),
+                "output_value_sats": out_v,
+                "output_value_mhc": format_mhc(out_v),
+                "amount_sats": pay_sats,
+                "amount_mhc": format_mhc(pay_sats),
+                "fee_sats": fee_sats,
+                "fee_mhc": format_mhc(fee_sats) if fee_sats is not None else None,
+                "from": from_addr,
+                "to": to_addr,
+                **change_fields(tx, from_addr=from_addr, hrp=hrp),
+                "size_bytes": len(tx.serialize()),
+                "index_in_block": tx_i,
+            }
+            if cb:
+                row["maturity"] = coinbase_maturity_label(
+                    coinbase_height=h,
+                    tip_height=tip,
+                    network=getattr(chain, "network", "mainnet") or "mainnet",
+                )
+            out.append(row)
             if len(out) >= count:
                 return out
     return out

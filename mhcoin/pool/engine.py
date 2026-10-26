@@ -88,6 +88,94 @@ class PoolEngine:
             logger.exception("canonical_hash_at failed height=%s", height)
             return None
 
+    def _lookup_indexed_hash(self, block_hash_hex: str) -> dict[str, Any] | None:
+        """Return indexed metadata for ``block_hash_hex``, or None if unknown.
+
+        Keys: height (int), status (int), active (bool) — active means STATUS_ACTIVE
+        and the hash matches ``get_block_by_height(height)``.
+        """
+        from mhcoin.blockchain.chain import STATUS_ACTIVE
+
+        hx = (block_hash_hex or "").strip().lower()
+        if not hx:
+            return None
+        try:
+            raw = bytes.fromhex(hx)
+            idx = self.node.chain.get_index(raw)
+            if idx is None:
+                return None
+            height = int(idx.height)
+            status = int(idx.status)
+            active = False
+            if status == STATUS_ACTIVE:
+                try:
+                    at = self.node.chain.get_block_by_height(height)
+                    active = (
+                        at is not None and at.block_hash().hex().lower() == hx
+                    )
+                except Exception:
+                    active = False
+            return {"height": height, "status": status, "active": active}
+        except Exception:
+            logger.exception("lookup_indexed_hash failed hash=%s", hx[:16])
+            return None
+
+    def _resolve_accepted_height(
+        self,
+        block_hash_hex: str,
+        *,
+        reported_height: int | None,
+        parent_hash_hex: str | None,
+    ) -> int | None:
+        """Authoritative height for pool accounting: indexed height of hash B.
+
+        Never persist a mutable tip reading when the index row is missing.
+        """
+        tip_h: int | None
+        tip_hx: str | None
+        try:
+            tip_h = int(self.node.chain.height)
+            th = self.node.chain.tip_hash
+            tip_hx = th.hex() if th is not None else None
+        except Exception:
+            tip_h, tip_hx = None, None
+
+        info = self._lookup_indexed_hash(block_hash_hex)
+        if info is None:
+            logger.warning(
+                "accepted hash not yet indexed — defer round close "
+                "hash=%s reported_height=%s parent=%s tip_height=%s tip_hash=%s",
+                (block_hash_hex or "")[:16],
+                reported_height,
+                (parent_hash_hex or "")[:16] if parent_hash_hex else None,
+                tip_h,
+                (tip_hx or "")[:16] if tip_hx else None,
+            )
+            return None
+
+        indexed = int(info["height"])
+        if reported_height is not None and int(reported_height) != indexed:
+            logger.warning(
+                "accept height reconciled hash=%s reported=%s indexed=%s "
+                "parent=%s tip_height=%s tip_hash=%s active=%s",
+                (block_hash_hex or "")[:16],
+                reported_height,
+                indexed,
+                (parent_hash_hex or "")[:16] if parent_hash_hex else None,
+                tip_h,
+                (tip_hx or "")[:16] if tip_hx else None,
+                info.get("active"),
+            )
+        else:
+            logger.info(
+                "accept height ok hash=%s height=%s parent=%s tip_height=%s",
+                (block_hash_hex or "")[:16],
+                indexed,
+                (parent_hash_hex or "")[:16] if parent_hash_hex else None,
+                tip_h,
+            )
+        return indexed
+
     def refresh_template(self) -> None:
         # Placeholder extranonces; per-worker en1 applied in build_pool_job.
         extra = pool_coinbase_extra(
@@ -269,8 +357,36 @@ class PoolEngine:
                 )
                 self._fault("before_accept_block")
 
-                height = self.node.accept_block(block)
+                reported_height = self.node.accept_block(block)
                 reward = int(block.transactions[0].outputs[0].value)
+                parent_hx = parent.hex() if isinstance(parent, (bytes, bytearray)) else None
+                height = self._resolve_accepted_height(
+                    block_hash_hex,
+                    reported_height=int(reported_height),
+                    parent_hash_hex=parent_hx,
+                )
+                if height is None:
+                    # Node accepted but index not visible yet — keep pending for reconcile.
+                    self.db.mark_pending_node_accepted(
+                        block_hash_hex,
+                        height=int(reported_height),
+                        reward_sats=reward,
+                    )
+                    logger.warning(
+                        "POOL BLOCK deferred close hash=%s reported_height=%s "
+                        "(await index reconcile)",
+                        block_hash_hex[:16],
+                        reported_height,
+                    )
+                    return {
+                        "ok": True,
+                        "block": True,
+                        "height": None,
+                        "hash": block_hash_hex,
+                        "deferred": True,
+                        "reward_sats": int(reward),
+                    }
+
                 self.db.mark_pending_node_accepted(
                     block_hash_hex, height=int(height), reward_sats=reward
                 )
@@ -532,6 +648,10 @@ class PoolEngine:
             process_start_ts=self._process_start_ts,
             mature_confirms=self.cfg.mature_confirms,
         )
+        # Consume one-shot mature event codes into this metrics snapshot.
+        codes = list(getattr(self, "_mature_event_codes", []) or [])
+        metrics["mature_event_codes"] = codes
+        self._mature_event_codes = []
         alerts = evaluate_alerts(metrics, prev=self._metrics_prev)
         self._metrics_prev = metrics
         self._last_metrics = metrics
@@ -550,12 +670,22 @@ class PoolEngine:
             tip = int(self.node.chain.height)
         except Exception:
             return
+        mature_events: list[dict[str, Any]] = []
         self.db.mature_rounds(
             tip,
             self.cfg.mature_confirms,
             canonical_hash_at=self._canonical_hash_at,
             tip_height_now=lambda: int(self.node.chain.height),
+            lookup_indexed_hash=self._lookup_indexed_hash,
+            events=mature_events,
         )
+        for ev in mature_events:
+            code = str(ev.get("code") or "mature_event")
+            msg = str(ev.get("message") or code)
+            logger.warning("pool mature event %s: %s", code, msg)
+            if not hasattr(self, "_mature_event_codes"):
+                self._mature_event_codes: list[str] = []
+            self._mature_event_codes.append(code)
         # Refresh jobs periodically / on tip change.
         self._ensure_template()
         self._sample_pool_hashrate()
