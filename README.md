@@ -8,7 +8,7 @@
 Independent Proof-of-Work cryptocurrency with a full node, encrypted wallet, and Desktop miner.  
 Own consensus, `mhc1…` addresses, and P2P network.
 
-**[Download MHCOIN Core 0.4.2.0](https://github.com/maxut88/MHCOIN/releases/tag/v0.4.2.0)** · [User FAQ](docs/USER_FAQ.md) · [Docs](docs/README.md)
+**[Download MHCOIN Core 0.4.2.0](https://github.com/maxut88/MHCOIN/releases/latest)** · [User FAQ](docs/USER_FAQ.md) · [Docs](docs/README.md)
 
 ### Public network
 
