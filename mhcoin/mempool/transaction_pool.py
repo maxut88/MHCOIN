@@ -48,7 +48,15 @@ class Mempool:
         tmp.write_text(json.dumps(data, indent=2), encoding="utf-8")
         tmp.replace(self.path)
 
-    def add(self, tx: Transaction, utxo: UTXOSet, *, height: int) -> str:
+    def add(
+        self,
+        tx: Transaction,
+        utxo: UTXOSet,
+        *,
+        height: int,
+        coinbase_maturity_activation: int | None = None,
+        network: str | None = None,
+    ) -> str:
         if tx.is_coinbase():
             raise MempoolError("coinbase not allowed in mempool")
         txid = tx.txid()
@@ -59,8 +67,26 @@ class Mempool:
             op = OutPoint(txid=tin.prev_txid, vout=tin.prev_vout)
             if op.key() in self._spent:
                 raise MempoolError(f"mempool double-spend {op.key()}")
+        # Mempool txs are assumed to land in the *next* block (tip+1).
+        spend_height = int(height) + 1
         try:
-            validate_transaction(tx, utxo, height=height)
+            from mhcoin.consensus.params import (
+                COINBASE_MATURITY,
+                get_coinbase_maturity_activation,
+            )
+
+            if coinbase_maturity_activation is None:
+                import os
+
+                net = (network or os.environ.get("MHCOIN_NETWORK") or "mainnet").strip().lower()
+                coinbase_maturity_activation = get_coinbase_maturity_activation(net)
+            validate_transaction(
+                tx,
+                utxo,
+                height=spend_height,
+                coinbase_maturity_activation=int(coinbase_maturity_activation),
+                coinbase_maturity=COINBASE_MATURITY,
+            )
         except ValidationError as e:
             raise MempoolError(str(e)) from e
         for tin in tx.inputs:

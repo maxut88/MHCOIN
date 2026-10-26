@@ -470,8 +470,18 @@ class PayoutWorker:
                     kp.private_key,
                     kp.public_key_compressed,
                 )
+            from mhcoin.consensus.params import get_coinbase_maturity_activation
+
+            tip_h = max(int(self.node.chain.height), 0)
             total = spendable_total(
-                self.node.chain.utxo, keys_by_pkh, exclude_outpoints=exclude
+                self.node.chain.utxo,
+                keys_by_pkh,
+                exclude_outpoints=exclude,
+                tip_height=tip_h,
+                coinbase_maturity_activation=get_coinbase_maturity_activation(
+                    getattr(self.node.chain, "network", None)
+                    or getattr(self.cfg, "network", "mainnet")
+                ),
             )
             return max(0, total - _RESERVE_SATS)
         except Exception:

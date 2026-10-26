@@ -58,10 +58,17 @@ def main() -> None:
     if "self.utxo.close()" in head:
         fail("refresh_from_disk closes UTXO before reload — regression")
 
-    # 4) maturity must stay inactive on mainnet if API exists
+    # 4) activation RC: mainnet H*=2000; other nets remain 0
     fn = getattr(P, "get_coinbase_maturity_activation", None)
-    if fn is not None and int(fn("mainnet")) != 0:
-        fail(f"mainnet coinbase maturity activation is {fn('mainnet')} — refuse merge")
+    if fn is None:
+        fail("get_coinbase_maturity_activation missing on activation RC")
+    if int(fn("mainnet")) != 2000:
+        fail(f"mainnet coinbase maturity activation is {fn('mainnet')} — expected 2000")
+    for net in ("testnet", "regtest", "localnet"):
+        if int(fn(net)) != 0:
+            fail(f"{net} maturity activation drifted to {fn(net)}")
+    if int(P.COINBASE_MATURITY) != 100:
+        fail("COINBASE_MATURITY drift")
 
     # 5) core consensus constants
     if int(P.INITIAL_BLOCK_REWARD_COINS) != 50:

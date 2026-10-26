@@ -136,6 +136,9 @@ def collect_pool_metrics(
         "stale_immature_rounds": stale_n,
         "mature_confirms": int(mature_confirms),
         "pending_accepts": pending_n,
+        "mature_event_codes": list(
+            getattr(engine, "_mature_event_codes", []) or []
+        )[-16:],
         "immature_sats": immature,
         "matured_pending_sats": matured,
         "paid_sats": paid,
@@ -170,7 +173,30 @@ def evaluate_alerts(metrics: dict, *, prev: dict | None = None) -> list[Alert]:
         )
     if int(metrics.get("orphaned_rounds") or 0) > 0 and prev:
         if int(metrics["orphaned_rounds"]) > int(prev.get("orphaned_rounds") or 0):
-            alerts.append(Alert("new_orphan", "warn", "new orphaned round detected"))
+            alerts.append(
+                Alert(
+                    "new_orphan",
+                    "warn",
+                    "new voided pool round (ledger) — not necessarily a chain orphan",
+                )
+            )
+    for code in metrics.get("mature_event_codes") or []:
+        if code == "height_mismatch_repair":
+            alerts.append(
+                Alert(
+                    "height_mismatch_repair",
+                    "warn",
+                    "immature round height repaired from block index (false-orphan avoided)",
+                )
+            )
+        elif code in ("height_mismatch_ambiguous", "hash_unknown", "canonical_unavailable"):
+            alerts.append(
+                Alert(
+                    "maturity_deferred",
+                    "info",
+                    f"maturity deferred ({code})",
+                )
+            )
     stale = int(metrics.get("stale_immature_rounds") or 0)
     if stale > 0:
         mat = int(metrics.get("mature_confirms") or 20)
@@ -205,7 +231,9 @@ ALERT_CATALOG = [
     ("node_unavailable", "Pool cannot read chain tip"),
     ("pool_tip_lag", "Template height behind node tip"),
     ("pending_accept", "Block accepted by node but credits not committed"),
-    ("new_orphan", "Immature round voided after reorg"),
+    ("new_orphan", "Pool ledger round voided (status=orphaned); not chain OrphanPool"),
+    ("height_mismatch_repair", "Round height corrected from block index before void"),
+    ("maturity_deferred", "Maturity deferred (unknown hash / ambiguous height)"),
     ("stale_immature", "Immature round past maturity depth still not matured"),
     ("low_peer_count", "Fewer P2P peers than outbound target"),
     ("duplicate_credit_attempt", "close_round idempotent hit / unique hash"),

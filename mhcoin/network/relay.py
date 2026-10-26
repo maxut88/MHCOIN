@@ -133,7 +133,13 @@ class TxRelay:
         existing = self.mempool.get(txid_hex)
         if existing is None:
             try:
-                self.mempool.add(tx, self._get_utxo(), height=max(self._get_height(), 0))
+                net = getattr(self.chain, "network", None) if self.chain else None
+                self.mempool.add(
+                    tx,
+                    self._get_utxo(),
+                    height=max(self._get_height(), 0),
+                    network=net,
+                )
             except MempoolError as e:
                 if "duplicate" not in str(e).lower():
                     logger.info("Rejected TX txid=%s reason=%s", txid_hex, e)
@@ -192,8 +198,11 @@ class TxRelay:
         if existing is not None:
             with self._lock:
                 self._known_block.add(hx)
-            logger.info("Duplicate block hash=%s ignored", hx)
-            return self.chain.height
+            idx = self.chain.get_index(bh)
+            # Prefer indexed height of *this* hash (not mutable tip).
+            out_h = int(idx.height) if idx is not None else int(self.chain.height)
+            logger.info("Duplicate block hash=%s ignored height=%s", hx, out_h)
+            return out_h
 
         try:
             result = self.chain.accept_block(block, mempool=self.mempool)
@@ -209,6 +218,16 @@ class TxRelay:
             self._requested_block.discard(hx)
             if source_peer is not None:
                 self._from_peer_block[hx] = source_peer.addr
+
+        def _authoritative_height() -> int:
+            """Height of submitted block from index; never guess from tip alone."""
+            if result.block_height is not None:
+                return int(result.block_height)
+            idx2 = self.chain.get_index(bh)
+            if idx2 is not None:
+                return int(idx2.height)
+            # Orphan buffer — no index row yet; tip is the only available signal.
+            return int(result.height)
 
         if result.orphan:
             logger.info(
@@ -236,13 +255,15 @@ class TxRelay:
                         logger.info("Requesting orphan parent hash=%s", phx)
                     except Exception:
                         logger.debug("orphan parent GETDATA failed", exc_info=True)
-            return self.chain.height
+            return _authoritative_height()
 
+        block_h = _authoritative_height()
         if result.reorg:
             logger.info(
-                "Reorg activated tip=%s height=%s disconnect=%s connect=%s",
+                "Reorg activated tip=%s tip_height=%s block_height=%s disconnect=%s connect=%s",
                 result.tip_hash.hex(),
                 result.height,
+                block_h,
                 len(result.disconnect),
                 len(result.connect),
             )
@@ -251,25 +272,31 @@ class TxRelay:
                 self._announce_block_inv(
                     ch.hex(), exclude=source_peer.addr if source_peer else None
                 )
-            return result.height
+            return block_h
 
         if result.activated:
             self.mempool.clear_included(block.transactions[1:])
-            logger.info("Accepted block hash=%s height=%s", hx, result.height)
+            logger.info(
+                "Accepted block hash=%s height=%s tip_height=%s",
+                hx,
+                block_h,
+                result.height,
+            )
             self._announce_block_inv(hx, exclude=source_peer.addr if source_peer else None)
-            return result.height
+            return block_h
 
         if result.side_chain:
             logger.info(
-                "Side-chain block accepted hash=%s (active tip unchanged height=%s)",
+                "Side-chain block accepted hash=%s height=%s (active tip unchanged tip_height=%s)",
                 hx,
+                block_h,
                 result.height,
             )
             # Still announce so peers can discover the fork; dedup prevents storms
             self._announce_block_inv(hx, exclude=source_peer.addr if source_peer else None)
-            return result.height
+            return block_h
 
-        return result.height
+        return block_h
 
     def broadcast_block(self, block: Block, *, source_peer: Peer | None = None) -> int:
         return self.accept_block(block, source_peer=source_peer)
@@ -388,7 +415,13 @@ class TxRelay:
             if txid_hex in self._known_tx and self.mempool.get(txid_hex) is not None:
                 return
         try:
-            self.mempool.add(tx, self._get_utxo(), height=max(self._get_height(), 0))
+            net = getattr(self.chain, "network", None) if self.chain else None
+            self.mempool.add(
+                tx,
+                self._get_utxo(),
+                height=max(self._get_height(), 0),
+                network=net,
+            )
         except MempoolError as e:
             if "duplicate" in str(e).lower():
                 self.mark_known(txid_hex)

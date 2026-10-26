@@ -1300,7 +1300,7 @@ def _page_shell(
         <div class="stat"><div class="lbl">Tip</div><div class="val" id="nTip">{n_tip}</div><div class="hint" id="nTipHash">canonical</div></div>
         <div class="stat"><div class="lbl">Peers</div><div class="val" id="nPeers">{n_peers}</div><div class="hint" id="nPeersHint">{n_peers_hint}</div></div>
         <div class="stat"><div class="lbl">Known addrs</div><div class="val" id="nAddrs">{n_addrs}</div><div class="hint">AddrDB</div></div>
-        <div class="stat"><div class="lbl">Orphans</div><div class="val" id="nOrphans">{n_orphans}</div><div class="hint">voided rounds</div></div>
+        <div class="stat"><div class="lbl">Voided pool rounds</div><div class="val" id="nOrphans">{n_orphans}</div><div class="hint" title="Lifetime-time count of pool ledger rounds marked orphaned after a confirmed non-canonical hash. Not the node's in-memory orphan pool and not explorer side-chain blocks.">ledger voids (≠ chain orphans)</div></div>
         <div class="stat"><div class="lbl">Stale immature</div><div class="val" id="nStale">{n_stale}</div><div class="hint">past maturity depth</div></div>
       </div>
       <div id="peersList" class="muted" style="margin-top:.65rem">{peers_html}</div>

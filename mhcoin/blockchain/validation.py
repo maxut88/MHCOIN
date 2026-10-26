@@ -8,6 +8,11 @@ from mhcoin.blockchain.block import Block
 from mhcoin.blockchain.merkle import verify_merkle_root
 from mhcoin.consensus.block_reward import get_block_subsidy
 from mhcoin.consensus.difficulty import bits_to_target
+from mhcoin.consensus.params import (
+    COINBASE_MATURITY,
+    coinbase_maturity_enforced,
+    is_coinbase_mature,
+)
 from mhcoin.consensus.proof_of_work import verify_proof_of_work
 from mhcoin.constants import (
     MAX_BLOCK_SIZE,
@@ -24,10 +29,21 @@ class ValidationError(Exception):
     pass
 
 
-def validate_transaction(tx: Transaction, utxo: UTXOSet, *, height: int) -> int:
+def validate_transaction(
+    tx: Transaction,
+    utxo: UTXOSet,
+    *,
+    height: int,
+    coinbase_maturity_activation: int = 0,
+    coinbase_maturity: int = COINBASE_MATURITY,
+) -> int:
     """
     Validate tx against UTXO set (do not apply).
     Returns fee in satoshis (0 for coinbase).
+
+    ``height`` is the spend height (block that would include this tx).
+    Coinbase maturity is enforced only when
+    ``coinbase_maturity_activation > 0`` and ``height >= activation``.
     """
     if not tx.inputs or not tx.outputs:
         raise ValidationError("empty inputs/outputs")
@@ -42,6 +58,10 @@ def validate_transaction(tx: Transaction, utxo: UTXOSet, *, height: int) -> int:
         # Exact coinbase ceiling (subsidy + fees) is enforced in validate_block.
         return 0
 
+    enforce_maturity = coinbase_maturity_enforced(
+        spend_height=height, activation_height=coinbase_maturity_activation
+    )
+
     # Normal txs cannot mint: every input must spend an existing UTXO.
     input_values: list[int] = []
     seen: set[str] = set()
@@ -55,6 +75,17 @@ def validate_transaction(tx: Transaction, utxo: UTXOSet, *, height: int) -> int:
         entry = utxo.get(op)
         if entry is None:
             raise ValidationError(f"missing UTXO {op.key()}")
+        if enforce_maturity and entry.coinbase:
+            if not is_coinbase_mature(
+                coinbase_height=int(entry.height),
+                spend_height=int(height),
+                maturity=int(coinbase_maturity),
+            ):
+                raise ValidationError(
+                    f"immature coinbase {op.key()} "
+                    f"(created={entry.height}, spend={height}, "
+                    f"need>={entry.height + coinbase_maturity})"
+                )
         if not verify_input(tx, i, entry.output.script_pubkey, entry.output.value):
             raise ValidationError(f"bad signature on input {i}")
         input_values.append(entry.output.value)
@@ -81,6 +112,8 @@ def validate_block(
     median_time_past: int | None = None,
     pow_limit: int | None = None,
     now: int | None = None,
+    coinbase_maturity_activation: int = 0,
+    coinbase_maturity: int = COINBASE_MATURITY,
 ) -> None:
     """
     Full consensus checks. Does not mutate UTXO.
@@ -154,7 +187,13 @@ def validate_block(
             if op.key() in spent_in_block:
                 raise ValidationError(f"double-spend in block {op.key()}")
             spent_in_block.add(op.key())
-        fees += validate_transaction(tx, utxo, height=height)
+        fees += validate_transaction(
+            tx,
+            utxo,
+            height=height,
+            coinbase_maturity_activation=coinbase_maturity_activation,
+            coinbase_maturity=coinbase_maturity,
+        )
 
     subsidy = get_block_subsidy(height)
     coinbase = block.transactions[0]
